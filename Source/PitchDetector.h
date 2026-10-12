@@ -29,9 +29,11 @@ public:
 
     void prepare (double sampleRate, int /*blockSize*/)
     {
-        // At high sample rates (88.2 kHz and up) the detector looks at every 2nd/4th sample.
-        // Pitch finding does not need the extra detail, and it makes the work 4-16x smaller.
-        dec = (sampleRate > 60000.0) ? std::max(1, static_cast<int>(std::lround(sampleRate / 48000.0))) : 1;
+        // Run the detector near 24 kHz regardless of host rate. A box-filtered
+        // decimation keeps the 70–1500 Hz fundamental range comfortably below
+        // Nyquist while cutting the quadratic YIN work by roughly 4x at 48 kHz.
+        // The shifter itself still runs at the full host sample rate.
+        dec = std::max(1, static_cast<int>(std::lround(sampleRate / 24000.0)));
         sr  = sampleRate / static_cast<double>(dec);        // the rate the detector works at
         accum = 0.0f;
         accCount = 0;

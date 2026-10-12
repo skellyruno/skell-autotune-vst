@@ -13,7 +13,7 @@
 // Layout (top to bottom):
 //   - Top bar: logo, title, Enabled switch
 //   - Radar visualizer with the skull (centre), skeleton arms on either side,
-//     In/Out gain (left), Retune Speed + Humanize (right)
+//     Retune Speed + Humanize (right)
 //   - Key, scale buttons, Note Stabilizer / Formant switches, Voice Range
 //   - Pitch heatmap + piano keyboard (the piano keys are the scale)
 //   - Monitor panel: level meters, pitch readouts, pitch reference
@@ -87,12 +87,11 @@ private:
 
     // Knobs
     juce::Slider speedKnob, humanizeKnob;
-    juce::Slider inputGainKnob, outputGainKnob;
     juce::Slider referenceFreqKnob;
 
     // Labels for knobs
     juce::Label speedLabel, humanizeLabel;
-    juce::Label inputGainLabel, outputGainLabel, referenceFreqLabel;
+    juce::Label referenceFreqLabel;
 
     // Buttons
     juce::TextButton majorBtn {"Major"};
@@ -120,7 +119,7 @@ private:
 
     std::unique_ptr<SliderAttach> speedAtt;
     std::unique_ptr<SliderAttach> humanizeAtt;
-    std::unique_ptr<SliderAttach> inputGainAtt, outputGainAtt, referenceFreqAtt;
+    std::unique_ptr<SliderAttach> referenceFreqAtt;
     std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, enableAtt;
     std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt;
     std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
@@ -133,9 +132,6 @@ private:
     int   displayDetectedMidi    = -1;
     int   displayTargetMidi      = -1;
     float displayInputLevel      = 0.0f;
-    float displayOutputLevel     = 0.0f;
-    float meterIn                = 0.0f;   // smoothed 0..1 meter positions
-    float meterOut               = 0.0f;
 
     // Pitch heatmap history (scrolling)
     static constexpr int kHeatmapWidth = 200;

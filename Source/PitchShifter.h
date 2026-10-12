@@ -16,11 +16,11 @@ public:
 
     // The fixed delay, measured in periods of the LOWEST pitch being tracked. It used to be 2.5:
     // the shifter waited until real audio had arrived for the whole length of every grain.
-    // Now it only waits for part of it and "guesses" the rest by repeating the previous
+    // Now it waits for a smaller fraction of a period and "guesses" the rest by repeating the previous
     // cycle of the voice (see processChunk), which is why a much smaller number works.
-    // Measured on realistic voices: 1.6 keeps the output within about 0.4% of the exact result;
-    // going below about 1.4 starts to cost real quality.
-    static constexpr double kLatencyPeriods = 1.6;
+    // Measured on realistic voices: 1.35 is a latency/quality compromise;
+    // going much lower starts to cost real quality.
+    static constexpr double kLatencyPeriods = 1.35;
     static constexpr double kMaxHz = 1500.0;
 
     void prepare (double sampleRate, int /*blockSize*/)

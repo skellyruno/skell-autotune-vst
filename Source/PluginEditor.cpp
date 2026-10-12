@@ -64,8 +64,6 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
 
     setupKnob(humanizeKnob, humanizeLabel, "HUMANIZE",
               "Keeps some of the natural pitch movement of the voice.");
-    setupKnob(inputGainKnob, inputGainLabel, "IN GAIN", "Level going into the tuner (dB).");
-    setupKnob(outputGainKnob, outputGainLabel, "OUT GAIN", "Level coming out of the plugin (dB).");
     setupKnob(referenceFreqKnob, referenceFreqLabel, "PITCH REF",
               "What frequency the note A4 is tuned to. 440 Hz is the standard.");
     referenceFreqKnob.setTextValueSuffix(" Hz");
@@ -73,8 +71,6 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
 
     speedAtt     = std::make_unique<SliderAttach>(apvts, "retune",    speedKnob);
     humanizeAtt  = std::make_unique<SliderAttach>(apvts, "humanize",  humanizeKnob);
-    inputGainAtt = std::make_unique<SliderAttach>(apvts, "inputGain", inputGainKnob);
-    outputGainAtt= std::make_unique<SliderAttach>(apvts, "outputGain",outputGainKnob);
     referenceFreqAtt = std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
 
     // --- Scale buttons: pick a scale and the piano keys light up for it ---
@@ -164,8 +160,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     setResizeLimits(468, 372, 1170, 930);
     if (auto* c = getConstrainer())
         c->setFixedAspectRatio(static_cast<double>(kDesignW) / static_cast<double>(kDesignH));
-    setSize(juce::roundToInt(static_cast<float>(kDesignW) * 0.75f),
-            juce::roundToInt(static_cast<float>(kDesignH) * 0.75f));
+    setSize(683, 540);
 
     startTimerHz(30);
 }
@@ -284,18 +279,6 @@ void HumHouseVocalTuneEditor::timerCallback()
     displayDetectedMidi    = proc.getDetectedMidiNote();
     displayTargetMidi      = proc.getTargetMidiNote();
     displayInputLevel      = proc.getInputLevel();
-    displayOutputLevel     = proc.getOutputLevel();
-
-    // Meters: dB scale (-48 dB .. 0 dB), instant attack, smooth release
-    auto toMeter = [](float level)
-    {
-        const float db = juce::Decibels::gainToDecibels(level, -60.0f);
-        return juce::jlimit(0.0f, 1.0f, (db + 48.0f) / 48.0f);
-    };
-    const float inTarget  = toMeter(displayInputLevel);
-    const float outTarget = toMeter(displayOutputLevel);
-    meterIn  = inTarget  > meterIn  ? inTarget  : meterIn  * 0.88f + inTarget  * 0.12f;
-    meterOut = outTarget > meterOut ? outTarget : meterOut * 0.88f + outTarget * 0.12f;
 
     // Pitch heatmap
     heatmapDetected[static_cast<size_t>(heatmapWriteIdx)] = displayDetectedHz;
@@ -399,9 +382,6 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
 
     // --- Main panel and its two side panels ---
     panel(8.0f, 52.0f, 764.0f, 310.0f, 8.0f, Palette::bgPanel.withAlpha(0.9f), Palette::accentDim);
-
-    panel(12.0f, 92.0f, 64.0f, 190.0f, 6.0f, Palette::bgSection.withAlpha(0.8f), Palette::accentDeep);
-    caption("LEVELS", 12, 98, 64, juce::Justification::centred);
 
     panel(488.0f, 56.0f, 280.0f, 298.0f, 10.0f, Palette::bgSection.withAlpha(0.6f), Palette::accentDeep);
     caption("TUNING", 502, 63, 120);
@@ -542,24 +522,6 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
     panel(604.0f, 406.0f, 168.0f, 198.0f, 8.0f, Palette::bgPanel, Palette::accentDim);
     caption("MONITOR", 614, 411, 100);
 
-    auto drawMeter = [&](const juce::String& label, float value, float y)
-    {
-        g.setFont(juce::Font(juce::FontOptions(11.5f)));
-        g.setColour(Palette::textDim);
-        g.drawText(label, 614, static_cast<int>(y) - 3, 30, 14, juce::Justification::centredLeft, false);
-
-        const float mx = 646.0f, mw = 118.0f, mh = 8.0f;
-        g.setColour(Palette::bgSection);
-        g.fillRoundedRectangle(mx, y, mw, mh, 3.0f);
-
-        juce::ColourGradient grad(Palette::meterGreen, mx, 0.0f, Palette::meterRed, mx + mw, 0.0f, false);
-        grad.addColour(0.7, Palette::meterYellow);
-        g.setGradientFill(grad);
-        g.fillRoundedRectangle(mx, y, mw * juce::jlimit(0.0f, 1.0f, value), mh, 3.0f);
-    };
-    drawMeter("IN",  meterIn,  430.0f);
-    drawMeter("OUT", meterOut, 444.0f);
-
     auto row = [&](const juce::String& label, const juce::String& value, int y)
     {
         g.setFont(juce::Font(juce::FontOptions(12.0f)));
@@ -576,16 +538,16 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
                            / juce::jmax(1.0, proc.getSampleRate());
 
     row("Detected",   detNote.isEmpty() ? juce::String("--")
-                                        : detNote + "  " + juce::String(juce::roundToInt(displayDetectedHz)) + " Hz", 462);
+                                        : detNote + "  " + juce::String(juce::roundToInt(displayDetectedHz)) + " Hz", 430);
     row("Target",     tgtNote.isEmpty() ? juce::String("--")
-                                        : tgtNote + "  " + juce::String(juce::roundToInt(displayTargetHz)) + " Hz", 480);
+                                        : tgtNote + "  " + juce::String(juce::roundToInt(displayTargetHz)) + " Hz", 448);
     row("Correction", (detNote.isEmpty() ? juce::String("--")
                                          : (displayCorrectionCents >= 0.0f ? "+" : "")
-                                           + juce::String(juce::roundToInt(displayCorrectionCents)) + " cents"), 498);
-    row("Latency",    juce::String(latencyMs, 1) + " ms", 516);
+                                           + juce::String(juce::roundToInt(displayCorrectionCents)) + " cents"), 466);
+    row("Latency",    juce::String(latencyMs, 1) + " ms", 484);
 
     g.setColour(Palette::accentDeep);
-    g.drawLine(614.0f, 538.0f, 762.0f, 538.0f, 1.0f);
+    g.drawLine(614.0f, 506.0f, 762.0f, 506.0f, 1.0f);
 
     {
         const float refHz = *proc.getAPVTS().getRawParameterValue("referenceFreq");
@@ -703,16 +665,11 @@ void HumHouseVocalTuneEditor::resized()
 
     // Small caps labels never get smaller than 9 px
     const juce::Font labelFont(juce::FontOptions(juce::jmax(9.0f, 11.0f * s)));
-    for (auto* l : { &speedLabel, &humanizeLabel, &inputGainLabel, &outputGainLabel,
-                     &referenceFreqLabel, &rootNoteLabel })
+    for (auto* l : { &speedLabel, &humanizeLabel, &referenceFreqLabel, &rootNoteLabel })
         l->setFont(labelFont);
 
     // --- Top bar ---
     enableBtn.setBounds(R(kDesignW - 112, 8, 98, 28));
-
-    // --- Left column: input / output gain ---
-    place(inputGainKnob,  inputGainLabel,  18, 116, 52);
-    place(outputGainKnob, outputGainLabel, 18, 194, 52);
 
     // --- Right panel: big Retune Speed knob, with Humanize underneath ---
     place(speedKnob,    speedLabel,    553,  78, 150);
