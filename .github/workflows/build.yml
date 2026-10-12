@@ -30,8 +30,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifacts
           $vst3 = "build\HumHouseVocalTune_artefacts\Release\VST3\SkellyTune.vst3"
-          $standalone = "build\HumHouseVocalTune_artefacts\Release\Standalone\SkellyTune.exe"
-          Compress-Archive -Path $vst3,$standalone -DestinationPath "artifacts\SkellyTune-Windows-x64.zip"
+          Compress-Archive -Path $vst3 -DestinationPath "artifacts\SkellyTune-Windows-x64.zip"
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
