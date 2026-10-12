@@ -12,11 +12,10 @@
 //
 // Layout (top to bottom):
 //   - Top bar: logo, title, Enabled switch
-//   - Radar visualizer with the skull (centre), skeleton arms on either side,
-//     Retune Speed + Humanize (right)
+//   - Centered radar/skull and skeleton, flanked by Retune Speed (left) and Humanize (right)
+//   - Compact monitor strip below the radar, with detected/target/correction/latency
 //   - Key, scale buttons, Note Stabilizer / Formant switches, Voice Range
-//   - Pitch heatmap + piano keyboard (the piano keys are the scale)
-//   - Monitor panel: pitch readouts and pitch reference
+//   - Pitch heatmap + piano keyboard, with pitch reference at lower right
 
 class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor,
                                 public juce::AudioProcessorParameter::Listener,

@@ -19,14 +19,14 @@ public:
 
     static constexpr int kMaxChannels = 2;
 
-    // Voice range = the lowest note the tuner follows. The delay is about 1.7 periods of
-    // that note, so a higher floor means less delay (the same at every sample rate):
-    //    70 Hz -> 23.0 ms    80 Hz -> 20.2 ms    100 Hz -> 16.2 ms
-    //   130 Hz -> 12.5 ms   180 Hz ->  9.1 ms
-    // Notes below the floor are not tuned; they pass through untouched.
+    // Voice range = the lowest note the tuner follows. The delay is approximately half a
+    // period plus 8 samples. At 44.1/48 kHz this is about:
+    //    70 Hz -> 7.3 ms     80 Hz -> 6.4 ms    100 Hz -> 5.2 ms
+    //   130 Hz -> 4.0 ms    180 Hz -> 3.0 ms
+    // The low-latency trade-off is explicit: notes below the selected floor are not tuned.
     static constexpr int   kNumRanges    = 5;
     static constexpr float kRangeMinHz[kNumRanges] = { 70.0f, 80.0f, 100.0f, 130.0f, 180.0f };
-    static constexpr int   kDefaultRange = 1;
+    static constexpr int   kDefaultRange = 4;
 
     void prepare (double sampleRate, int blockSize)
     {
@@ -134,7 +134,7 @@ public:
             return;
         }
 
-        // The correction is refreshed every `hop` samples (about 4 ms) instead of once
+        // The correction is refreshed every `hop` samples (about 2.5 ms) instead of once
         // per DAW buffer, and each piece of audio is shifted straight after the pitch
         // of that piece was measured. That keeps the correction in step with the voice.
         const int   hop  = detector.getHopSize();

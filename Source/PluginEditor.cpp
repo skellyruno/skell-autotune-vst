@@ -14,9 +14,9 @@ constexpr bool isBlackKey (int idx)
 }
 
 // Radar geometry, in design coordinates (780 x 620)
-constexpr float kCx = 282.0f;
+constexpr float kCx = 390.0f;
 constexpr float kCy = 206.0f;
-constexpr float kR  = 128.0f;
+constexpr float kR  = 116.0f;
 
 // Shrinks an image in steps of at most 2x, which keeps the result smooth
 juce::Image scaledImage (const juce::Image& src, int w, int h)
@@ -107,17 +107,17 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     enableAtt     = std::make_unique<ButtonAttach>(apvts, "enabled",         enableBtn);
 
     // --- Voice range: the lowest note the tuner follows. Lower notes need more delay. ---
-    rangeBox.addItemList(juce::StringArray { "Bass - 23 ms", "Deep - 20 ms", "Standard - 16 ms",
-                                              "Fast - 12 ms", "Fastest - 9 ms" }, 1);
-    rangeBox.setSelectedItemIndex(1, juce::dontSendNotification);
+    rangeBox.addItemList(juce::StringArray { "Bass - 7.3 ms", "Deep - 6.4 ms", "Standard - 5.2 ms",
+                                              "Fast - 4.0 ms", "Fastest - 3.0 ms" }, 1);
+    rangeBox.setSelectedItemIndex(humtune::AutoTuneEngine::kDefaultRange, juce::dontSendNotification);
     rangeBox.setTooltip("Voice range: the lowest note the tuner can follow.\n"
-                        "Lower notes need more delay.\n"
-                        "Bass: 70 Hz and up (about 23 ms)\n"
-                        "Deep: 80 Hz and up (about 20 ms)\n"
-                        "Standard: 100 Hz and up (about 16 ms)\n"
-                        "Fast: 130 Hz and up (about 12 ms)\n"
-                        "Fastest: 180 Hz and up (about 9 ms)\n"
-                        "Notes below the range are not tuned.");
+                        "Lower notes require a longer analysis/grain window.\n"
+                        "Bass: 70 Hz and up (about 7.3 ms)\n"
+                        "Deep: 80 Hz and up (about 6.4 ms)\n"
+                        "Standard: 100 Hz and up (about 5.2 ms)\n"
+                        "Fast: 130 Hz and up (about 4.0 ms)\n"
+                        "Fastest: 180 Hz and up (about 3.0 ms)\n"
+                        "Notes below the selected range are not tuned. Latency is approximate and depends on sample rate.");
     addAndMakeVisible(rangeBox);
     rangeAtt = std::make_unique<ComboAttach>(apvts, "range", rangeBox);
 
@@ -251,7 +251,7 @@ void HumHouseVocalTuneEditor::rebuildScaledArt()
     // Arm + hand: one copy, and a mirrored copy for the right-hand side
     if (armImg.isValid())
     {
-        const int armH = juce::jmax(1, juce::roundToInt(270.0f * s));
+        const int armH = juce::jmax(1, juce::roundToInt(250.0f * s));
         const int armW = juce::jmax(1, juce::roundToInt(static_cast<float>(armH)
                                 * static_cast<float>(armImg.getWidth())
                                 / static_cast<float>(armImg.getHeight())));
@@ -380,11 +380,10 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
         g.drawText("v1.0.0", kDesignW - 190, 0, 66, 44, juce::Justification::centredRight, false);
     }
 
-    // --- Main panel and its two side panels ---
+    // --- Main panel: controls flank the centered skeleton/radar ---
     panel(8.0f, 52.0f, 764.0f, 310.0f, 8.0f, Palette::bgPanel.withAlpha(0.9f), Palette::accentDim);
-
-    panel(488.0f, 56.0f, 280.0f, 298.0f, 10.0f, Palette::bgSection.withAlpha(0.6f), Palette::accentDeep);
-    caption("TUNING", 502, 63, 120);
+    panel(18.0f, 66.0f, 132.0f, 250.0f, 10.0f, Palette::bgSection.withAlpha(0.62f), Palette::accentDeep);
+    panel(630.0f, 66.0f, 132.0f, 250.0f, 10.0f, Palette::bgSection.withAlpha(0.62f), Palette::accentDeep);
 
     // Corner brackets on the main panel
     {
@@ -465,7 +464,7 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
     }
 
     // --- Pitch history strip ---
-    const juce::Rectangle<int> heatArea(20, 406, 574, 34);
+    const juce::Rectangle<int> heatArea(20, 406, 740, 34);
     g.setColour(Palette::bgSection);
     g.fillRoundedRectangle(heatArea.toFloat(), 4.0f);
     g.setColour(Palette::accentDeep);
@@ -518,49 +517,46 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
         g.drawText("Target", 92, 409, 50, 12, juce::Justification::centredLeft, false);
     }
 
-    // --- Monitor panel: meters, readouts, reference ---
-    panel(604.0f, 406.0f, 168.0f, 198.0f, 8.0f, Palette::bgPanel, Palette::accentDim);
-    caption("MONITOR", 614, 411, 100);
-
-    auto row = [&](const juce::String& label, const juce::String& value, int y)
-    {
-        g.setFont(juce::Font(juce::FontOptions(12.0f)));
-        g.setColour(Palette::textDim);
-        g.drawText(label, 614, y, 62, 16, juce::Justification::centredLeft, false);
-        g.setFont(juce::Font(juce::FontOptions(13.0f)));
-        g.setColour(Palette::textValue);
-        g.drawText(value, 676, y, 88, 16, juce::Justification::centredRight, false);
-    };
+    // --- Central monitor strip below the circular tuner ---
+    panel(158.0f, 323.0f, 464.0f, 36.0f, 6.0f, Palette::bgSection, Palette::accentDim);
 
     const juce::String detNote = HumHouseVocalTuneProcessor::midiNoteToName(displayDetectedMidi);
     const juce::String tgtNote = HumHouseVocalTuneProcessor::midiNoteToName(displayTargetMidi);
     const double latencyMs = 1000.0 * static_cast<double>(proc.getLatencySamples())
                            / juce::jmax(1.0, proc.getSampleRate());
+    const juce::String detValue = detNote.isEmpty() ? juce::String("--")
+        : detNote + " " + juce::String(juce::roundToInt(displayDetectedHz)) + "Hz";
+    const juce::String targetValue = tgtNote.isEmpty() ? juce::String("--")
+        : tgtNote + " " + juce::String(juce::roundToInt(displayTargetHz)) + "Hz";
+    const juce::String correctionValue = detNote.isEmpty() ? juce::String("--")
+        : (displayCorrectionCents >= 0.0f ? "+" : "")
+            + juce::String(juce::roundToInt(displayCorrectionCents)) + " cents";
+    const juce::String latencyValue = juce::String(latencyMs, 1) + " ms";
 
-    row("Detected",   detNote.isEmpty() ? juce::String("--")
-                                        : detNote + "  " + juce::String(juce::roundToInt(displayDetectedHz)) + " Hz", 430);
-    row("Target",     tgtNote.isEmpty() ? juce::String("--")
-                                        : tgtNote + "  " + juce::String(juce::roundToInt(displayTargetHz)) + " Hz", 448);
-    row("Correction", (detNote.isEmpty() ? juce::String("--")
-                                         : (displayCorrectionCents >= 0.0f ? "+" : "")
-                                           + juce::String(juce::roundToInt(displayCorrectionCents)) + " cents"), 466);
-    row("Latency",    juce::String(latencyMs, 1) + " ms", 484);
-
-    g.setColour(Palette::accentDeep);
-    g.drawLine(614.0f, 506.0f, 762.0f, 506.0f, 1.0f);
-
+    const juce::String labels[] = { "DETECTED", "TARGET", "CORRECTION", "LATENCY" };
+    const juce::String values[] = { detValue, targetValue, correctionValue, latencyValue };
+    for (int i = 0; i < 4; ++i)
     {
-        const float refHz = *proc.getAPVTS().getRawParameterValue("referenceFreq");
-        g.setFont(juce::Font(juce::FontOptions(12.5f)));
+        const int x = 166 + i * 114;
+        g.setFont(juce::Font(juce::FontOptions(9.5f).withStyle("Bold")));
         g.setColour(Palette::textDim);
-        g.drawText("A4 =", 614, 556, 40, 16, juce::Justification::centredLeft, false);
-        g.setFont(juce::Font(juce::FontOptions(14.0f).withStyle("Bold")));
+        g.drawText(labels[i], x, 325, 108, 11, juce::Justification::centred, false);
+        g.setFont(juce::Font(juce::FontOptions(11.5f).withStyle("Bold")));
         g.setColour(Palette::textValue);
-        g.drawText(juce::String(refHz, 1) + " Hz", 614, 572, 90, 18, juce::Justification::centredLeft, false);
+        g.drawText(values[i], x, 337, 108, 17, juce::Justification::centred, false);
     }
 
-    // --- Piano keyboard backing ---
-    panel(20.0f, 446.0f, 574.0f, 158.0f, 6.0f, Palette::bgPanel, Palette::accentDim);
+    // Reference value sits beneath the small pitch-reference control in the right column.
+    {
+        const float refHz = *proc.getAPVTS().getRawParameterValue("referenceFreq");
+        g.setFont(juce::Font(juce::FontOptions(10.5f).withStyle("Bold")));
+        g.setColour(Palette::textValue);
+        g.drawText("A4 " + juce::String(refHz, 1) + " Hz", 638, 301, 116, 13,
+                   juce::Justification::centred, false);
+    }
+
+    // --- Full-width piano keyboard backing ---
+    panel(20.0f, 446.0f, 740.0f, 158.0f, 6.0f, Palette::bgPanel, Palette::accentDim);
 
 }
 
@@ -671,9 +667,9 @@ void HumHouseVocalTuneEditor::resized()
     // --- Top bar ---
     enableBtn.setBounds(R(kDesignW - 112, 8, 98, 28));
 
-    // --- Right panel: big Retune Speed knob, with Humanize underneath ---
-    place(speedKnob,    speedLabel,    553,  78, 150);
-    place(humanizeKnob, humanizeLabel, 586, 254,  84);
+    // --- Symmetrical side controls: Retune Speed left, Humanize right ---
+    place(speedKnob,    speedLabel,     26, 112, 116);
+    place(humanizeKnob, humanizeLabel, 638, 112, 116);
 
     // --- Key, scale buttons, switches ---
     const int rowY = 370;
@@ -689,15 +685,15 @@ void HumHouseVocalTuneEditor::resized()
     formantBtn.setBounds(R(534, rowY, 92, rowH));
     rangeBox.setBounds(R(632, rowY, 134, rowH));
 
-    // --- Pitch reference knob (monitor panel) ---
-    place(referenceFreqKnob, referenceFreqLabel, 714, 540, 50);
+    // --- Pitch reference knob in the right-hand control column ---
+    place(referenceFreqKnob, referenceFreqLabel, 684, 242, 44);
 
     // --- Piano keys ---
     const int pianoX = 28;
     const int pianoY = 454;
-    const int whiteW = 78;
+    const int whiteW = 100;
     const int whiteH = 142;
-    const int blackW = 48;
+    const int blackW = 58;
     const int blackH = 86;
 
     const int whiteIdx[] = { 0, 2, 4, 5, 7, 9, 11 };
@@ -731,7 +727,7 @@ void HumHouseVocalTuneEditor::resized()
     {
         const int w = armLeftView.image.getWidth();
         const int h = armLeftView.image.getHeight();
-        const int top = juce::roundToInt(62.0f * s);
+        const int top = juce::roundToInt(68.0f * s);
         armLeftView.setBounds(juce::roundToInt((kCx - 156.0f) * s) - w / 2, top, w, h);
         armRightView.setBounds(juce::roundToInt((kCx + 156.0f) * s) - w / 2, top, w, h);
         armLeftView.opacity  = 0.9f;

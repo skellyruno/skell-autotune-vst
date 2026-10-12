@@ -65,7 +65,7 @@ HumHouseVocalTuneProcessor::createParameterLayout()
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"formantPreserve", 1}, "Formant Preserve", true));
 
-    // Voice range: the lowest note the tuner follows. Lower notes need more delay.
+    // Voice range: the lowest note the tuner follows. Lower notes require more shifter delay.
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::AutoTuneEngine::kNumRanges - 1,
         humtune::AutoTuneEngine::kDefaultRange));

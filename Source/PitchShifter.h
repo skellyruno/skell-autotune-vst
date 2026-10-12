@@ -14,13 +14,13 @@ class PitchShifter
 public:
     static constexpr double kMinHz = 70.0;       // lowest pitch ever supported (buffers are sized for it)
 
-    // The fixed delay, measured in periods of the LOWEST pitch being tracked. It used to be 2.5:
-    // the shifter waited until real audio had arrived for the whole length of every grain.
-    // Now it waits for a smaller fraction of a period and "guesses" the rest by repeating the previous
-    // cycle of the voice (see processChunk), which is why a much smaller number works.
-    // Measured on realistic voices: 1.35 is a latency/quality compromise;
-    // going much lower starts to cost real quality.
-    static constexpr double kLatencyPeriods = 1.35;
+    // The delay is half a period of the selected minimum voice frequency, plus a small
+    // interpolation guard. This is deliberately more aggressive than the old 1.35-period
+    // setting: around 3 ms at 48 kHz when the 180 Hz "Fastest" range is selected.
+    // Short windows use the previous cycle to estimate unavailable future samples, which
+    // reduces latency at the cost of some transient/grain quality on low notes.
+    // Keep this value aligned with the latency reported to the host by getLatencySamples().
+    static constexpr double kLatencyPeriods = 0.50;
     static constexpr double kMaxHz = 1500.0;
 
     void prepare (double sampleRate, int /*blockSize*/)
@@ -190,10 +190,26 @@ private:
             nextTs += hop;
         }
 
+        const bool unityBypass = isNearUnity (static_cast<float>(ratio));
         for (int i = 0; i < m; ++i)
         {
-            const size_t idx = static_cast<size_t>((outRead + i) & outMask);
-            data[i] = outRing[idx];
+            const int64_t outputIndex = outRead + i;
+            const size_t idx = static_cast<size_t>(outputIndex & outMask);
+
+            // Keep the same fixed delay while passing uncorrected/unvoiced audio as a clean
+            // delayed copy. The grain scheduler above still runs, so a later ratio change
+            // does not restart its timeline or introduce a discontinuity.
+            if (unityBypass)
+            {
+                const int64_t sourceIndex = outputIndex - latency;
+                data[i] = sourceIndex >= 0
+                        ? inRing[static_cast<size_t>(sourceIndex & inMask)]
+                        : 0.0f;
+            }
+            else
+            {
+                data[i] = outRing[idx];
+            }
             outRing[idx] = 0.0f;
         }
         outRead += m;
