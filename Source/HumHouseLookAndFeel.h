@@ -157,9 +157,13 @@ public:
         // Value text. A knob can ask to be shown on a different scale (e.g. 0..1 shown as 0..100)
         const double displayScale = static_cast<double>(slider.getProperties().getWithDefault("displayScale", 1.0));
 
+        // A knob can also show its value flipped (turn right = number goes down)
+        const bool flipped = static_cast<bool>(slider.getProperties().getWithDefault("displayFlip", false));
+        const double shownValue = flipped ? 1.0 - slider.getValue() : slider.getValue();
+
         juce::String text;
         if (displayScale != 1.0)
-            text = juce::String(juce::roundToInt(slider.getValue() * displayScale));
+            text = juce::String(juce::roundToInt(shownValue * displayScale));
         else if (slider.getTextValueSuffix().isNotEmpty())
             text = slider.getTextFromValue(slider.getValue());
         else

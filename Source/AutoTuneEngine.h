@@ -18,12 +18,15 @@ public:
     static constexpr std::array<bool, 12> kChromatic = {true,true,true,true,true,true,true,true,true,true,true,true};
 
     static constexpr int kMaxChannels = 2;
-    // The delay of the shifter is about 2.5 periods of the LOWEST pitch it must handle,
-    // so a higher floor means less delay (numbers for 48 kHz):
-    //    80 Hz -> 31.4 ms     100 Hz -> 25.2 ms  (normal)     220 Hz -> 11.5 ms  (low latency)
+
+    // Voice range = the lowest note the tuner follows. The delay is about 1.7 periods of
+    // that note, so a higher floor means less delay (the same at every sample rate):
+    //    70 Hz -> 23.0 ms    80 Hz -> 20.2 ms    100 Hz -> 16.2 ms
+    //   130 Hz -> 12.5 ms   180 Hz ->  9.1 ms
     // Notes below the floor are not tuned; they pass through untouched.
-    static constexpr float kNormalMinHz     = 100.0f;     // about G2
-    static constexpr float kLowLatencyMinHz = 220.0f;     // about A3
+    static constexpr int   kNumRanges    = 5;
+    static constexpr float kRangeMinHz[kNumRanges] = { 70.0f, 80.0f, 100.0f, 130.0f, 180.0f };
+    static constexpr int   kDefaultRange = 1;
 
     void prepare (double sampleRate, int blockSize)
     {
@@ -54,11 +57,14 @@ public:
     void setReferenceFreq   (float hz)    { referenceFreq = hz; }
     void setEnabled         (bool on)     { enabled = on; }
 
-    void setLowLatency      (bool on)
+    // Chooses the voice range (index into kRangeMinHz). Safe to call from the audio thread
+    // (no allocation). The latency changes, so the host must be told: see getLatencySamples().
+    void setVoiceRange      (int index)
     {
-        if (on == lowLatency)
+        index = std::max(0, std::min(kNumRanges - 1, index));
+        if (index == rangeIndex)
             return;
-        lowLatency = on;
+        rangeIndex = index;
         if (prepared)
             applyLatencyMode();
     }
@@ -248,7 +254,7 @@ private:
 
     void applyLatencyMode()
     {
-        const float minHz = lowLatency ? kLowLatencyMinHz : kNormalMinHz;
+        const float minHz = kRangeMinHz[rangeIndex];
 
         detector.setMinFrequency(minHz);
         for (auto& s : shifters)
@@ -323,7 +329,7 @@ private:
     bool  formantPreserve = true;
     float referenceFreq  = 440.0f;
     bool  enabled        = true;
-    bool  lowLatency     = false;
+    int   rangeIndex     = kDefaultRange;
     bool  prepared       = false;
     bool  useCustom      = false;
     std::array<bool, 12> customScale = kChromatic;

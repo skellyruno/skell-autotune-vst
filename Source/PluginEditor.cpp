@@ -58,13 +58,12 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
 
     // --- Knobs ---
     setupKnob(speedKnob, speedLabel, "RETUNE SPEED",
-              "How fast the pitch snaps to the note.\n0 = instant (hard tune), 100 = slow and natural.");
-    speedKnob.getProperties().set("displayScale", 100.0);   // show 0..1 as 0..100 (0 = fastest, 100 = slowest)
+              "How fast the pitch snaps to the note. Turn right for faster.\n0 = instant (hard tune), 100 = slow and natural.");
+    speedKnob.getProperties().set("displayScale", 100.0);   // shown as 0..100
+    speedKnob.getProperties().set("displayFlip", true);     // fully right = 0 (fastest), fully left = 100 (slowest)
 
     setupKnob(humanizeKnob, humanizeLabel, "HUMANIZE",
               "Keeps some of the natural pitch movement of the voice.");
-    setupKnob(mixKnob, mixLabel, "MIX",
-              "Blend between your original voice (0) and the tuned voice (1).");
     setupKnob(inputGainKnob, inputGainLabel, "IN GAIN", "Level going into the tuner (dB).");
     setupKnob(outputGainKnob, outputGainLabel, "OUT GAIN", "Level coming out of the plugin (dB).");
     setupKnob(referenceFreqKnob, referenceFreqLabel, "PITCH REF",
@@ -72,9 +71,8 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     referenceFreqKnob.setTextValueSuffix(" Hz");
     referenceFreqKnob.getProperties().set("hideValue", true);   // the value is shown next to the knob
 
-    speedAtt     = std::make_unique<SliderAttach>(apvts, "speed",     speedKnob);
+    speedAtt     = std::make_unique<SliderAttach>(apvts, "retune",    speedKnob);
     humanizeAtt  = std::make_unique<SliderAttach>(apvts, "humanize",  humanizeKnob);
-    mixAtt       = std::make_unique<SliderAttach>(apvts, "mix",       mixKnob);
     inputGainAtt = std::make_unique<SliderAttach>(apvts, "inputGain", inputGainKnob);
     outputGainAtt= std::make_unique<SliderAttach>(apvts, "outputGain",outputGainKnob);
     referenceFreqAtt = std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
@@ -102,18 +100,30 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     // --- Toggle buttons ---
     stabilizerBtn.setTooltip("Holds a note a little longer, so vibrato\ndoes not make the tuning jump between notes.");
     formantBtn.setTooltip("On: keeps the natural character of the voice.\nOff: robotic / chipmunk effect.");
-    lowLatBtn.setTooltip("Less delay (about 12 ms instead of 25 ms), but only\nnotes above about A3 (220 Hz) are tuned.");
     enableBtn.setTooltip("Turns the tuning on and off.");
 
     addAndMakeVisible(stabilizerBtn);
     addAndMakeVisible(formantBtn);
-    addAndMakeVisible(lowLatBtn);
     addAndMakeVisible(enableBtn);
 
     stabilizerAtt = std::make_unique<ButtonAttach>(apvts, "noteStabilizer",  stabilizerBtn);
     formantAtt    = std::make_unique<ButtonAttach>(apvts, "formantPreserve", formantBtn);
-    lowLatAtt     = std::make_unique<ButtonAttach>(apvts, "lowLatency",      lowLatBtn);
     enableAtt     = std::make_unique<ButtonAttach>(apvts, "enabled",         enableBtn);
+
+    // --- Voice range: the lowest note the tuner follows. Lower notes need more delay. ---
+    rangeBox.addItemList(juce::StringArray { "Bass - 23 ms", "Deep - 20 ms", "Standard - 16 ms",
+                                              "Fast - 12 ms", "Fastest - 9 ms" }, 1);
+    rangeBox.setSelectedItemIndex(1, juce::dontSendNotification);
+    rangeBox.setTooltip("Voice range: the lowest note the tuner can follow.\n"
+                        "Lower notes need more delay.\n"
+                        "Bass: 70 Hz and up (about 23 ms)\n"
+                        "Deep: 80 Hz and up (about 20 ms)\n"
+                        "Standard: 100 Hz and up (about 16 ms)\n"
+                        "Fast: 130 Hz and up (about 12 ms)\n"
+                        "Fastest: 180 Hz and up (about 9 ms)\n"
+                        "Notes below the range are not tuned.");
+    addAndMakeVisible(rangeBox);
+    rangeAtt = std::make_unique<ComboAttach>(apvts, "range", rangeBox);
 
     // --- Key (root note) ---
     rootNoteBox.addItemList(kNoteNames, 1);
@@ -693,7 +703,7 @@ void HumHouseVocalTuneEditor::resized()
 
     // Small caps labels never get smaller than 9 px
     const juce::Font labelFont(juce::FontOptions(juce::jmax(9.0f, 11.0f * s)));
-    for (auto* l : { &speedLabel, &humanizeLabel, &mixLabel, &inputGainLabel, &outputGainLabel,
+    for (auto* l : { &speedLabel, &humanizeLabel, &inputGainLabel, &outputGainLabel,
                      &referenceFreqLabel, &rootNoteLabel })
         l->setFont(labelFont);
 
@@ -704,10 +714,9 @@ void HumHouseVocalTuneEditor::resized()
     place(inputGainKnob,  inputGainLabel,  18, 116, 52);
     place(outputGainKnob, outputGainLabel, 18, 194, 52);
 
-    // --- Right panel: big Retune Speed knob, with Humanize and Mix underneath ---
+    // --- Right panel: big Retune Speed knob, with Humanize underneath ---
     place(speedKnob,    speedLabel,    553,  78, 150);
-    place(humanizeKnob, humanizeLabel, 536, 256,  80);
-    place(mixKnob,      mixLabel,      640, 256,  80);
+    place(humanizeKnob, humanizeLabel, 586, 254,  84);
 
     // --- Key, scale buttons, switches ---
     const int rowY = 370;
@@ -721,7 +730,7 @@ void HumHouseVocalTuneEditor::resized()
 
     stabilizerBtn.setBounds(R(394, rowY, 134, rowH));
     formantBtn.setBounds(R(534, rowY, 92, rowH));
-    lowLatBtn.setBounds(R(632, rowY, 124, rowH));
+    rangeBox.setBounds(R(632, rowY, 134, rowH));
 
     // --- Pitch reference knob (monitor panel) ---
     place(referenceFreqKnob, referenceFreqLabel, 714, 540, 50);

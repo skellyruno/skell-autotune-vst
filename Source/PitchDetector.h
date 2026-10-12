@@ -24,12 +24,17 @@ namespace humtune
 class PitchDetector
 {
 public:
-    static constexpr float kMinHz = 80.0f;     // lowest pitch we track
+    static constexpr float kMinHz = 70.0f;     // lowest pitch we can ever track (buffers are sized for it)
     static constexpr float kMaxHz = 1500.0f;   // highest pitch we track
 
     void prepare (double sampleRate, int /*blockSize*/)
     {
-        sr = sampleRate;
+        // At high sample rates (88.2 kHz and up) the detector looks at every 2nd/4th sample.
+        // Pitch finding does not need the extra detail, and it makes the work 4-16x smaller.
+        dec = (sampleRate > 60000.0) ? std::max(1, static_cast<int>(std::lround(sampleRate / 48000.0))) : 1;
+        sr  = sampleRate / static_cast<double>(dec);        // the rate the detector works at
+        accum = 0.0f;
+        accCount = 0;
 
         // Allocate once for the lowest pitch we will ever support
         const int allocTau = std::max(16, static_cast<int>(std::ceil(sr / kMinHz)));
@@ -72,22 +77,30 @@ public:
     float getMinFrequency() const { return minHz; }
 
     // Detection runs once every hopSize samples (about 4 ms)
-    int getHopSize() const { return hopSize; }
+    int getHopSize() const { return hopSize * dec; }
 
-    // Feed samples into the ring buffer.
+    // Feed samples into the ring buffer (at the detector's own, possibly reduced, rate).
     void feedSamples (const float* data, int numSamples)
     {
         if (ring.empty())
             return;
 
+        int pushed = 0;
         for (int i = 0; i < numSamples; ++i)
         {
-            ring[static_cast<size_t>(writePos)] = data[i];
+            accum += data[i];
+            if (++accCount < dec)
+                continue;
+
+            ring[static_cast<size_t>(writePos)] = accum / static_cast<float>(dec);
+            accum = 0.0f;
+            accCount = 0;
             if (++writePos >= bufLen)
                 writePos = 0;
+            ++pushed;
         }
 
-        samplesSinceDetect = std::min(samplesSinceDetect + numSamples, 1 << 24);
+        samplesSinceDetect = std::min(samplesSinceDetect + pushed, 1 << 24);
     }
 
     // Returns the detected fundamental in Hz (0 if unvoiced). Between hops it
@@ -258,7 +271,10 @@ private:
         return count > 0 ? tmp[count / 2] : 0.0f;
     }
 
-    double sr = 44100.0;
+    double sr = 44100.0;      // rate the detector works at (host rate divided by dec)
+    int dec = 1;              // decimation factor
+    float accum = 0.0f;       // running sum of the current group of input samples
+    int accCount = 0;
     int maxTau = 0, minTau = 0, integLen = 0, bufLen = 0, hopSize = 256;
     float minHz = kMinHz;
     int writePos = 0;

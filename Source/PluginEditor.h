@@ -13,8 +13,8 @@
 // Layout (top to bottom):
 //   - Top bar: logo, title, Enabled switch
 //   - Radar visualizer with the skull (centre), skeleton arms on either side,
-//     In/Out gain (left), Retune Speed + Humanize + Mix (right)
-//   - Key, scale buttons, Note Stabilizer / Formant / Low Latency switches
+//     In/Out gain (left), Retune Speed + Humanize (right)
+//   - Key, scale buttons, Note Stabilizer / Formant switches, Voice Range
 //   - Pitch heatmap + piano keyboard (the piano keys are the scale)
 //   - Monitor panel: level meters, pitch readouts, pitch reference
 
@@ -86,12 +86,12 @@ private:
     juce::Image skullSolidImg, skullHoloImg, armImg;
 
     // Knobs
-    juce::Slider speedKnob, humanizeKnob, mixKnob;
+    juce::Slider speedKnob, humanizeKnob;
     juce::Slider inputGainKnob, outputGainKnob;
     juce::Slider referenceFreqKnob;
 
     // Labels for knobs
-    juce::Label speedLabel, humanizeLabel, mixLabel;
+    juce::Label speedLabel, humanizeLabel;
     juce::Label inputGainLabel, outputGainLabel, referenceFreqLabel;
 
     // Buttons
@@ -101,8 +101,10 @@ private:
 
     juce::ToggleButton stabilizerBtn {"Note Stabilizer"};
     juce::ToggleButton formantBtn    {"Formant"};
-    juce::ToggleButton lowLatBtn     {"Low Latency"};
     juce::ToggleButton enableBtn     {"Enabled"};
+
+    // Voice range: the lowest note the tuner follows (lower notes need more delay)
+    juce::ComboBox rangeBox;
 
     // Key (root note) selector
     juce::ComboBox rootNoteBox;
@@ -117,10 +119,10 @@ private:
     using ComboAttach  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     std::unique_ptr<SliderAttach> speedAtt;
-    std::unique_ptr<SliderAttach> humanizeAtt, mixAtt;
+    std::unique_ptr<SliderAttach> humanizeAtt;
     std::unique_ptr<SliderAttach> inputGainAtt, outputGainAtt, referenceFreqAtt;
-    std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, lowLatAtt, enableAtt;
-    std::unique_ptr<ComboAttach>  rootNoteAtt;
+    std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, enableAtt;
+    std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt;
     std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
 
     // Pitch display state

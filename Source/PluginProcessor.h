@@ -80,8 +80,6 @@ private:
     juce::AudioProcessorValueTreeState apvts;
     humtune::AutoTuneEngine engine;
 
-    juce::AudioBuffer<float> dryScratch;   // dry copy used for the dry/wet mix
-
     std::atomic<float> inputLevel  { 0.0f };
     std::atomic<float> outputLevel { 0.0f };
 
@@ -95,7 +93,7 @@ private:
         int   scaleType;
         bool  stabilizer;
         bool  formantPreserve;
-        bool  lowLatency;
+        int   range;        // voice range 0..4, or -1 to leave the user's choice alone
     };
 
     static const std::vector<Preset>& getPresets();

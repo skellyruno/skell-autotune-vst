@@ -13,19 +13,20 @@ HumHouseVocalTuneProcessor::getPresets()
 {
     static const std::vector<Preset> presets =
     {
-        // name,                   speed, human, scale, stab,  formant, lowLat
-        { "Hard Snap (T-Pain)",    0.00f, 0.00f, 2,    true,  true,    false },
-        { "Sharp Correct",         0.05f, 0.00f, 0,    true,  true,    false },
-        { "Natural Correct",       0.25f, 0.15f, 0,    true,  true,    false },
-        { "Gentle Touch",          0.50f, 0.30f, 0,    true,  true,    false },
-        { "Subtle Polish",         0.70f, 0.40f, 0,    true,  true,    false },
-        { "Robotic",               0.00f, 0.00f, 2,    false, false,   false },
-        { "Live Performance",      0.15f, 0.10f, 0,    true,  true,    true  },
-        { "R&B Smooth",            0.10f, 0.05f, 1,    true,  true,    false },
-        { "Pop Vocal",             0.08f, 0.02f, 0,    true,  true,    false },
-        { "Trap Vocal",            0.00f, 0.00f, 1,    true,  true,    false },
-        { "Gospel Sustain",        0.20f, 0.10f, 0,    true,  true,    false },
-        { "Lo-Fi Drift",           0.60f, 0.50f, 2,    false, true,    false },
+        // name,                   speed, human, scale, stab,  formant, range
+        // (speed here: 0 = instant, 1 = slowest)
+        { "Hard Snap (T-Pain)",    0.00f, 0.00f, 2,    true,  true,    -1 },
+        { "Sharp Correct",         0.05f, 0.00f, 0,    true,  true,    -1 },
+        { "Natural Correct",       0.25f, 0.15f, 0,    true,  true,    -1 },
+        { "Gentle Touch",          0.50f, 0.30f, 0,    true,  true,    -1 },
+        { "Subtle Polish",         0.70f, 0.40f, 0,    true,  true,    -1 },
+        { "Robotic",               0.00f, 0.00f, 2,    false, false,   -1 },
+        { "Live Performance",      0.15f, 0.10f, 0,    true,  true,     2 },
+        { "R&B Smooth",            0.10f, 0.05f, 1,    true,  true,    -1 },
+        { "Pop Vocal",             0.08f, 0.02f, 0,    true,  true,    -1 },
+        { "Trap Vocal",            0.00f, 0.00f, 1,    true,  true,    -1 },
+        { "Gospel Sustain",        0.20f, 0.10f, 0,    true,  true,    -1 },
+        { "Lo-Fi Drift",           0.60f, 0.50f, 2,    false, true,    -1 },
     };
     return presets;
 }
@@ -38,9 +39,11 @@ HumHouseVocalTuneProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
+    // Retune Speed: the knob is turned clockwise for FASTER tuning (the number shown goes
+    // down to 0 at the far right). 1 = instant (hard tune), 0 = slowest.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"speed", 1}, "Retune Speed",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+        juce::ParameterID{"retune", 1}, "Retune Speed",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"humanize", 1}, "Humanize",
@@ -62,15 +65,13 @@ HumHouseVocalTuneProcessor::createParameterLayout()
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"formantPreserve", 1}, "Formant Preserve", true));
 
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"lowLatency", 1}, "Low Latency", false));
+    // Voice range: the lowest note the tuner follows. Lower notes need more delay.
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::AutoTuneEngine::kNumRanges - 1,
+        humtune::AutoTuneEngine::kDefaultRange));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"enabled", 1}, "Enabled", true));
-
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"mix", 1}, "Dry/Wet Mix",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"inputGain", 1}, "Input Gain",
@@ -110,13 +111,11 @@ HumHouseVocalTuneProcessor::HumHouseVocalTuneProcessor()
 // ---------------------------------------------------------------------------
 void HumHouseVocalTuneProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    engine.setLowLatency(*apvts.getRawParameterValue("lowLatency") > 0.5f);
+    engine.setVoiceRange(static_cast<int>(*apvts.getRawParameterValue("range")));
     engine.prepare(sampleRate, samplesPerBlock);
     reportedLatency = engine.getLatencySamples();
     setLatencySamples(reportedLatency);
 
-    // Scratch buffer for the dry signal (allocated here, not on the audio thread)
-    dryScratch.setSize(juce::jmax(2, getTotalNumInputChannels()), juce::jmax(1, samplesPerBlock));
 }
 
 void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
@@ -125,16 +124,15 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     juce::ScopedNoDenormals noDenormals;
 
     // Read parameters
-    float speed     = *apvts.getRawParameterValue("speed");
+    float retune    = *apvts.getRawParameterValue("retune");   // 1 = fastest
     float hum       = *apvts.getRawParameterValue("humanize");
     int   root      = static_cast<int>(*apvts.getRawParameterValue("rootNote"));
     int   scale     = static_cast<int>(*apvts.getRawParameterValue("scaleType"));
     float refFreq   = *apvts.getRawParameterValue("referenceFreq");
     bool  stab      = *apvts.getRawParameterValue("noteStabilizer") > 0.5f;
     bool  formant   = *apvts.getRawParameterValue("formantPreserve") > 0.5f;
-    bool  lowLat    = *apvts.getRawParameterValue("lowLatency") > 0.5f;
+    int   range     = static_cast<int>(*apvts.getRawParameterValue("range"));
     bool  on        = *apvts.getRawParameterValue("enabled") > 0.5f;
-    float mix       = *apvts.getRawParameterValue("mix");
     float inGainDb  = *apvts.getRawParameterValue("inputGain");
     float outGainDb = *apvts.getRawParameterValue("outputGain");
 
@@ -150,15 +148,15 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     engine.setRootNote(root);
     engine.setScaleType(scale);
-    engine.setRetuneSpeed(speed);
+    engine.setRetuneSpeed(1.0f - retune);      // the engine works in "0 = instant"
     engine.setHumanize(hum);
     engine.setReferenceFreq(refFreq);
     engine.setNoteStabilizer(stab);
     engine.setFormantPreserve(formant);
-    engine.setLowLatency(lowLat);
+    engine.setVoiceRange(range);
     engine.setEnabled(on);
 
-    // The delay depends on the Low Latency switch: tell the host when it changes
+    // The delay depends on the Voice Range: tell the host when it changes
     if (engine.getLatencySamples() != reportedLatency)
     {
         reportedLatency = engine.getLatencySamples();
@@ -184,27 +182,8 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         inputLevel.store(peak);
     }
 
-    // Keep a dry copy for the mix. The wet path is delayed by the engine's latency,
-    // so the dry copy has to be delayed by exactly the same amount to line up.
-    // (It is done every block so the delay line never holds stale audio.)
-    auto& dryBuffer = dryScratch;
-    dryBuffer.makeCopyOf(buffer, true);
-    engine.delayDry(dryBuffer);
-
     // Process autotune
     engine.process(buffer);
-
-    // Dry/wet mix
-    if (mix < 0.999f)
-    {
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-        {
-            float* wet = buffer.getWritePointer(ch);
-            const float* dry = dryBuffer.getReadPointer(ch);
-            for (int i = 0; i < buffer.getNumSamples(); ++i)
-                wet[i] = dry[i] * (1.0f - mix) + wet[i] * mix;
-        }
-    }
 
     // Output gain
     float outGain = juce::Decibels::decibelsToGain(outGainDb);
@@ -242,13 +221,14 @@ void HumHouseVocalTuneProcessor::setCurrentProgram (int index)
             param->setValueNotifyingHost(param->convertTo0to1(val));
     };
 
-    set("speed",           p.speed);
+    set("retune",          1.0f - p.speed);
     set("humanize",        p.humanize);
     set("scaleType",       static_cast<float>(p.scaleType));
     applyScaleToKeys(p.scaleType, static_cast<int>(*apvts.getRawParameterValue("rootNote")));
     set("noteStabilizer",  p.stabilizer ? 1.0f : 0.0f);
     set("formantPreserve", p.formantPreserve ? 1.0f : 0.0f);
-    set("lowLatency",      p.lowLatency ? 1.0f : 0.0f);
+    if (p.range >= 0)
+        set("range",       static_cast<float>(p.range));
 }
 
 void HumHouseVocalTuneProcessor::applyScaleToKeys (int scaleType, int root)
