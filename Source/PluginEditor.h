@@ -16,7 +16,7 @@
 //     Retune Speed + Humanize (right)
 //   - Key, scale buttons, Note Stabilizer / Formant switches, Voice Range
 //   - Pitch heatmap + piano keyboard (the piano keys are the scale)
-//   - Monitor panel: level meters, pitch readouts, pitch reference
+//   - Monitor panel: pitch readouts and pitch reference
 
 class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor,
                                 public juce::AudioProcessorParameter::Listener,
