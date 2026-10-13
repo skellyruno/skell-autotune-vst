@@ -5,6 +5,7 @@
 #include <JuceHeader.h>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace humtune
@@ -13,17 +14,19 @@ namespace humtune
 class AutoTuneEngine
 {
 public:
-    static constexpr std::array<bool, 12> kMajor     = {true,false,true,false,true,true,false,true,false,true,false,true};
-    static constexpr std::array<bool, 12> kMinor     = {true,false,true,true,false,true,false,true,true,false,true,false};
-    static constexpr std::array<bool, 12> kChromatic = {true,true,true,true,true,true,true,true,true,true,true,true};
+    static constexpr std::array<bool, 12> kMajor           = {true,false,true,false,true,true,false,true,false,true,false,true};
+    static constexpr std::array<bool, 12> kMinor           = {true,false,true,true,false,true,false,true,true,false,true,false};
+    static constexpr std::array<bool, 12> kChromatic       = {true,true,true,true,true,true,true,true,true,true,true,true};
+    static constexpr std::array<bool, 12> kHarmonicMinor   = {true,false,true,true,false,true,false,true,true,false,false,true};
+    static constexpr std::array<bool, 12> kMajorPentatonic = {true,false,true,false,true,false,false,true,false,true,false,false};
+    static constexpr std::array<bool, 12> kMinorPentatonic = {true,false,false,true,false,true,false,true,false,false,true,false};
+    static constexpr std::array<bool, 12> kBlues           = {true,false,false,true,false,true,true,true,false,false,true,false};
 
     static constexpr int kMaxChannels = 2;
 
-    // Voice range = the lowest note the tuner follows. The delay is approximately half a
-    // period plus 8 samples. At 44.1/48 kHz this is about:
-    //    70 Hz -> 7.3 ms     80 Hz -> 6.4 ms    100 Hz -> 5.2 ms
-    //   130 Hz -> 4.0 ms    180 Hz -> 3.0 ms
-    // The low-latency trade-off is explicit: notes below the selected floor are not tuned.
+    // Voice range = the lowest note the tuner follows. The low-latency TD-PSOLA shifter
+    // uses real samples and a reduced future-sample requirement. At 48 kHz, reported latency
+    // is approximately 16.6 / 14.5 / 11.7 / 9.0 / 6.6 ms for 70 / 80 / 100 / 130 / 180 Hz.
     static constexpr int   kNumRanges    = 5;
     static constexpr float kRangeMinHz[kNumRanges] = { 70.0f, 80.0f, 100.0f, 130.0f, 180.0f };
     static constexpr int   kDefaultRange = 4;
@@ -46,8 +49,8 @@ public:
     int   getLatencySamples() const { return latencySamples; }
     float getMinFrequency()   const { return detector.getMinFrequency(); }
 
-    void setRootNote        (int note)    { rootNote = note % 12; }
-    void setScaleType       (int type)    { scaleType = type; }
+    void setRootNote        (int note)    { rootNote = ((note % 12) + 12) % 12; }
+    void setScaleType       (int type)    { scaleType = juce::jlimit(0, 6, type); }
     void setRetuneSpeed     (float spd)   { retuneSpeed = spd; }
     void setAmount          (float amt)   { amount = amt; }
     void setHumanize        (float h)     { humanize = h; }
@@ -134,7 +137,7 @@ public:
             return;
         }
 
-        // The correction is refreshed every `hop` samples (about 2.5 ms) instead of once
+        // The correction is refreshed every `hop` samples (about 5 ms) instead of once
         // per DAW buffer, and each piece of audio is shifted straight after the pitch
         // of that piece was measured. That keeps the correction in step with the voice.
         const int   hop  = detector.getHopSize();
@@ -226,19 +229,14 @@ private:
         float correctionCents = 1200.0f * std::log2(targetHz / detectedHz);
         lastCorrectionCents = correctionCents;
 
-        correctionCents *= amount;               // correction depth
-        correctionCents *= (1.0f - humanize);    // humanize
+        correctionCents *= juce::jlimit(0.0f, 1.0f, amount); // correction depth
 
-        // Retune speed: time constant of a one-pole smoother on the correction
-        double timeConstant;
-        if (retuneSpeed < 0.01f)
-            timeConstant = 0.00008;     // nearly instant
-        else if (retuneSpeed < 0.1f)
-            timeConstant = 0.0003 + static_cast<double>(retuneSpeed) * 0.0005;
-        else if (retuneSpeed < 0.5f)
-            timeConstant = 0.0005 + static_cast<double>(retuneSpeed) * 0.05;
-        else
-            timeConstant = 0.02 + static_cast<double>(retuneSpeed) * 0.08;
+        // Retune Speed maps to an intuitive 0-60 ms one-pole response. Humanize adds
+        // response time instead of weakening the final correction (which would leave notes
+        // permanently flat/sharp and behave like a mix knob).
+        const double speedNorm = juce::jlimit(0.0, 1.0, static_cast<double>(retuneSpeed));
+        const double speedMs = speedNorm < 0.001 ? 0.02 : 60.0 * std::pow(speedNorm, 1.2);
+        const double timeConstant = std::max(0.00002, (speedMs + 45.0 * juce::jlimit(0.0f, 1.0f, humanize)) / 1000.0);
 
         const double coeff = std::exp(-static_cast<double>(hop) / (sr * timeConstant));
         smoothedCorrectionCents = smoothedCorrectionCents * coeff
@@ -282,36 +280,38 @@ private:
         const auto& scale = useCustom ? customScale
                           : (scaleType == 1) ? kMinor
                           : (scaleType == 2) ? kChromatic
+                          : (scaleType == 3) ? kHarmonicMinor
+                          : (scaleType == 4) ? kMajorPentatonic
+                          : (scaleType == 5) ? kMinorPentatonic
+                          : (scaleType == 6) ? kBlues
                           : kMajor;
 
-        const int nearest = static_cast<int>(std::round(midiNote));
+        // Search the nearest allowed semitone by actual distance, rather than choosing
+        // a direction from the fractional part of round(midiNote). The old logic could
+        // snap an exactly centred pitch to the wrong side because float/YIN error made
+        // a nominal tie appear microscopically flat or sharp.
+        const int centre = static_cast<int>(std::round(midiNote));
+        int bestNote = centre;
+        float bestDistance = std::numeric_limits<float>::max();
+        constexpr float tieTolerance = 0.005f; // 0.5 cent; suppress YIN jitter at exact scale midpoints
 
-        // Major / Minor are measured from the chosen Key. The piano keys (custom scale)
-        // are labelled C..B, so they are absolute and must not move with the Key.
-        const int noteInOctave = useCustom ? ((nearest % 12) + 120) % 12
-                                           : ((nearest % 12) - rootNote + 120) % 12;
-
-        if (scale[static_cast<size_t>(noteInOctave)])
-            return nearest;
-
-        for (int offset = 1; offset <= 6; ++offset)
+        for (int offset = -6; offset <= 6; ++offset)
         {
-            const int up   = (noteInOctave + offset) % 12;
-            const int down = (noteInOctave - offset + 12) % 12;
+            const int candidate = centre + offset;
+            const int pitchClass = useCustom ? ((candidate % 12) + 12) % 12
+                                             : ((candidate % 12) - rootNote + 120) % 12;
+            if (! scale[static_cast<size_t>(pitchClass)])
+                continue;
 
-            const bool upOk   = scale[static_cast<size_t>(up)];
-            const bool downOk = scale[static_cast<size_t>(down)];
-
-            if (upOk && downOk)
+            const float distance = std::abs(midiNote - static_cast<float>(candidate));
+            if (distance < bestDistance - tieTolerance
+                || (std::abs(distance - bestDistance) <= tieTolerance && candidate > bestNote))
             {
-                const float fracPart = midiNote - static_cast<float>(nearest);
-                return (fracPart >= 0.0f) ? nearest + offset : nearest - offset;
+                bestDistance = distance;
+                bestNote = candidate;
             }
-            if (upOk)   return nearest + offset;
-            if (downOk) return nearest - offset;
         }
-
-        return nearest;
+        return bestNote;
     }
 
     double sr = 44100.0;
@@ -321,7 +321,7 @@ private:
     int   rootNote       = 0;
     int   scaleType      = 0;
     float retuneSpeed    = 0.0f;
-    float amount         = 1.0f;     // full correction (the Amount knob was removed)
+    float amount         = 1.0f;     // full correction (available to the user as Amount)
     float humanize       = 0.0f;
     float sustainCents   = 60.0f;     // Note Stabilizer: small hysteresis so vibrato near a
                                       // note boundary does not make the target flip (the Sustain knob was removed)

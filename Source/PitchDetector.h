@@ -19,7 +19,7 @@ namespace humtune
 //  * The window is copied into a flat array first. The old inner loop did four
 //    integer divisions (modulo) per sample, which made it far too slow for the
 //    audio thread.
-//  * Detection runs on a short, overlapping hop (about every 2.5 ms) instead of once per
+//  * Detection runs on a short, overlapping hop (about every 5 ms) instead of once per
 //    host audio block, and silence is treated as unvoiced.
 class PitchDetector
 {
@@ -48,7 +48,7 @@ public:
         cmndBuf.assign(static_cast<size_t>(allocTau + 2), 0.0f);
 
         minTau  = std::max(2, static_cast<int>(std::floor(sr / kMaxHz)));
-        hopSize = std::max(32, static_cast<int>(sr / 400.0));
+        hopSize = std::max(32, static_cast<int>(std::lround(sr / 200.0)));
 
         setMinFrequency(kMinHz);
     }
@@ -78,7 +78,7 @@ public:
 
     float getMinFrequency() const { return minHz; }
 
-    // Detection runs once every hopSize samples (about 2.5 ms)
+    // Detection runs once every hopSize samples (about 5 ms)
     int getHopSize() const { return hopSize * dec; }
 
     // Feed samples into the ring buffer (at the detector's own, possibly reduced, rate).

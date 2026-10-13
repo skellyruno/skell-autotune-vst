@@ -85,17 +85,15 @@ private:
     juce::Image skullSolidImg, skullHoloImg, armImg;
 
     // Knobs
-    juce::Slider speedKnob, humanizeKnob;
+    juce::Slider speedKnob, humanizeKnob, amountKnob;
     juce::Slider referenceFreqKnob;
 
     // Labels for knobs
-    juce::Label speedLabel, humanizeLabel;
+    juce::Label speedLabel, humanizeLabel, amountLabel;
     juce::Label referenceFreqLabel;
 
-    // Buttons
-    juce::TextButton majorBtn {"Major"};
-    juce::TextButton minorBtn {"Minor"};
-    juce::TextButton chromBtn {"Chromatic"};
+    // Full scale set (major/minor/chromatic/harmonic minor/pentatonics/blues)
+    juce::ComboBox scaleBox;
 
     juce::ToggleButton stabilizerBtn {"Note Stabilizer"};
     juce::ToggleButton formantBtn    {"Formant"};
@@ -118,9 +116,10 @@ private:
 
     std::unique_ptr<SliderAttach> speedAtt;
     std::unique_ptr<SliderAttach> humanizeAtt;
+    std::unique_ptr<SliderAttach> amountAtt;
     std::unique_ptr<SliderAttach> referenceFreqAtt;
     std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, enableAtt;
-    std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt;
+    std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt, scaleAtt;
     std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
 
     // Pitch display state

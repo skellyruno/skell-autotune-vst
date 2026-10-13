@@ -63,35 +63,39 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     speedKnob.getProperties().set("displayFlip", true);     // fully right = 0 (fastest), fully left = 100 (slowest)
 
     setupKnob(humanizeKnob, humanizeLabel, "HUMANIZE",
-              "Keeps some of the natural pitch movement of the voice.");
+              "Slows the correction response slightly to preserve natural movement.");
+    humanizeKnob.getProperties().set("displayScale", 100.0);
+    setupKnob(amountKnob, amountLabel, "AMOUNT",
+              "How much of the detected pitch error is corrected. 100% fully corrects to the target note.");
+    amountKnob.getProperties().set("displayScale", 100.0);
     setupKnob(referenceFreqKnob, referenceFreqLabel, "PITCH REF",
               "What frequency the note A4 is tuned to. 440 Hz is the standard.");
     referenceFreqKnob.setTextValueSuffix(" Hz");
     referenceFreqKnob.getProperties().set("hideValue", true);   // the value is shown next to the knob
 
     speedAtt     = std::make_unique<SliderAttach>(apvts, "retune",    speedKnob);
-    humanizeAtt  = std::make_unique<SliderAttach>(apvts, "humanize",  humanizeKnob);
+    humanizeAtt  = std::make_unique<SliderAttach>(apvts, "humanize", humanizeKnob);
+    amountAtt    = std::make_unique<SliderAttach>(apvts, "amount", amountKnob);
     referenceFreqAtt = std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
 
-    // --- Scale buttons: pick a scale and the piano keys light up for it ---
-    auto makeScaleBtn = [this](juce::TextButton& btn, int scaleIdx, const juce::String& tip)
+    // --- Scale selector. Choosing a scale also updates the piano-key mask. ---
+    scaleBox.addItemList(juce::StringArray { "Major", "Minor", "Chromatic", "Harmonic Minor",
+                                             "Major Pentatonic", "Minor Pentatonic", "Blues" }, 1);
+    scaleBox.setSelectedItemIndex(currentScaleType(), juce::dontSendNotification);
+    scaleBox.setTooltip("Choose the allowed notes in the selected key. The piano keys update to match.");
+    addAndMakeVisible(scaleBox);
+    scaleAtt = std::make_unique<ComboAttach>(apvts, "scaleType", scaleBox);
+    scaleBox.onChange = [this]()
     {
-        btn.setClickingTogglesState(true);
-        btn.setRadioGroupId(1001);
-        btn.setToggleState(scaleIdx == 0, juce::dontSendNotification);
-        btn.setTooltip(tip);
-        btn.onClick = [this, scaleIdx]()
+        const int selectedScale = scaleBox.getSelectedItemIndex();
+        if (selectedScale >= 0)
         {
             if (auto* param = proc.getAPVTS().getParameter("scaleType"))
-                param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(scaleIdx)));
-            proc.applyScaleToKeys(scaleIdx, currentRoot());
+                param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(selectedScale)));
+            proc.applyScaleToKeys(selectedScale, currentRoot());
             repaint();
-        };
-        addAndMakeVisible(btn);
+        }
     };
-    makeScaleBtn(majorBtn, 0, "Major scale in the chosen key.\nLights the matching piano keys.");
-    makeScaleBtn(minorBtn, 1, "Minor scale in the chosen key.\nLights the matching piano keys.");
-    makeScaleBtn(chromBtn, 2, "Every note is allowed.");
 
     // --- Toggle buttons ---
     stabilizerBtn.setTooltip("Holds a note a little longer, so vibrato\ndoes not make the tuning jump between notes.");
@@ -107,16 +111,16 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     enableAtt     = std::make_unique<ButtonAttach>(apvts, "enabled",         enableBtn);
 
     // --- Voice range: the lowest note the tuner follows. Lower notes need more delay. ---
-    rangeBox.addItemList(juce::StringArray { "Bass - 7.3 ms", "Deep - 6.4 ms", "Standard - 5.2 ms",
-                                              "Fast - 4.0 ms", "Fastest - 3.0 ms" }, 1);
+    rangeBox.addItemList(juce::StringArray { "Bass - 16.6 ms", "Deep - 14.5 ms", "Standard - 11.7 ms",
+                                              "Fast - 9.0 ms", "Fastest - 6.6 ms" }, 1);
     rangeBox.setSelectedItemIndex(humtune::AutoTuneEngine::kDefaultRange, juce::dontSendNotification);
     rangeBox.setTooltip("Voice range: the lowest note the tuner can follow.\n"
                         "Lower notes require a longer analysis/grain window.\n"
-                        "Bass: 70 Hz and up (about 7.3 ms)\n"
-                        "Deep: 80 Hz and up (about 6.4 ms)\n"
-                        "Standard: 100 Hz and up (about 5.2 ms)\n"
-                        "Fast: 130 Hz and up (about 4.0 ms)\n"
-                        "Fastest: 180 Hz and up (about 3.0 ms)\n"
+                        "Bass: 70 Hz and up (about 16.6 ms)\n"
+                        "Deep: 80 Hz and up (about 14.5 ms)\n"
+                        "Standard: 100 Hz and up (about 11.7 ms)\n"
+                        "Fast: 130 Hz and up (about 9.0 ms)\n"
+                        "Fastest: 180 Hz and up (about 6.6 ms)\n"
                         "Notes below the selected range are not tuned. Latency is approximate and depends on sample rate.");
     addAndMakeVisible(rangeBox);
     rangeAtt = std::make_unique<ComboAttach>(apvts, "range", rangeBox);
@@ -284,19 +288,6 @@ void HumHouseVocalTuneEditor::timerCallback()
     heatmapDetected[static_cast<size_t>(heatmapWriteIdx)] = displayDetectedHz;
     heatmapTarget[static_cast<size_t>(heatmapWriteIdx)]   = displayTargetHz;
     heatmapWriteIdx = (heatmapWriteIdx + 1) % kHeatmapWidth;
-
-    // A scale button is lit only while the piano keys exactly match it (otherwise: custom)
-    const int scaleVal = currentScaleType();
-    const int root     = currentRoot();
-    bool keysMatch = true;
-    for (int i = 0; i < 12; ++i)
-        if (noteButtons[static_cast<size_t>(i)].getToggleState()
-                != HumHouseVocalTuneProcessor::isNoteInScale(scaleVal, root, i))
-            keysMatch = false;
-
-    majorBtn.setToggleState(keysMatch && scaleVal == 0, juce::dontSendNotification);
-    minorBtn.setToggleState(keysMatch && scaleVal == 1, juce::dontSendNotification);
-    chromBtn.setToggleState(keysMatch && scaleVal == 2, juce::dontSendNotification);
 
     // The skull lights up with the singer's level (fast attack, quick release)
     const float glowTarget = juce::jlimit(0.0f, 1.0f, displayInputLevel * 1.6f);
@@ -661,7 +652,7 @@ void HumHouseVocalTuneEditor::resized()
 
     // Small caps labels never get smaller than 9 px
     const juce::Font labelFont(juce::FontOptions(juce::jmax(9.0f, 11.0f * s)));
-    for (auto* l : { &speedLabel, &humanizeLabel, &referenceFreqLabel, &rootNoteLabel })
+    for (auto* l : { &speedLabel, &humanizeLabel, &amountLabel, &referenceFreqLabel, &rootNoteLabel })
         l->setFont(labelFont);
 
     // --- Top bar ---
@@ -669,6 +660,7 @@ void HumHouseVocalTuneEditor::resized()
 
     // --- Symmetrical side controls: Retune Speed left, Humanize right ---
     place(speedKnob,    speedLabel,     26, 112, 116);
+    place(amountKnob,   amountLabel,    57, 242, 54);
     place(humanizeKnob, humanizeLabel, 638, 112, 116);
 
     // --- Key, scale buttons, switches ---
@@ -677,13 +669,11 @@ void HumHouseVocalTuneEditor::resized()
     rootNoteLabel.setBounds(R(14, rowY, 32, rowH));
     rootNoteBox.setBounds(R(50, rowY, 64, rowH));
 
-    majorBtn.setBounds(R(126, rowY, 74, rowH));
-    minorBtn.setBounds(R(206, rowY, 74, rowH));
-    chromBtn.setBounds(R(286, rowY, 92, rowH));
+    scaleBox.setBounds(R(126, rowY, 142, rowH));
 
-    stabilizerBtn.setBounds(R(394, rowY, 134, rowH));
-    formantBtn.setBounds(R(534, rowY, 92, rowH));
-    rangeBox.setBounds(R(632, rowY, 134, rowH));
+    stabilizerBtn.setBounds(R(278, rowY, 134, rowH));
+    formantBtn.setBounds(R(420, rowY, 92, rowH));
+    rangeBox.setBounds(R(520, rowY, 246, rowH));
 
     // --- Pitch reference knob in the right-hand control column ---
     place(referenceFreqKnob, referenceFreqLabel, 684, 242, 44);

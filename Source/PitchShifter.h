@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace humtune
@@ -14,13 +15,11 @@ class PitchShifter
 public:
     static constexpr double kMinHz = 70.0;       // lowest pitch ever supported (buffers are sized for it)
 
-    // The delay is half a period of the selected minimum voice frequency, plus a small
-    // interpolation guard. This is deliberately more aggressive than the old 1.35-period
-    // setting: around 3 ms at 48 kHz when the 180 Hz "Fastest" range is selected.
-    // Short windows use the previous cycle to estimate unavailable future samples, which
-    // reduces latency at the cost of some transient/grain quality on low notes.
-    // Keep this value aligned with the latency reported to the host by getLatencySamples().
-    static constexpr double kLatencyPeriods = 0.50;
+    // Low-latency TD-PSOLA. The source grain is phase-anchored half a period behind
+    // the selected pitch mark, reducing the required look-ahead without fabricating
+    // missing samples. At 48 kHz the default 180 Hz range reports about 6.6 ms.
+    // This remains a quality/latency trade-off; lower fundamentals need more delay.
+    static constexpr double kLatencyPeriods = 1.15;
     static constexpr double kMaxHz = 1500.0;
 
     void prepare (double sampleRate, int /*blockSize*/)
@@ -37,6 +36,7 @@ public:
 
         inRing.assign(static_cast<size_t>(inSize), 0.0f);
         outRing.assign(static_cast<size_t>(outSize), 0.0f);
+        weightRing.assign(static_cast<size_t>(outSize), 0.0f);
 
         minPeriod = std::max(4, static_cast<int>(std::floor(sr / kMaxHz)));
         setMinFrequency(kMinHz);
@@ -56,12 +56,15 @@ public:
     {
         std::fill(inRing.begin(), inRing.end(), 0.0f);
         std::fill(outRing.begin(), outRing.end(), 0.0f);
+        std::fill(weightRing.begin(), weightRing.end(), 0.0f);
         inCount  = 0;
         outRead  = 0;
         nextTs   = 0.0;
         markPos  = -static_cast<double>(latency);
         lastPeriod = juce::jlimit(static_cast<double>(minPeriod),
                                   static_cast<double>(maxPeriod), sr / 200.0);
+        smoothedRatio = 1.0;
+        wetMixState = 0.0;
     }
 
     int getLatencySamples() const { return latency; }
@@ -80,8 +83,8 @@ public:
         }
         else
         {
-            // No pitch (breath, consonants, silence): use short grains. They never need
-            // guessed audio, so such sounds pass through unchanged.
+            // No reliable pitch (breath, consonants, silence): hold a sensible previous
+            // period while the ratio returns to unity and the output fades to delayed dry.
             periodF = juce::jlimit(static_cast<double>(minPeriod), static_cast<double>(maxPeriod),
                                    std::min(lastPeriod, 0.006 * sr));
         }
@@ -109,67 +112,129 @@ private:
         return p;
     }
 
-    void processChunk (float* data, int m, double periodF, double ratio)
+    // Find the closest positive-going zero crossing near the predicted pitch mark.
+    // PSOLA grains must be aligned to the waveform phase; a free-running mark clock
+    // produces flanging/comb filtering even when the period estimate is correct.
+    double alignToPitchMark (double predicted, double periodF, int64_t newest) const
+    {
+        if (predicted < 2.0 || newest < 4)
+            return predicted;
+
+        // Search less than half a period around the predicted *next* mark. Because the
+        // mark clock advances by one estimated period, this can find the matching
+        // positive-going crossing without accidentally choosing the adjacent cycle.
+        const double radius = 0.45 * periodF;
+        const int64_t first = std::max<int64_t>(1, static_cast<int64_t>(std::floor(predicted - radius)));
+        const int64_t last  = std::min<int64_t>(newest - 1, static_cast<int64_t>(std::ceil(predicted + radius)));
+        if (last <= first)
+            return predicted;
+
+        double best = predicted;
+        double bestDistance = std::numeric_limits<double>::max();
+        for (int64_t i = first; i <= last; ++i)
+        {
+            const float a = inRing[static_cast<size_t>((i - 1) & inMask)];
+            const float b = inRing[static_cast<size_t>( i      & inMask)];
+            if (a <= 0.0f && b > 0.0f)
+            {
+                const double frac = static_cast<double>(-a) /
+                                    std::max(1.0e-12, static_cast<double>(b - a));
+                const double crossing = static_cast<double>(i - 1) + juce::jlimit(0.0, 1.0, frac);
+                const double distance = std::abs(crossing - predicted);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    best = crossing;
+                }
+            }
+        }
+
+        // If the local waveform does not provide a clean rising crossing, keep the
+        // phase prediction. Switching between a zero crossing and a local peak makes
+        // the source mark jump by a quarter cycle and is audible as roughness.
+        return best;
+    }
+
+    void processChunk (float* data, int m, double periodF, double requestedRatio)
     {
         for (int i = 0; i < m; ++i)
             inRing[static_cast<size_t>((inCount + i) & inMask)] = data[i];
         inCount += m;
 
-        // Output spacing of the grains (this sets the new pitch)
-        const double hop    = periodF / ratio;
-        const double margin = 8.0;
+        // A tiny ratio smoother removes zippering when the detector updates its target
+        // every few milliseconds. It is separate from the user-facing retune-speed control.
+        const double ratioTime = 0.0025;
+        const double ratioCoeff = std::exp(-static_cast<double>(m) / (sr * ratioTime));
+        smoothedRatio = static_cast<double>(requestedRatio)
+                      + (smoothedRatio - static_cast<double>(requestedRatio)) * ratioCoeff;
+        const double ratio = juce::jlimit(0.6, 1.8, smoothedRatio);
 
-        // Every grain covers exactly one period of the voice on each side of its centre.
-        // That length matters: it puts the zeros of the window's spectrum exactly on the
-        // voice's harmonics, so nothing leaks into the output (any other length adds
-        // low-frequency rumble when the pitch is changed).
-        //   formants kept : the grain is read at normal speed  -> output half-window = period
-        //   formants moved: the grain is read at `ratio` speed -> output half-window = hop
-        double wo = formantPreserve ? periodF : hop;
+        const double hop = periodF / ratio;
+        const double margin = 12.0;
 
-        // Longest half-window the delay budget allows, keeping a little real audio ahead.
-        // Only the very lowest notes get anywhere near this limit.
-        const double woMax = static_cast<double>(latency) - margin - 0.6 * periodF;
-        wo = std::max(std::min(wo, woMax), 0.5 * periodF);
-
-        const double rate = periodF / wo;                      // source samples per output sample
-        const float  gain = static_cast<float>(hop / wo);      // keeps the loudness constant
-        const float  piOverW = juce::MathConstants<float>::pi / static_cast<float>(wo);
-
-        // How much REAL audio must exist beyond the mark before a grain is built. Whatever
-        // is still missing at the far end of the grain is guessed (see below).
-        const double xCap  = static_cast<double>(latency) - margin - 0.5 * periodF - wo;
-        const double xNeed = std::min(periodF, std::max(0.0, xCap));
+        // Use pitch-synchronous windows with a half-period source-anchor offset.
+        // That keeps the grains phase-locked while moving the complete source window
+        // farther into already-received audio. It is the key low-latency improvement:
+        // no repeated/fabricated future cycles are used.
+        double wo = std::max(0.56 * periodF, 0.58 * hop);
+        const double rate = formantPreserve ? 1.0 : ratio;
+        const double alignmentAllowance = 0.50 * periodF;
+        // With the source centre half a period behind the mark, available look-ahead
+        // is max(0, wo*rate - P/2). Bound both the ordinary and unpreserved-formant cases.
+        const double safeLatency = static_cast<double>(latency) - margin;
+        const double woMax = std::max(8.0, std::min(safeLatency - alignmentAllowance,
+                                                  safeLatency / (1.0 + rate)));
+        wo = std::max(8.0, std::min(wo, woMax));
+        const double sourceHalf = wo * rate;
+        const double sourceFuture = std::max(0.0, sourceHalf - 0.5 * periodF);
+        const float piOverW = juce::MathConstants<float>::pi / static_cast<float>(wo);
 
         for (;;)
         {
             const double ta0 = nextTs - static_cast<double>(latency);
 
-            // Pick the analysis mark (spaced one period apart) nearest to ta0
+            // Keep a monotonic analysis-mark clock. Advance it in whole pitch periods, then
+            // nudge each new mark onto the nearby waveform crossing/peak. Re-selecting a mark
+            // independently for every synthesis grain causes phase jitter as the target ratio
+            // changes; stateful pitch marks are much more stable for sustained vowels.
             while (markPos + 0.5 * periodF < ta0)
+            {
                 markPos += periodF;
+                if (markPos >= 2.0 && markPos < static_cast<double>(inCount - 3))
+                    markPos = alignToPitchMark(markPos, periodF, inCount - 3);
+            }
 
-            if (static_cast<int64_t>(std::floor(markPos + xNeed)) + 3 >= inCount)
-                break;                                          // wait for more audio
+            // Do not synthesize a grain until its complete source window exists. The old
+            // implementation wrapped unavailable future samples back one period; that
+            // periodic guess was the main source of metallic/chipmunk artifacts at low delay.
+            if (markPos < 0.5 * periodF + sourceHalf + 2.0)
+            {
+                // Stream start: skip incomplete grains rather than building them from zeros.
+                nextTs += hop;
+                continue;
+            }
+            // Only wait for the small right-hand tail that is genuinely needed by the
+            // interpolation kernel. The rest of the grain comes from available history.
+            if (markPos + sourceFuture + 3.0 >= static_cast<double>(inCount))
+                break;
+            const double mark = markPos;
 
-            const double  limit  = static_cast<double>(inCount) - 3.0;   // newest position the cubic can use
             const int64_t oFirst = static_cast<int64_t>(std::ceil (nextTs - wo));
             const int64_t oLast  = static_cast<int64_t>(std::floor(nextTs + wo));
 
             for (int64_t o = std::max(oFirst, outRead); o <= oLast; ++o)
             {
-                const float x = static_cast<float>(static_cast<double>(o) - nextTs + wo);
-                if (x <= 0.0f)
+                const double xd = static_cast<double>(o) - nextTs + wo;
+                if (xd <= 0.0 || xd >= 2.0 * wo)
                     continue;
-                const float w = 0.5f * (1.0f - std::cos(piOverW * x));      // Hann window
+                const float x = static_cast<float>(xd);
+                const float w = 0.5f * (1.0f - std::cos(piOverW * x));
 
-                double pos = markPos + (static_cast<double>(o) - nextTs) * rate;
-                if (pos > limit)        // not arrived yet: repeat the previous cycle of the voice
-                    pos -= std::ceil((pos - limit) / periodF) * periodF;
-
-                const double  fl = std::floor(pos);
-                const int64_t a  = static_cast<int64_t>(fl);
-                if (a < 1)
+                const double pos = mark - 0.5 * periodF
+                                 + (static_cast<double>(o) - nextTs) * rate;
+                const double fl = std::floor(pos);
+                const int64_t a = static_cast<int64_t>(fl);
+                if (a < 1 || a + 2 >= inCount)
                     continue;
 
                 const float t  = static_cast<float>(pos - fl);
@@ -184,33 +249,54 @@ private:
                                 + c2 * inRing[static_cast<size_t>((a + 1) & inMask)]
                                 + c3 * inRing[static_cast<size_t>((a + 2) & inMask)];
 
-                outRing[static_cast<size_t>(o & outMask)] += smp * w * gain;
+                const size_t outIdx = static_cast<size_t>(o & outMask);
+                outRing[outIdx] += smp * w;
+                weightRing[outIdx] += w;
             }
 
             nextTs += hop;
         }
 
-        const bool unityBypass = isNearUnity (static_cast<float>(ratio));
+        // Crossfade to the exact delayed dry path as correction approaches unity. Switching
+        // directly from a granular waveform to dry audio on a voiced/unvoiced transition
+        // can create a click even though the reported sample latency is unchanged.
+        const double ratioDelta = std::abs(smoothedRatio - 1.0);
+        const double targetWetMix = juce::jlimit(0.0, 1.0,
+                                               (ratioDelta - 0.0002) / 0.0018);
+        const double mixStep = 1.0 / std::max(1.0, sr * 0.003); // 3 ms linear fade
         for (int i = 0; i < m; ++i)
         {
             const int64_t outputIndex = outRead + i;
             const size_t idx = static_cast<size_t>(outputIndex & outMask);
+            const int64_t sourceIndex = outputIndex - latency;
+            const float dry = sourceIndex >= 0
+                            ? inRing[static_cast<size_t>(sourceIndex & inMask)]
+                            : 0.0f;
 
-            // Keep the same fixed delay while passing uncorrected/unvoiced audio as a clean
-            // delayed copy. The grain scheduler above still runs, so a later ratio change
-            // does not restart its timeline or introduce a discontinuity.
-            if (unityBypass)
+            const float weight = weightRing[idx];
+            const double desiredMix = weight > 1.0e-4f ? targetWetMix : 0.0;
+            // Slew the mix per sample (not per host block) and only fade in when a complete
+            // wet grain exists. That avoids both note-change clicks and startup grain pops.
+            if (wetMixState < desiredMix)
+                wetMixState = std::min(desiredMix, wetMixState + mixStep);
+            else if (wetMixState > desiredMix)
+                wetMixState = std::max(desiredMix, wetMixState - mixStep);
+
+            if (weight > 1.0e-4f && wetMixState > 0.0)
             {
-                const int64_t sourceIndex = outputIndex - latency;
-                data[i] = sourceIndex >= 0
-                        ? inRing[static_cast<size_t>(sourceIndex & inMask)]
-                        : 0.0f;
+                // Normalize by the actual local overlap, rather than an average hop/width
+                // gain. Then fade to the delayed input for micro-corrections/unvoiced audio.
+                const float wet = outRing[idx] / weight;
+                const float wetMix = static_cast<float>(wetMixState);
+                data[i] = dry + wetMix * (wet - dry);
             }
             else
             {
-                data[i] = outRing[idx];
+                data[i] = dry;
             }
+
             outRing[idx] = 0.0f;
+            weightRing[idx] = 0.0f;
         }
         outRead += m;
     }
@@ -220,13 +306,15 @@ private:
     int inSize = 0, outSize = 0;
     int64_t inMask = 0, outMask = 0;
 
-    std::vector<float> inRing, outRing;
+    std::vector<float> inRing, outRing, weightRing;
 
     int64_t inCount = 0;
     int64_t outRead = 0;
     double  nextTs  = 0.0;
     double  markPos = 0.0;
     double  lastPeriod = 220.0;
+    double  smoothedRatio = 1.0;
+    double  wetMixState = 0.0;
     bool    formantPreserve = true;
 };
 

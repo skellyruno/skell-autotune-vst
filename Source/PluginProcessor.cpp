@@ -3,7 +3,6 @@
 
 // Note names for combo-box choices
 static const juce::StringArray kNoteNames {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-static const juce::StringArray kScaleNames {"Major","Minor","Chromatic"};
 
 // ---------------------------------------------------------------------------
 // Presets
@@ -49,11 +48,15 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::ParameterID{"humanize", 1}, "Humanize",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
 
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"amount", 1}, "Amount",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"rootNote", 1}, "Root Note", 0, 11, 0));
 
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"scaleType", 1}, "Scale Type", 0, 2, 0));
+        juce::ParameterID{"scaleType", 1}, "Scale Type", 0, 6, 0));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"referenceFreq", 1}, "Reference Frequency",
@@ -126,6 +129,7 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // Read parameters
     float retune    = *apvts.getRawParameterValue("retune");   // 1 = fastest
     float hum       = *apvts.getRawParameterValue("humanize");
+    float amount    = *apvts.getRawParameterValue("amount");
     int   root      = static_cast<int>(*apvts.getRawParameterValue("rootNote"));
     int   scale     = static_cast<int>(*apvts.getRawParameterValue("scaleType"));
     float refFreq   = *apvts.getRawParameterValue("referenceFreq");
@@ -150,6 +154,7 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     engine.setScaleType(scale);
     engine.setRetuneSpeed(1.0f - retune);      // the engine works in "0 = instant"
     engine.setHumanize(hum);
+    engine.setAmount(amount);
     engine.setReferenceFreq(refFreq);
     engine.setNoteStabilizer(stab);
     engine.setFormantPreserve(formant);

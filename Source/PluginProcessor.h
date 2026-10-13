@@ -35,14 +35,21 @@ public:
 
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
 
-    // True if pitch class `note` (0 = C ... 11 = B) belongs to the scale in the given key.
-    // scaleType: 0 = Major, 1 = Minor, 2 = Chromatic.
+    // Scale type: 0 Major, 1 Minor, 2 Chromatic, 3 Harmonic Minor,
+    // 4 Major Pentatonic, 5 Minor Pentatonic, 6 Blues.
     static bool isNoteInScale (int scaleType, int root, int note)
     {
-        static constexpr bool major[12] = { true, false, true, false, true, true, false, true, false, true, false, true };
-        static constexpr bool minor[12] = { true, false, true, true, false, true, false, true, true, false, true, false };
+        static constexpr bool major[12]           = { true, false, true, false, true, true, false, true, false, true, false, true };
+        static constexpr bool minor[12]           = { true, false, true, true, false, true, false, true, true, false, true, false };
+        static constexpr bool chromatic[12]       = { true, true, true, true, true, true, true, true, true, true, true, true };
+        static constexpr bool harmonicMinor[12]   = { true, false, true, true, false, true, false, true, true, false, false, true };
+        static constexpr bool majorPentatonic[12] = { true, false, true, false, true, false, false, true, false, true, false, false };
+        static constexpr bool minorPentatonic[12] = { true, false, false, true, false, true, false, true, false, false, true, false };
+        static constexpr bool blues[12]           = { true, false, false, true, false, true, true, true, false, false, true, false };
         const int rel = (((note - root) % 12) + 12) % 12;
-        return scaleType == 2 ? true : (scaleType == 1 ? minor[rel] : major[rel]);
+        const bool* scales[] = { major, minor, chromatic, harmonicMinor, majorPentatonic, minorPentatonic, blues };
+        const int idx = juce::jlimit(0, 6, scaleType);
+        return scales[idx][rel];
     }
 
     // The piano keys ARE the scale: this lights the keys that belong to the chosen scale + key.
