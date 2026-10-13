@@ -85,11 +85,11 @@ private:
     juce::Image skullSolidImg, skullHoloImg, armImg;
 
     // Knobs
-    juce::Slider speedKnob, humanizeKnob, amountKnob;
+    juce::Slider speedKnob, humanizeKnob, amountKnob, lowLatencyKnob;
     juce::Slider referenceFreqKnob;
 
     // Labels for knobs
-    juce::Label speedLabel, humanizeLabel, amountLabel;
+    juce::Label speedLabel, humanizeLabel, amountLabel, lowLatencyLabel;
     juce::Label referenceFreqLabel;
 
     // Full scale set (major/minor/chromatic/harmonic minor/pentatonics/blues)
@@ -99,8 +99,8 @@ private:
     juce::ToggleButton formantBtn    {"Formant"};
     juce::ToggleButton enableBtn     {"Enabled"};
 
-    // Voice range: the lowest note the tuner follows (lower notes need more delay)
-    juce::ComboBox rangeBox;
+    // Input type presets the expected pitch range; lowLatencyKnob trades low-note coverage for delay.
+    juce::ComboBox inputTypeBox;
 
     // Key (root note) selector
     juce::ComboBox rootNoteBox;
@@ -117,9 +117,9 @@ private:
     std::unique_ptr<SliderAttach> speedAtt;
     std::unique_ptr<SliderAttach> humanizeAtt;
     std::unique_ptr<SliderAttach> amountAtt;
-    std::unique_ptr<SliderAttach> referenceFreqAtt;
+    std::unique_ptr<SliderAttach> referenceFreqAtt, lowLatencyAtt;
     std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, enableAtt;
-    std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt, scaleAtt;
+    std::unique_ptr<ComboAttach>  rootNoteAtt, inputTypeAtt, scaleAtt;
     std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
 
     // Pitch display state

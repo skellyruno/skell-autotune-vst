@@ -70,6 +70,9 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     amountKnob.getProperties().set("displayScale", 100.0);
     setupKnob(referenceFreqKnob, referenceFreqLabel, "PITCH REF",
               "What frequency the note A4 is tuned to. 440 Hz is the standard.");
+    setupKnob(lowLatencyKnob, lowLatencyLabel, "LOW LATENCY",
+              "Trade low-note tracking range for lower processing delay. At the far right, pitches below about 400 Hz may be ignored.");
+    lowLatencyKnob.getProperties().set("displayScale", 100.0);
     referenceFreqKnob.setTextValueSuffix(" Hz");
     referenceFreqKnob.getProperties().set("hideValue", true);   // the value is shown next to the knob
 
@@ -77,6 +80,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     humanizeAtt  = std::make_unique<SliderAttach>(apvts, "humanize", humanizeKnob);
     amountAtt    = std::make_unique<SliderAttach>(apvts, "amount", amountKnob);
     referenceFreqAtt = std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
+    lowLatencyAtt = std::make_unique<SliderAttach>(apvts, "lowLatency", lowLatencyKnob);
 
     // --- Scale selector. Choosing a scale also updates the piano-key mask. ---
     scaleBox.addItemList(juce::StringArray { "Major", "Minor", "Chromatic", "Harmonic Minor",
@@ -110,20 +114,12 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     formantAtt    = std::make_unique<ButtonAttach>(apvts, "formantPreserve", formantBtn);
     enableAtt     = std::make_unique<ButtonAttach>(apvts, "enabled",         enableBtn);
 
-    // --- Voice range: the lowest note the tuner follows. Lower notes need more delay. ---
-    rangeBox.addItemList(juce::StringArray { "Bass - 16.6 ms", "Deep - 14.5 ms", "Standard - 11.7 ms",
-                                              "Fast - 9.0 ms", "Fastest - 6.6 ms" }, 1);
-    rangeBox.setSelectedItemIndex(humtune::AutoTuneEngine::kDefaultRange, juce::dontSendNotification);
-    rangeBox.setTooltip("Voice range: the lowest note the tuner can follow.\n"
-                        "Lower notes require a longer analysis/grain window.\n"
-                        "Bass: 70 Hz and up (about 16.6 ms)\n"
-                        "Deep: 80 Hz and up (about 14.5 ms)\n"
-                        "Standard: 100 Hz and up (about 11.7 ms)\n"
-                        "Fast: 130 Hz and up (about 9.0 ms)\n"
-                        "Fastest: 180 Hz and up (about 6.6 ms)\n"
-                        "Notes below the selected range are not tuned. Latency is approximate and depends on sample rate.");
-    addAndMakeVisible(rangeBox);
-    rangeAtt = std::make_unique<ComboAttach>(apvts, "range", rangeBox);
+    // --- Input Type replaces the old latency-mode selector. ---
+    inputTypeBox.addItemList(juce::StringArray { "Soprano", "Alto / Tenor", "Low Male", "Bass", "Instrument" }, 1);
+    inputTypeBox.setSelectedItemIndex(1, juce::dontSendNotification);
+    inputTypeBox.setTooltip("Choose the source type so pitch detection starts with an appropriate expected range.");
+    addAndMakeVisible(inputTypeBox);
+    inputTypeAtt = std::make_unique<ComboAttach>(apvts, "inputType", inputTypeBox);
 
     // --- Key (root note) ---
     rootNoteBox.addItemList(kNoteNames, 1);
@@ -657,6 +653,9 @@ void HumHouseVocalTuneEditor::resized()
 
     // --- Top bar ---
     enableBtn.setBounds(R(kDesignW - 112, 8, 98, 28));
+    // Compact low-latency dial immediately left of Enabled.
+    lowLatencyKnob.setBounds(R(kDesignW - 190, 2, 42, 34));
+    lowLatencyLabel.setBounds(R(kDesignW - 218, 34, 98, 14));
 
     // --- Symmetrical side controls: Retune Speed left, Humanize right ---
     place(speedKnob,    speedLabel,     26, 112, 116);
@@ -673,7 +672,7 @@ void HumHouseVocalTuneEditor::resized()
 
     stabilizerBtn.setBounds(R(278, rowY, 134, rowH));
     formantBtn.setBounds(R(420, rowY, 92, rowH));
-    rangeBox.setBounds(R(520, rowY, 246, rowH));
+    inputTypeBox.setBounds(R(520, rowY, 246, rowH));
 
     // --- Pitch reference knob in the right-hand control column ---
     place(referenceFreqKnob, referenceFreqLabel, 684, 242, 44);

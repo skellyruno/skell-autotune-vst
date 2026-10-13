@@ -35,6 +35,10 @@ public:
     {
         sr = sampleRate;
         detector.prepare(sampleRate, blockSize);
+        monoScratch.assign(static_cast<size_t>(std::max(1, detector.getHopSize())), 0.0f);
+        transientEnergySum = 0.0;
+        transientSampleCount = 0;
+        smoothedInputRms = 0.0f;
         for (auto& s : shifters)
             s.prepare(sampleRate, blockSize);
 
@@ -62,12 +66,22 @@ public:
 
     // Chooses the voice range (index into kRangeMinHz). Safe to call from the audio thread
     // (no allocation). The latency changes, so the host must be told: see getLatencySamples().
-    void setVoiceRange      (int index)
+    void setVoiceRange (int index)
     {
         index = std::max(0, std::min(kNumRanges - 1, index));
-        if (index == rangeIndex)
-            return;
         rangeIndex = index;
+        setVoiceFloor(kRangeMinHz[index]);
+    }
+
+    // A finer floor setting lets the Low Latency control trade low-note coverage for
+    // algorithmic delay beyond the five broad voice presets. The shifter/detector buffers
+    // are sized for 70 Hz in prepare(), so this does not allocate when the floor changes.
+    void setVoiceFloor (float hz)
+    {
+        hz = juce::jlimit(kRangeMinHz[0], 400.0f, hz);
+        if (std::abs(hz - voiceFloorHz) < 0.5f)
+            return;
+        voiceFloorHz = hz;
         if (prepared)
             applyLatencyMode();
     }
@@ -140,20 +154,59 @@ public:
         // The correction is refreshed every `hop` samples (about 5 ms) instead of once
         // per DAW buffer, and each piece of audio is shifted straight after the pitch
         // of that piece was measured. That keeps the correction in step with the voice.
-        const int   hop  = detector.getHopSize();
-        const float* mono = buffer.getReadPointer(0);
+        const int hop = detector.getHopSize();
 
         int pos = 0;
         while (pos < numSamples)
         {
             const int seg = std::min(numSamples - pos, hop - samplesSinceHop);
 
-            detector.feedSamples(mono + pos, seg);
+            // Sum(L+R)/2 style monophonic detection feed. Keep the original stereo
+            // channels intact for independent, phase-coherent pitch shifting.
+            double segmentEnergy = 0.0;
+            for (int i = 0; i < seg; ++i)
+            {
+                float mono = 0.0f;
+                for (int ch = 0; ch < nch; ++ch)
+                    mono += buffer.getReadPointer(ch)[pos + i];
+                mono /= static_cast<float>(nch);
+                monoScratch[static_cast<size_t>(i)] = mono;
+                segmentEnergy += static_cast<double>(mono) * mono;
+            }
+            detector.feedSamples(monoScratch.data(), seg);
+            transientEnergySum += segmentEnergy;
+            transientSampleCount += seg;
+
             samplesSinceHop += seg;
             if (samplesSinceHop >= hop)
             {
                 samplesSinceHop = 0;
-                updateCorrection(hop);
+                const float hopRms = transientSampleCount > 0
+                    ? static_cast<float>(std::sqrt(transientEnergySum / transientSampleCount)) : 0.0f;
+                const bool transient = hopRms > 0.035f
+                    && hopRms > 2.4f * std::max(smoothedInputRms, 0.006f);
+
+                // Fast attack / slow release for the reference envelope. When a sharp
+                // plosive or transient arrives, still update the pitch display/history,
+                // but ease the shifter back toward delayed dry for this hop rather than
+                // imprinting the previous vowel's pitch ratio onto the transient.
+                if (hopRms > smoothedInputRms)
+                    smoothedInputRms = 0.65f * smoothedInputRms + 0.35f * hopRms;
+                else
+                    smoothedInputRms = 0.92f * smoothedInputRms + 0.08f * hopRms;
+                transientEnergySum = 0.0;
+                transientSampleCount = 0;
+
+                if (transient)
+                {
+                    detector.detectPitch();
+                    curRatio = 1.0f;
+                    curPeriod = 0.0f;
+                }
+                else
+                {
+                    updateCorrection(hop);
+                }
             }
 
             for (int ch = 0; ch < nch; ++ch)
@@ -252,7 +305,7 @@ private:
 
     void applyLatencyMode()
     {
-        const float minHz = kRangeMinHz[rangeIndex];
+        const float minHz = voiceFloorHz;
 
         detector.setMinFrequency(minHz);
         for (auto& s : shifters)
@@ -268,6 +321,9 @@ private:
         lockedMidiNote = -1;
         holdCounter = 0;
         samplesSinceHop = 0;
+        transientEnergySum = 0.0;
+        transientSampleCount = 0;
+        smoothedInputRms = 0.0f;
         curRatio = 1.0f;
         curPeriod = 0.0f;
 
@@ -293,7 +349,7 @@ private:
         const int centre = static_cast<int>(std::round(midiNote));
         int bestNote = centre;
         float bestDistance = std::numeric_limits<float>::max();
-        constexpr float tieTolerance = 0.005f; // 0.5 cent; suppress YIN jitter at exact scale midpoints
+        constexpr float tieTolerance = 0.025f; // 2.5 cents; include short-window YIN startup error at exact scale midpoints
 
         for (int offset = -6; offset <= 6; ++offset)
         {
@@ -317,6 +373,10 @@ private:
     double sr = 44100.0;
     PitchDetector detector;
     std::array<PitchShifter, kMaxChannels> shifters;
+    std::vector<float> monoScratch; // fixed-size pitch-detection downmix; sized in prepare()
+    double transientEnergySum = 0.0;
+    int transientSampleCount = 0;
+    float smoothedInputRms = 0.0f;
 
     int   rootNote       = 0;
     int   scaleType      = 0;
@@ -330,6 +390,7 @@ private:
     float referenceFreq  = 440.0f;
     bool  enabled        = true;
     int   rangeIndex     = kDefaultRange;
+    float voiceFloorHz   = kRangeMinHz[kDefaultRange];
     bool  prepared       = false;
     bool  useCustom      = false;
     std::array<bool, 12> customScale = kChromatic;

@@ -73,6 +73,13 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::AutoTuneEngine::kNumRanges - 1,
         humtune::AutoTuneEngine::kDefaultRange));
 
+    // Input Type chooses the expected source range; Low Latency trades low-note coverage for less delay.
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"inputType", 1}, "Input Type", 0, 4, 1));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"lowLatency", 1}, "Low Latency",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
+
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"enabled", 1}, "Enabled", true));
 
@@ -114,7 +121,16 @@ HumHouseVocalTuneProcessor::HumHouseVocalTuneProcessor()
 // ---------------------------------------------------------------------------
 void HumHouseVocalTuneProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    engine.setVoiceRange(static_cast<int>(*apvts.getRawParameterValue("range")));
+    const int inputType = static_cast<int>(*apvts.getRawParameterValue("inputType"));
+    const float lowLatency = *apvts.getRawParameterValue("lowLatency");
+    // Each input type starts at its nominal tracking floor. The Low Latency knob has
+    // nine effective detents (to avoid repeated heavy ring resets during tiny gestures)
+    // and can raise the floor to 400 Hz for roughly 3 ms shifter delay at 48 kHz.
+    // That top end is intentionally aggressive: fundamentals below the floor are ignored.
+    constexpr float inputTypeFloorHz[5] = { 180.0f, 130.0f, 100.0f, 70.0f, 80.0f };
+    const float baseFloor = inputTypeFloorHz[juce::jlimit(0, 4, inputType)];
+    const float latencyDetent = juce::roundToInt(lowLatency * 8.0f) / 8.0f;
+    engine.setVoiceFloor(baseFloor + latencyDetent * (400.0f - baseFloor));
     engine.prepare(sampleRate, samplesPerBlock);
     reportedLatency = engine.getLatencySamples();
     setLatencySamples(reportedLatency);
@@ -135,7 +151,8 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     float refFreq   = *apvts.getRawParameterValue("referenceFreq");
     bool  stab      = *apvts.getRawParameterValue("noteStabilizer") > 0.5f;
     bool  formant   = *apvts.getRawParameterValue("formantPreserve") > 0.5f;
-    int   range     = static_cast<int>(*apvts.getRawParameterValue("range"));
+    const int inputType = static_cast<int>(*apvts.getRawParameterValue("inputType"));
+    const float lowLatency = *apvts.getRawParameterValue("lowLatency");
     bool  on        = *apvts.getRawParameterValue("enabled") > 0.5f;
     float inGainDb  = *apvts.getRawParameterValue("inputGain");
     float outGainDb = *apvts.getRawParameterValue("outputGain");
@@ -158,10 +175,18 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     engine.setReferenceFreq(refFreq);
     engine.setNoteStabilizer(stab);
     engine.setFormantPreserve(formant);
-    engine.setVoiceRange(range);
+    // Input types: Soprano, Alto/Tenor, Low Male, Bass, Instrument. Each input type
+    // starts at its nominal tracking floor. The Low Latency knob has
+    // nine effective detents (to avoid repeated heavy ring resets during tiny gestures)
+    // and can raise the floor to 400 Hz for roughly 3 ms shifter delay at 48 kHz.
+    // That top end is intentionally aggressive: fundamentals below the floor are ignored.
+    constexpr float inputTypeFloorHz[5] = { 180.0f, 130.0f, 100.0f, 70.0f, 80.0f };
+    const float baseFloor = inputTypeFloorHz[juce::jlimit(0, 4, inputType)];
+    const float latencyDetent = juce::roundToInt(lowLatency * 8.0f) / 8.0f;
+    engine.setVoiceFloor(baseFloor + latencyDetent * (400.0f - baseFloor));
     engine.setEnabled(on);
 
-    // The delay depends on the Voice Range: tell the host when it changes
+    // The delay depends on the selected pitch floor: tell the host when it changes.
     if (engine.getLatencySamples() != reportedLatency)
     {
         reportedLatency = engine.getLatencySamples();

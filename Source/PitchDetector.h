@@ -33,14 +33,22 @@ public:
         // decimation keeps the 70–1500 Hz fundamental range comfortably below
         // Nyquist while cutting the quadratic YIN work by roughly 4x at 48 kHz.
         // The shifter itself still runs at the full host sample rate.
-        dec = std::max(1, static_cast<int>(std::lround(sampleRate / 24000.0)));
-        sr  = sampleRate / static_cast<double>(dec);        // the rate the detector works at
+        const double hostRate = std::max(1.0, sampleRate);
+        dec = std::max(1, static_cast<int>(std::lround(hostRate / 24000.0)));
+        sr  = hostRate / static_cast<double>(dec);        // the rate the detector works at
         accum = 0.0f;
         accCount = 0;
+        previousInput = previousHighPass = 0.0f;
+        // Detection-only high-pass: reject DC/handling rumble without putting a filter
+        // into the audible path. 45 Hz keeps the bottom of the 70-100 Hz range usable.
+        highPassCoeff = static_cast<float>(std::exp(-2.0 * juce::MathConstants<double>::pi
+                                                    * 45.0 / hostRate));
 
-        // Allocate once for the lowest pitch we will ever support
+        // The adaptive YIN window can grow to 1.5 periods while retaining enough
+        // history for the largest legal lag. Storage is fixed here: the audio thread
+        // never allocates when the previous pitch changes the analysis window.
         const int allocTau = std::max(16, static_cast<int>(std::ceil(sr / kMinHz)));
-        const int allocBuf = allocTau + allocTau + 2;
+        const int allocBuf = 3 * allocTau + 8;
 
         ring.assign(static_cast<size_t>(allocBuf), 0.0f);
         lin.assign(static_cast<size_t>(allocBuf), 0.0f);
@@ -90,14 +98,20 @@ public:
         int pushed = 0;
         for (int i = 0; i < numSamples; ++i)
         {
-            accum += data[i];
+            // Filter only the pitch-analysis tap. Audio passed to the shifter remains
+            // untouched, so the conditioning cannot change tone or add audible phase shift.
+            const float x = data[i];
+            const float filtered = highPassCoeff * (previousHighPass + x - previousInput);
+            previousInput = x;
+            previousHighPass = filtered;
+            accum += filtered;
             if (++accCount < dec)
                 continue;
 
             ring[static_cast<size_t>(writePos)] = accum / static_cast<float>(dec);
             accum = 0.0f;
             accCount = 0;
-            if (++writePos >= bufLen)
+            if (++writePos >= static_cast<int>(ring.size()))
                 writePos = 0;
             ++pushed;
         }
@@ -118,11 +132,33 @@ public:
         samplesSinceDetect = 0;
         haveResult = true;
 
-        // Copy the ring into a flat array, oldest sample first
-        const int tail = bufLen - writePos;
-        std::memcpy(lin.data(), ring.data() + writePos, static_cast<size_t>(tail) * sizeof(float));
-        if (writePos > 0)
-            std::memcpy(lin.data() + tail, ring.data(), static_cast<size_t>(writePos) * sizeof(float));
+        // Use a pitch-dependent analysis window. Once a usable f0 is known, analyse
+        // about 1.5 cycles instead of always paying for the lowest configured note.
+        // The first estimate stays conservative so low bass fundamentals remain findable.
+        const int ringCapacity = static_cast<int>(ring.size());
+        const int maxAnalysis = std::min(ringCapacity - maxTau - 2,
+                                         static_cast<int>(std::ceil(1.5 * maxTau)));
+        const int minAnalysis = std::min(maxAnalysis, std::max(48, 2 * minTau));
+        int requestedAnalysis = maxTau;
+        if (detectedHz >= minHz && detectedHz <= kMaxHz)
+        {
+            const double previousTau = sr / static_cast<double>(detectedHz);
+            requestedAnalysis = static_cast<int>(std::ceil(1.5 * previousTau));
+        }
+        integLen = juce::jlimit(minAnalysis, maxAnalysis, requestedAnalysis);
+        bufLen = integLen + maxTau + 2;
+
+        // Copy the newest `bufLen` samples from the circular store to a contiguous
+        // analysis buffer, oldest first. The physical ring has fixed capacity while
+        // `bufLen` changes, so no data movement/reset is required when f0 changes.
+        int start = writePos - bufLen;
+        if (start < 0)
+            start += ringCapacity;
+        const int firstCount = std::min(bufLen, ringCapacity - start);
+        std::memcpy(lin.data(), ring.data() + start, static_cast<size_t>(firstCount) * sizeof(float));
+        if (firstCount < bufLen)
+            std::memcpy(lin.data() + firstCount, ring.data(),
+                        static_cast<size_t>(bufLen - firstCount) * sizeof(float));
 
         // The analysis uses the NEWEST `integLen` samples (b) and the same number
         // of samples one lag earlier (a), so the result describes "now", not the past.
@@ -236,6 +272,8 @@ public:
 
     float getDetectedHz()  const { return detectedHz; }
     float getConfidence()  const { return confidence; }
+    int getAnalysisWindowSamples() const { return integLen; }
+    double getAnalysisWindowMilliseconds() const { return 1000.0 * static_cast<double>(integLen) / sr; }
 
     void setThreshold (float t) { yinThreshold = t; }
 
@@ -276,6 +314,9 @@ private:
     double sr = 44100.0;      // rate the detector works at (host rate divided by dec)
     int dec = 1;              // decimation factor
     float accum = 0.0f;       // running sum of the current group of input samples
+    float previousInput = 0.0f;
+    float previousHighPass = 0.0f;
+    float highPassCoeff = 0.0f;
     int accCount = 0;
     int maxTau = 0, minTau = 0, integLen = 0, bufLen = 0, hopSize = 256;
     float minHz = kMinHz;
