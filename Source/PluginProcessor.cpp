@@ -73,12 +73,13 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::AutoTuneEngine::kNumRanges - 1,
         humtune::AutoTuneEngine::kDefaultRange));
 
-    // Input Type chooses the expected source range; Low Latency trades low-note coverage for less delay.
+    // Input Type chooses the expected source range. Low Latency is a binary
+    // quality/latency profile switch; the retired continuous control is no longer
+    // registered as an automatable parameter.
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"inputType", 1}, "Input Type", 0, 4, 1));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"lowLatency", 1}, "Low Latency",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"lowLatencyEnabled", 1}, "Low Latency", true));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"enabled", 1}, "Enabled", true));
@@ -122,19 +123,16 @@ HumHouseVocalTuneProcessor::HumHouseVocalTuneProcessor()
 void HumHouseVocalTuneProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     const int inputType = static_cast<int>(*apvts.getRawParameterValue("inputType"));
-    const float lowLatency = *apvts.getRawParameterValue("lowLatency");
-    // Each input type starts at its nominal tracking floor. The Low Latency knob has
-    // nine effective detents (to avoid repeated heavy ring resets during tiny gestures)
-    // and can raise the floor to 400 Hz for roughly 3 ms shifter delay at 48 kHz.
-    // That top end is intentionally aggressive: fundamentals below the floor are ignored.
+    const bool lowLatency = *apvts.getRawParameterValue("lowLatencyEnabled") > 0.5f;
+    // Input Type defines the supported lower note range; the Low Latency switch changes
+    // only the shifter overlap profile, so it never silently drops bass notes.
     constexpr float inputTypeFloorHz[5] = { 180.0f, 130.0f, 100.0f, 70.0f, 80.0f };
     const float baseFloor = inputTypeFloorHz[juce::jlimit(0, 4, inputType)];
-    const float latencyDetent = juce::roundToInt(lowLatency * 8.0f) / 8.0f;
-    engine.setVoiceFloor(baseFloor + latencyDetent * (400.0f - baseFloor));
+    engine.setVoiceFloor(baseFloor);
+    engine.setLowLatencyMode(lowLatency);
     engine.prepare(sampleRate, samplesPerBlock);
     reportedLatency = engine.getLatencySamples();
     setLatencySamples(reportedLatency);
-
 }
 
 void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
@@ -152,7 +150,7 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     bool  stab      = *apvts.getRawParameterValue("noteStabilizer") > 0.5f;
     bool  formant   = *apvts.getRawParameterValue("formantPreserve") > 0.5f;
     const int inputType = static_cast<int>(*apvts.getRawParameterValue("inputType"));
-    const float lowLatency = *apvts.getRawParameterValue("lowLatency");
+    const bool lowLatency = *apvts.getRawParameterValue("lowLatencyEnabled") > 0.5f;
     bool  on        = *apvts.getRawParameterValue("enabled") > 0.5f;
     float inGainDb  = *apvts.getRawParameterValue("inputGain");
     float outGainDb = *apvts.getRawParameterValue("outputGain");
@@ -175,15 +173,12 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     engine.setReferenceFreq(refFreq);
     engine.setNoteStabilizer(stab);
     engine.setFormantPreserve(formant);
-    // Input types: Soprano, Alto/Tenor, Low Male, Bass, Instrument. Each input type
-    // starts at its nominal tracking floor. The Low Latency knob has
-    // nine effective detents (to avoid repeated heavy ring resets during tiny gestures)
-    // and can raise the floor to 400 Hz for roughly 3 ms shifter delay at 48 kHz.
-    // That top end is intentionally aggressive: fundamentals below the floor are ignored.
+    // Input Type chooses a realistic minimum fundamental. The binary Low Latency
+    // control alters overlap/latency only, preserving all notes in the selected type.
     constexpr float inputTypeFloorHz[5] = { 180.0f, 130.0f, 100.0f, 70.0f, 80.0f };
     const float baseFloor = inputTypeFloorHz[juce::jlimit(0, 4, inputType)];
-    const float latencyDetent = juce::roundToInt(lowLatency * 8.0f) / 8.0f;
-    engine.setVoiceFloor(baseFloor + latencyDetent * (400.0f - baseFloor));
+    engine.setVoiceFloor(baseFloor);
+    engine.setLowLatencyMode(lowLatency);
     engine.setEnabled(on);
 
     // The delay depends on the selected pitch floor: tell the host when it changes.
@@ -258,7 +253,12 @@ void HumHouseVocalTuneProcessor::setCurrentProgram (int index)
     set("noteStabilizer",  p.stabilizer ? 1.0f : 0.0f);
     set("formantPreserve", p.formantPreserve ? 1.0f : 0.0f);
     if (p.range >= 0)
-        set("range",       static_cast<float>(p.range));
+    {
+        set("range", static_cast<float>(p.range)); // retained for older sessions/automation
+        // Map the preset's legacy tracking-floor index to the new Input Type selector.
+        static constexpr int rangeToInputType[5] = { 3, 4, 2, 1, 0 };
+        set("inputType", static_cast<float>(rangeToInputType[juce::jlimit(0, 4, p.range)]));
+    }
 }
 
 void HumHouseVocalTuneProcessor::applyScaleToKeys (int scaleType, int root)

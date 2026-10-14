@@ -63,6 +63,21 @@ public:
     void setFormantPreserve (bool on)     { formantPreserve = on; }
     void setReferenceFreq   (float hz)    { referenceFreq = hz; }
     void setEnabled         (bool on)     { enabled = on; }
+    void setLowLatencyMode  (bool on)
+    {
+        if (lowLatencyMode == on)
+            return;
+        lowLatencyMode = on;
+        if (prepared)
+        {
+            // Profile-only change: preserve detector and shifter history. Input Type
+            // still owns the pitch floor; the switch changes the shifter's delay profile.
+            for (auto& shifter : shifters)
+                shifter.configure(static_cast<double>(voiceFloorHz), lowLatencyMode);
+            latencySamples = shifters[0].getLatencySamples();
+        }
+    }
+    bool getLowLatencyMode() const { return lowLatencyMode; }
 
     // Chooses the voice range (index into kRangeMinHz). Safe to call from the audio thread
     // (no allocation). The latency changes, so the host must be told: see getLatencySamples().
@@ -164,15 +179,42 @@ public:
             // Sum(L+R)/2 style monophonic detection feed. Keep the original stereo
             // channels intact for independent, phase-coherent pitch shifting.
             double segmentEnergy = 0.0;
+            double channelEnergy[kMaxChannels] = { 0.0, 0.0 };
             for (int i = 0; i < seg; ++i)
             {
                 float mono = 0.0f;
                 for (int ch = 0; ch < nch; ++ch)
-                    mono += buffer.getReadPointer(ch)[pos + i];
+                {
+                    const float sample = buffer.getReadPointer(ch)[pos + i];
+                    mono += sample;
+                    channelEnergy[ch] += static_cast<double>(sample) * sample;
+                }
                 mono /= static_cast<float>(nch);
                 monoScratch[static_cast<size_t>(i)] = mono;
                 segmentEnergy += static_cast<double>(mono) * mono;
             }
+
+            // Use the requested Sum(L+R)/2 detector feed for normal stereo material,
+            // but guard against phase-opposed stereo inputs. A near-cancelled downmix
+            // otherwise looks like silence and can leave the shifter stuck on the last note.
+            if (nch == 2 && seg > 0)
+            {
+                const double monoRms = std::sqrt(segmentEnergy / static_cast<double>(seg));
+                const int dominantChannel = channelEnergy[1] > channelEnergy[0] ? 1 : 0;
+                const double dominantRms = std::sqrt(channelEnergy[dominantChannel] / static_cast<double>(seg));
+                if (dominantRms > 0.001 && monoRms < 0.30 * dominantRms)
+                {
+                    segmentEnergy = 0.0;
+                    const float* fallback = buffer.getReadPointer(dominantChannel) + pos;
+                    for (int i = 0; i < seg; ++i)
+                    {
+                        const float sample = fallback[i];
+                        monoScratch[static_cast<size_t>(i)] = sample;
+                        segmentEnergy += static_cast<double>(sample) * sample;
+                    }
+                }
+            }
+
             detector.feedSamples(monoScratch.data(), seg);
             transientEnergySum += segmentEnergy;
             transientSampleCount += seg;
@@ -309,7 +351,7 @@ private:
 
         detector.setMinFrequency(minHz);
         for (auto& s : shifters)
-            s.setMinFrequency(static_cast<double>(minHz));
+            s.configure(static_cast<double>(minHz), lowLatencyMode);
 
         latencySamples = shifters[0].getLatencySamples();
 
@@ -387,6 +429,7 @@ private:
                                       // note boundary does not make the target flip (the Sustain knob was removed)
     bool  noteStabilizer = true;
     bool  formantPreserve = true;
+    bool  lowLatencyMode = true;
     float referenceFreq  = 440.0f;
     bool  enabled        = true;
     int   rangeIndex     = kDefaultRange;

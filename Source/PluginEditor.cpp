@@ -70,9 +70,6 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     amountKnob.getProperties().set("displayScale", 100.0);
     setupKnob(referenceFreqKnob, referenceFreqLabel, "PITCH REF",
               "What frequency the note A4 is tuned to. 440 Hz is the standard.");
-    setupKnob(lowLatencyKnob, lowLatencyLabel, "LOW LATENCY",
-              "Trade low-note tracking range for lower processing delay. At the far right, pitches below about 400 Hz may be ignored.");
-    lowLatencyKnob.getProperties().set("displayScale", 100.0);
     referenceFreqKnob.setTextValueSuffix(" Hz");
     referenceFreqKnob.getProperties().set("hideValue", true);   // the value is shown next to the knob
 
@@ -80,7 +77,6 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     humanizeAtt  = std::make_unique<SliderAttach>(apvts, "humanize", humanizeKnob);
     amountAtt    = std::make_unique<SliderAttach>(apvts, "amount", amountKnob);
     referenceFreqAtt = std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
-    lowLatencyAtt = std::make_unique<SliderAttach>(apvts, "lowLatency", lowLatencyKnob);
 
     // --- Scale selector. Choosing a scale also updates the piano-key mask. ---
     scaleBox.addItemList(juce::StringArray { "Major", "Minor", "Chromatic", "Harmonic Minor",
@@ -105,14 +101,17 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     stabilizerBtn.setTooltip("Holds a note a little longer, so vibrato\ndoes not make the tuning jump between notes.");
     formantBtn.setTooltip("On: keeps the natural character of the voice.\nOff: robotic / chipmunk effect.");
     enableBtn.setTooltip("Turns the tuning on and off.");
+    lowLatencyBtn.setTooltip("On: shorter TD-PSOLA overlap and lower algorithmic delay. Off: longer overlap for a smoother, more forgiving sound. Input Type still defines the lowest note range.");
 
     addAndMakeVisible(stabilizerBtn);
     addAndMakeVisible(formantBtn);
     addAndMakeVisible(enableBtn);
+    addAndMakeVisible(lowLatencyBtn);
 
     stabilizerAtt = std::make_unique<ButtonAttach>(apvts, "noteStabilizer",  stabilizerBtn);
     formantAtt    = std::make_unique<ButtonAttach>(apvts, "formantPreserve", formantBtn);
     enableAtt     = std::make_unique<ButtonAttach>(apvts, "enabled",         enableBtn);
+    lowLatencyAtt = std::make_unique<ButtonAttach>(apvts, "lowLatencyEnabled", lowLatencyBtn);
 
     // --- Input Type replaces the old latency-mode selector. ---
     inputTypeBox.addItemList(juce::StringArray { "Soprano", "Alto / Tenor", "Low Male", "Bass", "Instrument" }, 1);
@@ -285,9 +284,14 @@ void HumHouseVocalTuneEditor::timerCallback()
     heatmapTarget[static_cast<size_t>(heatmapWriteIdx)]   = displayTargetHz;
     heatmapWriteIdx = (heatmapWriteIdx + 1) % kHeatmapWidth;
 
-    // The skull lights up with the singer's level (fast attack, quick release)
-    const float glowTarget = juce::jlimit(0.0f, 1.0f, displayInputLevel * 1.6f);
-    skullView.glow += 0.35f * (glowTarget - skullView.glow);
+    // Keep a faint idle aura, then let vocal energy and pitch confidence drive a
+    // quick, controlled bloom. The central orb therefore remains readable in silence
+    // but clearly responds to active, confidently tracked notes.
+    const float ambient = 0.07f;
+    const float glowTarget = juce::jlimit(0.0f, 1.0f,
+        ambient + displayInputLevel * 1.85f + displayConfidence * 0.18f);
+    const float smoothing = glowTarget > skullView.glow ? 0.42f : 0.16f;
+    skullView.glow += smoothing * (glowTarget - skullView.glow);
     skullView.repaint();
 
     repaint();
@@ -349,7 +353,7 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
     }
 
     {
-        auto titleArea = juce::Rectangle<int>(60, 0, kDesignW - 60 - 130, 44);
+        auto titleArea = juce::Rectangle<int>(48, 0, kDesignW - 96, 44);
         const juce::String title = "SkellyTune";
         g.setFont(juce::Font(juce::FontOptions(28.0f).withStyle("Bold")));
 
@@ -362,9 +366,8 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
         g.setColour(Palette::accentBright);
         g.drawText(title, titleArea, juce::Justification::centred, false);
 
-        g.setFont(juce::Font(juce::FontOptions(12.0f)));
-        g.setColour(Palette::textDim);
-        g.drawText("v1.0.0", kDesignW - 190, 0, 66, 44, juce::Justification::centredRight, false);
+        // Version is intentionally omitted from the crowded top bar; the two
+        // functional mode switches now have clear, non-overlapping hit areas.
     }
 
     // --- Main panel: controls flank the centered skeleton/radar ---
@@ -387,12 +390,27 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
     {
         const float cx = kCx, cy = kCy, R = kR;
 
-        juce::ColourGradient glow(Palette::accent.withAlpha(0.18f), cx, cy,
-                                   Palette::accent.withAlpha(0.0f),  cx, cy - R - 14.0f, true);
+        const float pulse = 0.94f + 0.06f * std::sin(
+            static_cast<float>(juce::Time::getMillisecondCounter() % 2600u) / 2600.0f * twoPi);
+        const float liveGlow = juce::jlimit(0.0f, 1.0f, skullView.glow);
+        juce::ColourGradient glow(Palette::accentBright.withAlpha(0.07f + 0.10f * liveGlow), cx, cy,
+                                   Palette::accent.withAlpha(0.0f), cx, cy - R - 26.0f, true);
         g.setGradientFill(glow);
-        g.fillEllipse(cx - R - 14.0f, cy - R - 14.0f, (R + 14.0f) * 2.0f, (R + 14.0f) * 2.0f);
+        g.fillEllipse(cx - R - 26.0f, cy - R - 26.0f, (R + 26.0f) * 2.0f, (R + 26.0f) * 2.0f);
 
-        g.setColour(Palette::accentDim);
+        // The orb has its own stacked halo, rim and inner lens rather than relying on
+        // the flat radar fill. Small intensity changes make it feel alive, not flashing.
+        const float orbR = (R - 50.0f) * pulse;
+        juce::ColourGradient orbHalo(Palette::accentBright.withAlpha(0.22f + 0.20f * liveGlow), cx, cy,
+                                     Palette::accent.withAlpha(0.0f), cx + orbR, cy, true);
+        g.setGradientFill(orbHalo);
+        g.fillEllipse(cx - orbR - 10.0f, cy - orbR - 10.0f,
+                      2.0f * (orbR + 10.0f), 2.0f * (orbR + 10.0f));
+
+        g.setColour(Palette::accent.withAlpha(0.10f + 0.22f * liveGlow));
+        g.drawEllipse(cx - orbR - 5.0f, cy - orbR - 5.0f,
+                      2.0f * (orbR + 5.0f), 2.0f * (orbR + 5.0f), 3.0f);
+        g.setColour(Palette::accent.withAlpha(0.32f + 0.36f * liveGlow));
         g.drawEllipse(cx - R, cy - R, R * 2.0f, R * 2.0f, 2.0f);
 
         for (int i = 0; i < 90; ++i)
@@ -442,11 +460,16 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
         }
 
         {
-            const float ro = R - 62.0f;
-            juce::ColourGradient orbGrad(Palette::accent.withAlpha(0.30f), cx, cy,
-                                          Palette::bgDark.withAlpha(0.9f), cx, cy - ro, true);
+            const float ro = R - 57.0f;
+            juce::ColourGradient orbGrad(Palette::accentBright.withAlpha(0.18f + 0.16f * liveGlow), cx, cy,
+                                          Palette::bgDark.withAlpha(0.96f), cx, cy - ro, true);
             g.setGradientFill(orbGrad);
             g.fillEllipse(cx - ro, cy - ro, ro * 2.0f, ro * 2.0f);
+            g.setColour(Palette::accent.withAlpha(0.30f + 0.34f * liveGlow));
+            g.drawEllipse(cx - ro, cy - ro, ro * 2.0f, ro * 2.0f, 1.5f);
+            g.setColour(Palette::accentBright.withAlpha(0.14f + 0.16f * liveGlow));
+            g.drawEllipse(cx - ro + 7.0f, cy - ro + 7.0f,
+                          (ro - 7.0f) * 2.0f, (ro - 7.0f) * 2.0f, 1.0f);
         }
     }
 
@@ -652,10 +675,9 @@ void HumHouseVocalTuneEditor::resized()
         l->setFont(labelFont);
 
     // --- Top bar ---
-    enableBtn.setBounds(R(kDesignW - 112, 8, 98, 28));
-    // Compact low-latency dial immediately left of Enabled.
-    lowLatencyKnob.setBounds(R(kDesignW - 190, 2, 42, 34));
-    lowLatencyLabel.setBounds(R(kDesignW - 218, 34, 98, 14));
+    // Switches have separate hit targets with consistent padding; the title remains clear.
+    lowLatencyBtn.setBounds(R(kDesignW - 232, 8, 106, 28));
+    enableBtn.setBounds(R(kDesignW - 118, 8, 104, 28));
 
     // --- Symmetrical side controls: Retune Speed left, Humanize right ---
     place(speedKnob,    speedLabel,     26, 112, 116);

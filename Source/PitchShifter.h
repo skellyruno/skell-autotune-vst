@@ -15,11 +15,11 @@ class PitchShifter
 public:
     static constexpr double kMinHz = 70.0;       // lowest pitch ever supported (buffers are sized for it)
 
-    // Low-latency TD-PSOLA. The source grain is phase-anchored half a period behind
-    // the selected pitch mark, reducing the required look-ahead without fabricating
-    // missing samples. At 48 kHz the default 180 Hz range reports about 6.6 ms.
-    // This remains a quality/latency trade-off; lower fundamentals need more delay.
-    static constexpr double kLatencyPeriods = 1.15;
+    // Two real-sample TD-PSOLA profiles. Low-latency mode shortens the available
+    // output look-ahead; quality mode gives each grain a longer, safer overlap.
+    // Neither mode fabricates missing samples. Lower fundamentals still need more delay.
+    static constexpr double kLowLatencyPeriods = 1.15;
+    static constexpr double kQualityLatencyPeriods = 1.70;
     static constexpr double kMaxHz = 1500.0;
 
     void prepare (double sampleRate, int /*blockSize*/)
@@ -27,7 +27,8 @@ public:
         sr = sampleRate;
 
         const int maxPeriodAlloc = std::max(32, static_cast<int>(std::ceil(sr / kMinHz)));
-        const int latencyAlloc   = static_cast<int>(std::ceil(kLatencyPeriods * maxPeriodAlloc)) + 8;
+        // Reserve for quality mode even if the user starts in low-latency mode.
+        const int latencyAlloc   = static_cast<int>(std::ceil(kQualityLatencyPeriods * maxPeriodAlloc)) + 8;
 
         inSize  = nextPow2(latencyAlloc + 4 * maxPeriodAlloc + 2 * kChunk);
         outSize = nextPow2(2 * latencyAlloc + 10 * maxPeriodAlloc + 4 * kChunk);
@@ -39,15 +40,50 @@ public:
         weightRing.assign(static_cast<size_t>(outSize), 0.0f);
 
         minPeriod = std::max(4, static_cast<int>(std::floor(sr / kMaxHz)));
-        setMinFrequency(kMinHz);
+        configure(kMinHz, lowLatencyMode);
     }
 
-    void setMinFrequency (double hz)
+    void setMinFrequency (double hz) { configure(hz, lowLatencyMode); }
+
+    // The switch selects a different delay/overlap profile without raising the
+    // detector's minimum note. Reconfiguration happens only when the profile changes.
+    void setLowLatencyMode (bool on) { configure(minFrequency, on); }
+
+    void configure (double hz, bool lowLatency)
     {
-        hz        = juce::jlimit(kMinHz, 400.0, hz);
-        maxPeriod = std::max(32, static_cast<int>(std::ceil(sr / hz)));
-        latency   = static_cast<int>(std::ceil(kLatencyPeriods * maxPeriod)) + 8;
-        reset();
+        hz = juce::jlimit(kMinHz, 400.0, hz);
+        const int nextMaxPeriod = std::max(32, static_cast<int>(std::ceil(sr / hz)));
+        const double nextPeriods = lowLatency ? kLowLatencyPeriods : kQualityLatencyPeriods;
+        const int nextLatency = static_cast<int>(std::ceil(nextPeriods * nextMaxPeriod)) + 8;
+        const bool rangeChanged = nextMaxPeriod != maxPeriod || std::abs(hz - minFrequency) >= 0.5;
+        const bool profileChanged = lowLatency != lowLatencyMode;
+        const bool delayChanged = nextLatency != latency;
+        const int previousLatency = latency;
+        const bool historyExists = inCount > 0 && outRead > 0;
+        minFrequency = hz;
+        maxPeriod = nextMaxPeriod;
+        latencyPeriods = nextPeriods;
+        lowLatencyMode = lowLatency;
+        latency = nextLatency;
+
+        if ((rangeChanged || profileChanged || delayChanged) && historyExists)
+        {
+            // Preserve the streaming clocks and blend the old and new delay taps over
+            // 5 ms. A direct tap jump at (for example) 130 Hz can land almost half a
+            // cycle away and produce a click even though all DSP samples are valid.
+            transitionFromLatency = previousLatency;
+            transitionLength = std::max(32, static_cast<int>(std::lround(sr * 0.005)));
+            transitionRemaining = transitionLength;
+            lastPeriod = juce::jlimit(static_cast<double>(minPeriod),
+                                      static_cast<double>(maxPeriod), lastPeriod);
+            // Keep the current wet mix; its normal per-sample slew will move it
+            // toward the new profile without dropping corrected signal abruptly.
+        }
+        else if (rangeChanged || profileChanged || delayChanged)
+        {
+            // Before streaming begins, a normal reset establishes clean timestamps.
+            reset();
+        }
     }
 
     void setFormantPreserve (bool on) { formantPreserve = on; }
@@ -65,6 +101,9 @@ public:
                                   static_cast<double>(maxPeriod), sr / 200.0);
         smoothedRatio = 1.0;
         wetMixState = 0.0;
+        transitionFromLatency = latency;
+        transitionLength = 0;
+        transitionRemaining = 0;
     }
 
     int getLatencySamples() const { return latency; }
@@ -269,9 +308,21 @@ private:
             const int64_t outputIndex = outRead + i;
             const size_t idx = static_cast<size_t>(outputIndex & outMask);
             const int64_t sourceIndex = outputIndex - latency;
-            const float dry = sourceIndex >= 0
-                            ? inRing[static_cast<size_t>(sourceIndex & inMask)]
-                            : 0.0f;
+            const float dryNew = sourceIndex >= 0
+                               ? inRing[static_cast<size_t>(sourceIndex & inMask)]
+                               : 0.0f;
+            float dry = dryNew;
+            if (transitionRemaining > 0 && transitionLength > 0)
+            {
+                const int64_t oldSourceIndex = outputIndex - transitionFromLatency;
+                const float dryOld = oldSourceIndex >= 0
+                                   ? inRing[static_cast<size_t>(oldSourceIndex & inMask)]
+                                   : 0.0f;
+                const float alpha = 1.0f - static_cast<float>(transitionRemaining)
+                                          / static_cast<float>(transitionLength);
+                dry = dryOld + (dryNew - dryOld) * alpha;
+                --transitionRemaining;
+            }
 
             const float weight = weightRing[idx];
             const double desiredMix = weight > 1.0e-4f ? targetWetMix : 0.0;
@@ -302,6 +353,9 @@ private:
     }
 
     double sr = 44100.0;
+    double minFrequency = kMinHz;
+    double latencyPeriods = kLowLatencyPeriods;
+    bool lowLatencyMode = true;
     int maxPeriod = 800, minPeriod = 32, latency = 2000;
     int inSize = 0, outSize = 0;
     int64_t inMask = 0, outMask = 0;
@@ -315,6 +369,9 @@ private:
     double  lastPeriod = 220.0;
     double  smoothedRatio = 1.0;
     double  wetMixState = 0.0;
+    int     transitionFromLatency = 0;
+    int     transitionLength = 0;
+    int     transitionRemaining = 0;
     bool    formantPreserve = true;
 };
 

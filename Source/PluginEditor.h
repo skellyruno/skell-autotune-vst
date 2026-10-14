@@ -3,6 +3,7 @@
 #include "HumHouseLookAndFeel.h"
 #include "PluginProcessor.h"
 #include <JuceHeader.h>
+#include <utility>
 
 // SkellyTune interface.
 //
@@ -65,14 +66,29 @@ private:
         SkullView() { setInterceptsMouseClicks(false, false); }
         void paint (juce::Graphics& g) override
         {
+            if (holo.isValid() && glow > 0.015f)
+            {
+                // Layer a soft expanded aura behind the sharp holographic detail.
+                // Repeated alpha passes create a native JUCE glow without a costly blur.
+                const int w = getWidth(), h = getHeight();
+                for (const auto& pass : { std::pair<int, float>{ 14, 0.07f },
+                                          std::pair<int, float>{ 9, 0.09f },
+                                          std::pair<int, float>{ 4, 0.12f } })
+                {
+                    g.setOpacity(pass.second * glow);
+                    g.drawImageWithin(holo, -pass.first, -pass.first,
+                                      w + 2 * pass.first, h + 2 * pass.first,
+                                      juce::RectanglePlacement::centred);
+                }
+            }
             if (solid.isValid())
             {
-                g.setOpacity(0.9f);
+                g.setOpacity(0.92f);
                 g.drawImageAt(solid, 0, 0);
             }
             if (holo.isValid() && glow > 0.02f)
             {
-                g.setOpacity(0.75f * glow);
+                g.setOpacity(0.88f * glow);
                 g.drawImageAt(holo, 0, 0);
             }
         }
@@ -85,11 +101,11 @@ private:
     juce::Image skullSolidImg, skullHoloImg, armImg;
 
     // Knobs
-    juce::Slider speedKnob, humanizeKnob, amountKnob, lowLatencyKnob;
+    juce::Slider speedKnob, humanizeKnob, amountKnob;
     juce::Slider referenceFreqKnob;
 
     // Labels for knobs
-    juce::Label speedLabel, humanizeLabel, amountLabel, lowLatencyLabel;
+    juce::Label speedLabel, humanizeLabel, amountLabel;
     juce::Label referenceFreqLabel;
 
     // Full scale set (major/minor/chromatic/harmonic minor/pentatonics/blues)
@@ -98,8 +114,9 @@ private:
     juce::ToggleButton stabilizerBtn {"Note Stabilizer"};
     juce::ToggleButton formantBtn    {"Formant"};
     juce::ToggleButton enableBtn     {"Enabled"};
+    juce::ToggleButton lowLatencyBtn {"Low Latency"};
 
-    // Input type presets the expected pitch range; lowLatencyKnob trades low-note coverage for delay.
+    // Input type presets the expected pitch range; Low Latency switches shifter profiles.
     juce::ComboBox inputTypeBox;
 
     // Key (root note) selector
@@ -117,8 +134,8 @@ private:
     std::unique_ptr<SliderAttach> speedAtt;
     std::unique_ptr<SliderAttach> humanizeAtt;
     std::unique_ptr<SliderAttach> amountAtt;
-    std::unique_ptr<SliderAttach> referenceFreqAtt, lowLatencyAtt;
-    std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, enableAtt;
+    std::unique_ptr<SliderAttach> referenceFreqAtt;
+    std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, enableAtt, lowLatencyAtt;
     std::unique_ptr<ComboAttach>  rootNoteAtt, inputTypeAtt, scaleAtt;
     std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
 
