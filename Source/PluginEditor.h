@@ -3,7 +3,6 @@
 #include "HumHouseLookAndFeel.h"
 #include "PluginProcessor.h"
 #include <JuceHeader.h>
-#include <utility>
 
 // SkellyTune interface.
 //
@@ -13,10 +12,11 @@
 //
 // Layout (top to bottom):
 //   - Top bar: logo, title, Enabled switch
-//   - Centered radar/skull and skeleton, flanked by Retune Speed (left) and Humanize (right)
-//   - Compact monitor strip below the radar, with detected/target/correction/latency
+//   - Radar visualizer with the skull (centre), skeleton arms on either side,
+//     In/Out gain (left), Retune Speed + Humanize (right)
 //   - Key, scale buttons, Note Stabilizer / Formant switches, Voice Range
-//   - Pitch heatmap + piano keyboard, with pitch reference at lower right
+//   - Pitch heatmap + piano keyboard (the piano keys are the scale)
+//   - Monitor panel: level meters, pitch readouts, pitch reference
 
 class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor,
                                 public juce::AudioProcessorParameter::Listener,
@@ -66,29 +66,14 @@ private:
         SkullView() { setInterceptsMouseClicks(false, false); }
         void paint (juce::Graphics& g) override
         {
-            if (holo.isValid() && glow > 0.015f)
-            {
-                // Layer a soft expanded aura behind the sharp holographic detail.
-                // Repeated alpha passes create a native JUCE glow without a costly blur.
-                const int w = getWidth(), h = getHeight();
-                for (const auto& pass : { std::pair<int, float>{ 14, 0.07f },
-                                          std::pair<int, float>{ 9, 0.09f },
-                                          std::pair<int, float>{ 4, 0.12f } })
-                {
-                    g.setOpacity(pass.second * glow);
-                    g.drawImageWithin(holo, -pass.first, -pass.first,
-                                      w + 2 * pass.first, h + 2 * pass.first,
-                                      juce::RectanglePlacement::centred);
-                }
-            }
             if (solid.isValid())
             {
-                g.setOpacity(0.92f);
+                g.setOpacity(0.9f);
                 g.drawImageAt(solid, 0, 0);
             }
             if (holo.isValid() && glow > 0.02f)
             {
-                g.setOpacity(0.88f * glow);
+                g.setOpacity(0.75f * glow);
                 g.drawImageAt(holo, 0, 0);
             }
         }
@@ -101,23 +86,26 @@ private:
     juce::Image skullSolidImg, skullHoloImg, armImg;
 
     // Knobs
-    juce::Slider speedKnob, humanizeKnob, amountKnob;
+    juce::Slider speedKnob, humanizeKnob;
+    juce::Slider inputGainKnob, outputGainKnob;
     juce::Slider referenceFreqKnob;
 
     // Labels for knobs
-    juce::Label speedLabel, humanizeLabel, amountLabel;
-    juce::Label referenceFreqLabel;
+    juce::Label speedLabel, humanizeLabel;
+    juce::Label inputGainLabel, outputGainLabel, referenceFreqLabel;
 
-    // Full scale set (major/minor/chromatic/harmonic minor/pentatonics/blues)
-    juce::ComboBox scaleBox;
+    // Buttons
+    juce::TextButton majorBtn {"Major"};
+    juce::TextButton minorBtn {"Minor"};
+    juce::TextButton chromBtn {"Chromatic"};
 
     juce::ToggleButton stabilizerBtn {"Note Stabilizer"};
     juce::ToggleButton formantBtn    {"Formant"};
-    juce::ToggleButton enableBtn     {"Enabled"};
     juce::ToggleButton lowLatencyBtn {"Low Latency"};
+    juce::ToggleButton enableBtn     {"Enabled"};
 
-    // Input type presets the expected pitch range; Low Latency switches shifter profiles.
-    juce::ComboBox inputTypeBox;
+    // Voice range: the lowest note the tuner follows (lower notes need more delay)
+    juce::ComboBox rangeBox;
 
     // Key (root note) selector
     juce::ComboBox rootNoteBox;
@@ -133,10 +121,9 @@ private:
 
     std::unique_ptr<SliderAttach> speedAtt;
     std::unique_ptr<SliderAttach> humanizeAtt;
-    std::unique_ptr<SliderAttach> amountAtt;
-    std::unique_ptr<SliderAttach> referenceFreqAtt;
-    std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, enableAtt, lowLatencyAtt;
-    std::unique_ptr<ComboAttach>  rootNoteAtt, inputTypeAtt, scaleAtt;
+    std::unique_ptr<SliderAttach> inputGainAtt, outputGainAtt, referenceFreqAtt;
+    std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, lowLatencyAtt, enableAtt;
+    std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt;
     std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
 
     // Pitch display state
@@ -147,6 +134,9 @@ private:
     int   displayDetectedMidi    = -1;
     int   displayTargetMidi      = -1;
     float displayInputLevel      = 0.0f;
+    float displayOutputLevel     = 0.0f;
+    float meterIn                = 0.0f;   // smoothed 0..1 meter positions
+    float meterOut               = 0.0f;
 
     // Pitch heatmap history (scrolling)
     static constexpr int kHeatmapWidth = 200;

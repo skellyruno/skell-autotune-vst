@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <limits>
 #include <vector>
 
 namespace humtune
@@ -13,13 +12,15 @@ namespace humtune
 class PitchShifter
 {
 public:
-    static constexpr double kMinHz = 70.0;       // lowest pitch ever supported (buffers are sized for it)
+    static constexpr double kMinHz = 35.0;       // buffers support low bass down to E1 and below
 
-    // Two real-sample TD-PSOLA profiles. Low-latency mode shortens the available
-    // output look-ahead; quality mode gives each grain a longer, safer overlap.
-    // Neither mode fabricates missing samples. Lower fundamentals still need more delay.
-    static constexpr double kLowLatencyPeriods = 1.15;
-    static constexpr double kQualityLatencyPeriods = 1.70;
+    // The fixed delay, measured in periods of the LOWEST pitch being tracked. It used to be 2.5:
+    // the shifter waited until real audio had arrived for the whole length of every grain.
+    // Now it only waits for part of it and "guesses" the rest by repeating the previous
+    // cycle of the voice (see processChunk), which is why a much smaller number works.
+    // Legacy period-bound mode retains this conservative setting until real-vocal
+    // comparisons justify a different default. The experimental mode uses its own budget.
+    static constexpr double kLatencyPeriods = 1.6;
     static constexpr double kMaxHz = 1500.0;
 
     void prepare (double sampleRate, int /*blockSize*/)
@@ -27,8 +28,7 @@ public:
         sr = sampleRate;
 
         const int maxPeriodAlloc = std::max(32, static_cast<int>(std::ceil(sr / kMinHz)));
-        // Reserve for quality mode even if the user starts in low-latency mode.
-        const int latencyAlloc   = static_cast<int>(std::ceil(kQualityLatencyPeriods * maxPeriodAlloc)) + 8;
+        const int latencyAlloc   = static_cast<int>(std::ceil(kLatencyPeriods * maxPeriodAlloc)) + 8;
 
         inSize  = nextPow2(latencyAlloc + 4 * maxPeriodAlloc + 2 * kChunk);
         outSize = nextPow2(2 * latencyAlloc + 10 * maxPeriodAlloc + 4 * kChunk);
@@ -37,73 +37,74 @@ public:
 
         inRing.assign(static_cast<size_t>(inSize), 0.0f);
         outRing.assign(static_cast<size_t>(outSize), 0.0f);
-        weightRing.assign(static_cast<size_t>(outSize), 0.0f);
+        outRingEpoch.assign(static_cast<size_t>(outSize), 0);
+        ringEpoch = 0;
 
         minPeriod = std::max(4, static_cast<int>(std::floor(sr / kMaxHz)));
-        configure(kMinHz, lowLatencyMode);
+        setMinFrequency(kMinHz);
     }
 
-    void setMinFrequency (double hz) { configure(hz, lowLatencyMode); }
-
-    // The switch selects a different delay/overlap profile without raising the
-    // detector's minimum note. Reconfiguration happens only when the profile changes.
-    void setLowLatencyMode (bool on) { configure(minFrequency, on); }
-
-    void configure (double hz, bool lowLatency)
+    void setMinFrequency (double hz)
     {
-        hz = juce::jlimit(kMinHz, 400.0, hz);
-        const int nextMaxPeriod = std::max(32, static_cast<int>(std::ceil(sr / hz)));
-        const double nextPeriods = lowLatency ? kLowLatencyPeriods : kQualityLatencyPeriods;
-        const int nextLatency = static_cast<int>(std::ceil(nextPeriods * nextMaxPeriod)) + 8;
-        const bool rangeChanged = nextMaxPeriod != maxPeriod || std::abs(hz - minFrequency) >= 0.5;
-        const bool profileChanged = lowLatency != lowLatencyMode;
-        const bool delayChanged = nextLatency != latency;
-        const int previousLatency = latency;
-        const bool historyExists = inCount > 0 && outRead > 0;
-        minFrequency = hz;
-        maxPeriod = nextMaxPeriod;
-        latencyPeriods = nextPeriods;
-        lowLatencyMode = lowLatency;
-        latency = nextLatency;
-
-        if ((rangeChanged || profileChanged || delayChanged) && historyExists)
-        {
-            // Preserve the streaming clocks and blend the old and new delay taps over
-            // 5 ms. A direct tap jump at (for example) 130 Hz can land almost half a
-            // cycle away and produce a click even though all DSP samples are valid.
-            transitionFromLatency = previousLatency;
-            transitionLength = std::max(32, static_cast<int>(std::lround(sr * 0.005)));
-            transitionRemaining = transitionLength;
-            lastPeriod = juce::jlimit(static_cast<double>(minPeriod),
-                                      static_cast<double>(maxPeriod), lastPeriod);
-            // Keep the current wet mix; its normal per-sample slew will move it
-            // toward the new profile without dropping corrected signal abruptly.
-        }
-        else if (rangeChanged || profileChanged || delayChanged)
-        {
-            // Before streaming begins, a normal reset establishes clean timestamps.
-            reset();
-        }
+        hz        = juce::jlimit(kMinHz, 400.0, hz);
+        maxPeriod = std::max(32, static_cast<int>(std::ceil(sr / hz)));
+        updateLatency();
+        reset();
     }
 
     void setFormantPreserve (bool on) { formantPreserve = on; }
 
+    // Experimental fixed-budget path for evaluating predictive cycle resynthesis.
+    // This is intentionally opt-in until the regression suite proves quality.
+    void setLowLatencyExperiment (bool on)
+    {
+        if (lowLatencyExperiment == on)
+            return;
+        lowLatencyExperiment = on;
+        updateLatency();
+        reset();
+    }
+
+    // Set the experimental budget for offline/QA sweeps. The class defaults to 3.5 ms;
+    // AutoTuneEngine selects 1.9 ms only when the explicit experimental switch is enabled.
+    // Lower values are stress-test configurations until real-vocal quality is validated.
+    void setLowLatencyBudgetMilliseconds (double milliseconds)
+    {
+        lowLatencyBudgetMs = juce::jlimit(0.75, 3.5, std::isfinite(milliseconds) ? milliseconds : 3.5);
+        updateLatency();
+        reset();
+    }
+
+    void updateLatency()
+    {
+        latency = lowLatencyExperiment
+                ? std::max(1, static_cast<int>(std::ceil(sr * lowLatencyBudgetMs * 0.001)))
+                : static_cast<int>(std::ceil(kLatencyPeriods * maxPeriod)) + 8;
+    }
+
     void reset()
     {
-        std::fill(inRing.begin(), inRing.end(), 0.0f);
-        std::fill(outRing.begin(), outRing.end(), 0.0f);
-        std::fill(weightRing.begin(), weightRing.end(), 0.0f);
+        // Avoid clearing the full audio rings when a host automates Low Latency or
+        // Voice Range. Ring memory is preallocated in prepare(); epochs make old
+        // output slots logically empty after O(1) reset. Input history becomes valid
+        // only as new samples advance inCount from zero, so stale input-ring cells are
+        // not addressable by the reset timeline.
+        ++ringEpoch;
+        if (ringEpoch == 0) // practically unreachable; preserve correctness on wrap.
+        {
+            std::fill(outRingEpoch.begin(), outRingEpoch.end(), 0);
+            ringEpoch = 1;
+        }
         inCount  = 0;
         outRead  = 0;
         nextTs   = 0.0;
         markPos  = -static_cast<double>(latency);
         lastPeriod = juce::jlimit(static_cast<double>(minPeriod),
                                   static_cast<double>(maxPeriod), sr / 200.0);
-        smoothedRatio = 1.0;
-        wetMixState = 0.0;
-        transitionFromLatency = latency;
-        transitionLength = 0;
-        transitionRemaining = 0;
+        smoothedPeriod = lastPeriod;
+        lastInputPeriod = lastPeriod;
+        transitionBlendAge = -1;
+        transitionBlendTotal = 0;
     }
 
     int getLatencySamples() const { return latency; }
@@ -113,27 +114,57 @@ public:
         if (numSamples <= 0 || inRing.empty())
             return;
 
-        double periodF;
+        double targetPeriod;
         if (std::isfinite(periodSamples) && periodSamples >= static_cast<float>(minPeriod))
         {
-            periodF = juce::jlimit(static_cast<double>(minPeriod), static_cast<double>(maxPeriod),
-                                   static_cast<double>(periodSamples));
-            lastPeriod = periodF;
+            targetPeriod = juce::jlimit(static_cast<double>(minPeriod), static_cast<double>(maxPeriod),
+                                        static_cast<double>(periodSamples));
+            lastPeriod = targetPeriod;
         }
         else
         {
-            // No reliable pitch (breath, consonants, silence): hold a sensible previous
-            // period while the ratio returns to unity and the output fades to delayed dry.
-            periodF = juce::jlimit(static_cast<double>(minPeriod), static_cast<double>(maxPeriod),
-                                   std::min(lastPeriod, 0.006 * sr));
+            targetPeriod = juce::jlimit(static_cast<double>(minPeriod), static_cast<double>(maxPeriod),
+                                        std::min(lastPeriod, 0.006 * sr));
         }
+        if (lowLatencyExperiment)
+        {
+            // Detect a real note transition, then crossfade smoothly toward latency-aligned
+            // input for transient preservation before returning to resynthesis. The short
+            // attack avoids introducing a new discontinuity at the blend boundary.
+            if (lastInputPeriod > 0.0
+                && std::abs(targetPeriod - lastInputPeriod) / lastInputPeriod > 0.05)
+            {
+                transitionBlendTotal = std::max(1, static_cast<int>(std::ceil(sr * 0.016)));
+                transitionBlendAge = 0;
+            }
+            lastInputPeriod = targetPeriod;
+        }
+
+        double periodF = targetPeriod;
+        if (lowLatencyExperiment)
+        {
+            // Smooth once per caller-supplied segment. AutoTuneEngine feeds fixed detector
+            // hops, so this time constant is stable in the integrated path; keeping one
+            // period value across that segment also avoids overreacting during bass startup.
+            const double coeff = std::exp(-static_cast<double>(numSamples) / (sr * 0.0025));
+            smoothedPeriod = coeff * smoothedPeriod + (1.0 - coeff) * targetPeriod;
+            periodF = juce::jlimit(static_cast<double>(minPeriod), static_cast<double>(maxPeriod), smoothedPeriod);
+        }
+        else
+            smoothedPeriod = targetPeriod;
 
         const double ratio = std::isfinite(shiftRatio)
                            ? juce::jlimit(0.6, 1.8, static_cast<double>(shiftRatio))
                            : 1.0;
 
-        for (int pos = 0; pos < numSamples; pos += kChunk)
-            processChunk(data + pos, std::min(kChunk, numSamples - pos), periodF, ratio);
+        // Keep the low-delay mode independent of the host's block size. Writing a
+        // whole 128/256-sample host block into the input ring before producing output
+        // accidentally gives the predictor extra look-ahead that can exceed its declared
+        // delay. Smaller internal slices bound that hidden block buffering without
+        // changing the period trajectory used for the caller-supplied segment.
+        const int internalChunk = lowLatencyExperiment ? kLowLatencyChunk : kChunk;
+        for (int pos = 0; pos < numSamples; pos += internalChunk)
+            processChunk(data + pos, std::min(internalChunk, numSamples - pos), periodF, ratio);
     }
 
     bool isNearUnity (float ratio) const
@@ -143,6 +174,7 @@ public:
 
 private:
     static constexpr int kChunk = 256;
+    static constexpr int kLowLatencyChunk = 32;
 
     static int nextPow2 (int v)
     {
@@ -151,129 +183,148 @@ private:
         return p;
     }
 
-    // Find the closest positive-going zero crossing near the predicted pitch mark.
-    // PSOLA grains must be aligned to the waveform phase; a free-running mark clock
-    // produces flanging/comb filtering even when the period estimate is correct.
-    double alignToPitchMark (double predicted, double periodF, int64_t newest) const
+    double refinePitchMark (double predicted, double periodF) const
     {
-        if (predicted < 2.0 || newest < 4)
+        // A fixed-delay predictor can be forced to repeat part of a previous cycle.
+        // Align those predicted cycles to a real waveform peak instead of assuming
+        // that a period-only mark is phase-aligned. Restrict the search to available
+        // history and a small fraction of a cycle so marks cannot jump octaves.
+        const double radius = std::min(0.12 * periodF, 0.0015 * sr);
+        const int64_t first = std::max<int64_t>(2, static_cast<int64_t>(std::ceil(predicted - radius)));
+        const int64_t last = std::min<int64_t>(inCount - 3, static_cast<int64_t>(std::floor(predicted + radius)));
+        if (first > last || predicted < 2.0 || predicted >= static_cast<double>(inCount - 3))
             return predicted;
 
-        // Search less than half a period around the predicted *next* mark. Because the
-        // mark clock advances by one estimated period, this can find the matching
-        // positive-going crossing without accidentally choosing the adjacent cycle.
-        const double radius = 0.45 * periodF;
-        const int64_t first = std::max<int64_t>(1, static_cast<int64_t>(std::floor(predicted - radius)));
-        const int64_t last  = std::min<int64_t>(newest - 1, static_cast<int64_t>(std::ceil(predicted + radius)));
-        if (last <= first)
-            return predicted;
-
-        double best = predicted;
-        double bestDistance = std::numeric_limits<double>::max();
+        int64_t best = static_cast<int64_t>(std::llround(predicted));
+        float bestMagnitude = 0.0f;
+        // Prefer the same-polarity crest as the preceding predicted cycle. Searching
+        // absolute magnitude alone can snap a mark onto a nearby opposite-polarity
+        // harmonic peak, especially just after a falling pitch transition.
+        const int64_t previous = static_cast<int64_t>(std::llround(predicted - periodF));
+        const float reference = (previous >= 1 && previous < inCount)
+            ? inRing[static_cast<size_t>(previous & inMask)] : 0.0f;
+        const bool positiveReference = reference >= 0.0f;
         for (int64_t i = first; i <= last; ++i)
         {
-            const float a = inRing[static_cast<size_t>((i - 1) & inMask)];
-            const float b = inRing[static_cast<size_t>( i      & inMask)];
-            if (a <= 0.0f && b > 0.0f)
+            const float sample = inRing[static_cast<size_t>(i & inMask)];
+            if ((sample >= 0.0f) != positiveReference)
+                continue;
+            const float value = std::abs(sample);
+            if (value > bestMagnitude)
             {
-                const double frac = static_cast<double>(-a) /
-                                    std::max(1.0e-12, static_cast<double>(b - a));
-                const double crossing = static_cast<double>(i - 1) + juce::jlimit(0.0, 1.0, frac);
-                const double distance = std::abs(crossing - predicted);
-                if (distance < bestDistance)
+                bestMagnitude = value;
+                best = i;
+            }
+        }
+        // Very quiet/near-zero reference points can have no candidate of the chosen
+        // sign; fall back to the old bounded maximum rather than freezing the mark.
+        if (bestMagnitude <= 1.0e-8f)
+        {
+            for (int64_t i = first; i <= last; ++i)
+            {
+                const float value = std::abs(inRing[static_cast<size_t>(i & inMask)]);
+                if (value > bestMagnitude)
                 {
-                    bestDistance = distance;
-                    best = crossing;
+                    bestMagnitude = value;
+                    best = i;
                 }
             }
         }
 
-        // If the local waveform does not provide a clean rising crossing, keep the
-        // phase prediction. Switching between a zero crossing and a local peak makes
-        // the source mark jump by a quarter cycle and is audible as roughness.
-        return best;
+        // Sub-sample parabolic interpolation around the selected absolute peak.
+        if (best > first && best < last)
+        {
+            const double ym = std::abs(inRing[static_cast<size_t>((best - 1) & inMask)]);
+            const double y0 = std::abs(inRing[static_cast<size_t>( best      & inMask)]);
+            const double yp = std::abs(inRing[static_cast<size_t>((best + 1) & inMask)]);
+            const double denom = ym - 2.0 * y0 + yp;
+            if (std::abs(denom) > 1.0e-12)
+                return static_cast<double>(best) + juce::jlimit(-0.5, 0.5, 0.5 * (ym - yp) / denom);
+        }
+        return static_cast<double>(best);
     }
 
-    void processChunk (float* data, int m, double periodF, double requestedRatio)
+    void processChunk (float* data, int m, double periodF, double ratio)
     {
         for (int i = 0; i < m; ++i)
             inRing[static_cast<size_t>((inCount + i) & inMask)] = data[i];
         inCount += m;
 
-        // A tiny ratio smoother removes zippering when the detector updates its target
-        // every few milliseconds. It is separate from the user-facing retune-speed control.
-        const double ratioTime = 0.0025;
-        const double ratioCoeff = std::exp(-static_cast<double>(m) / (sr * ratioTime));
-        smoothedRatio = static_cast<double>(requestedRatio)
-                      + (smoothedRatio - static_cast<double>(requestedRatio)) * ratioCoeff;
-        const double ratio = juce::jlimit(0.6, 1.8, smoothedRatio);
+        // Output spacing of the grains (this sets the new pitch)
+        const double hop    = periodF / ratio;
+        const double margin = 8.0;
 
-        const double hop = periodF / ratio;
-        const double margin = 12.0;
+        // Every grain covers exactly one period of the voice on each side of its centre.
+        // That length matters: it puts the zeros of the window's spectrum exactly on the
+        // voice's harmonics, so nothing leaks into the output (any other length adds
+        // low-frequency rumble when the pitch is changed).
+        //   formants kept : the grain is read at normal speed  -> output half-window = period
+        //   formants moved: the grain is read at `ratio` speed -> output half-window = hop
+        double wo = formantPreserve ? periodF : hop;
 
-        // Use pitch-synchronous windows with a half-period source-anchor offset.
-        // That keeps the grains phase-locked while moving the complete source window
-        // farther into already-received audio. It is the key low-latency improvement:
-        // no repeated/fabricated future cycles are used.
-        double wo = std::max(0.56 * periodF, 0.58 * hop);
-        const double rate = formantPreserve ? 1.0 : ratio;
-        const double alignmentAllowance = 0.50 * periodF;
-        // With the source centre half a period behind the mark, available look-ahead
-        // is max(0, wo*rate - P/2). Bound both the ordinary and unpreserved-formant cases.
-        const double safeLatency = static_cast<double>(latency) - margin;
-        const double woMax = std::max(8.0, std::min(safeLatency - alignmentAllowance,
-                                                  safeLatency / (1.0 + rate)));
-        wo = std::max(8.0, std::min(wo, woMax));
-        const double sourceHalf = wo * rate;
-        const double sourceFuture = std::max(0.0, sourceHalf - 0.5 * periodF);
-        const float piOverW = juce::MathConstants<float>::pi / static_cast<float>(wo);
+        // Longest half-window the delay budget allows, keeping a little real audio ahead.
+        // Only the very lowest notes get anywhere near this limit.
+        const double woMax = static_cast<double>(latency) - margin - 0.6 * periodF;
+        if (! lowLatencyExperiment)
+            wo = std::max(std::min(wo, woMax), 0.5 * periodF);
+        else
+            wo = std::max(wo, 0.5 * periodF); // keep nominal cycle geometry; predict unavailable tail
+
+        const double rate = periodF / wo;                      // source samples per output sample
+        const float  gain = static_cast<float>(hop / wo);      // keeps the loudness constant
+        const float  piOverW = juce::MathConstants<float>::pi / static_cast<float>(wo);
+
+        // How much REAL audio must exist beyond the mark before a grain is built. Whatever
+        // is still missing at the far end of the grain is guessed (see below).
+        const double xCap  = static_cast<double>(latency) - margin - 0.5 * periodF - wo;
+        const double xNeed = std::min(periodF, std::max(0.0, xCap));
 
         for (;;)
         {
             const double ta0 = nextTs - static_cast<double>(latency);
 
-            // Keep a monotonic analysis-mark clock. Advance it in whole pitch periods, then
-            // nudge each new mark onto the nearby waveform crossing/peak. Re-selecting a mark
-            // independently for every synthesis grain causes phase jitter as the target ratio
-            // changes; stateful pitch marks are much more stable for sustained vowels.
+            // Pick the analysis mark (spaced one period apart) nearest to ta0
             while (markPos + 0.5 * periodF < ta0)
             {
                 markPos += periodF;
-                if (markPos >= 2.0 && markPos < static_cast<double>(inCount - 3))
-                    markPos = alignToPitchMark(markPos, periodF, inCount - 3);
+                if (lowLatencyExperiment)
+                    markPos = refinePitchMark(markPos, periodF);
             }
 
-            // Do not synthesize a grain until its complete source window exists. The old
-            // implementation wrapped unavailable future samples back one period; that
-            // periodic guess was the main source of metallic/chipmunk artifacts at low delay.
-            if (markPos < 0.5 * periodF + sourceHalf + 2.0)
-            {
-                // Stream start: skip incomplete grains rather than building them from zeros.
-                nextTs += hop;
-                continue;
-            }
-            // Only wait for the small right-hand tail that is genuinely needed by the
-            // interpolation kernel. The rest of the grain comes from available history.
-            if (markPos + sourceFuture + 3.0 >= static_cast<double>(inCount))
-                break;
-            const double mark = markPos;
+            if (static_cast<int64_t>(std::floor(markPos + xNeed)) + 3 >= inCount)
+                break;                                          // wait for more audio
 
-            const int64_t oFirst = static_cast<int64_t>(std::ceil (nextTs - wo));
+            const double  limit  = static_cast<double>(inCount) - 3.0;   // newest position the cubic can use
+            const int64_t grainStart = static_cast<int64_t>(std::ceil(nextTs - wo));
+            const int64_t oFirst = std::max(grainStart, outRead);
             const int64_t oLast  = static_cast<int64_t>(std::floor(nextTs + wo));
+            const bool startsLate = grainStart < outRead;
 
-            for (int64_t o = std::max(oFirst, outRead); o <= oLast; ++o)
+            for (int64_t o = oFirst; o <= oLast; ++o)
             {
-                const double xd = static_cast<double>(o) - nextTs + wo;
-                if (xd <= 0.0 || xd >= 2.0 * wo)
+                const float x = static_cast<float>(static_cast<double>(o) - nextTs + wo);
+                if (x <= 0.0f)
                     continue;
-                const float x = static_cast<float>(xd);
-                const float w = 0.5f * (1.0f - std::cos(piOverW * x));
+                float w = 0.5f * (1.0f - std::cos(piOverW * x));      // Hann window
+                if (startsLate)
+                {
+                    // Fixed-delay mode may discover a grain after its natural left edge
+                    // has already passed. Adding its full mid-window weight at outRead
+                    // creates clicks on sustained tones. Fade the newly arriving grain in
+                    // causally over 32 samples; no past output is modified.
+                    const float u = juce::jlimit(0.0f,
+                        1.0f, static_cast<float>(o - outRead) / 32.0f);
+                    const float ramp = u * u * (3.0f - 2.0f * u);
+                    w *= ramp;
+                }
 
-                const double pos = mark - 0.5 * periodF
-                                 + (static_cast<double>(o) - nextTs) * rate;
-                const double fl = std::floor(pos);
-                const int64_t a = static_cast<int64_t>(fl);
-                if (a < 1 || a + 2 >= inCount)
+                double pos = markPos + (static_cast<double>(o) - nextTs) * rate;
+                if (pos > limit)        // not arrived yet: repeat the previous cycle of the voice
+                    pos -= std::ceil((pos - limit) / periodF) * periodF;
+
+                const double  fl = std::floor(pos);
+                const int64_t a  = static_cast<int64_t>(fl);
+                if (a < 1)
                     continue;
 
                 const float t  = static_cast<float>(pos - fl);
@@ -288,91 +339,70 @@ private:
                                 + c2 * inRing[static_cast<size_t>((a + 1) & inMask)]
                                 + c3 * inRing[static_cast<size_t>((a + 2) & inMask)];
 
-                const size_t outIdx = static_cast<size_t>(o & outMask);
-                outRing[outIdx] += smp * w;
-                weightRing[outIdx] += w;
+                const size_t outputIndex = static_cast<size_t>(o & outMask);
+                if (outRingEpoch[outputIndex] != ringEpoch)
+                {
+                    outRing[outputIndex] = 0.0f;
+                    outRingEpoch[outputIndex] = ringEpoch;
+                }
+                outRing[outputIndex] += smp * w * gain;
             }
 
             nextTs += hop;
         }
 
-        // Crossfade to the exact delayed dry path as correction approaches unity. Switching
-        // directly from a granular waveform to dry audio on a voiced/unvoiced transition
-        // can create a click even though the reported sample latency is unchanged.
-        const double ratioDelta = std::abs(smoothedRatio - 1.0);
-        const double targetWetMix = juce::jlimit(0.0, 1.0,
-                                               (ratioDelta - 0.0002) / 0.0018);
-        const double mixStep = 1.0 / std::max(1.0, sr * 0.003); // 3 ms linear fade
         for (int i = 0; i < m; ++i)
         {
-            const int64_t outputIndex = outRead + i;
-            const size_t idx = static_cast<size_t>(outputIndex & outMask);
-            const int64_t sourceIndex = outputIndex - latency;
-            const float dryNew = sourceIndex >= 0
-                               ? inRing[static_cast<size_t>(sourceIndex & inMask)]
-                               : 0.0f;
-            float dry = dryNew;
-            if (transitionRemaining > 0 && transitionLength > 0)
+            const int64_t outputTime = outRead + i;
+            const size_t idx = static_cast<size_t>(outputTime & outMask);
+            const float shifted = outRingEpoch[idx] == ringEpoch ? outRing[idx] : 0.0f;
+            if (outRingEpoch[idx] == ringEpoch)
+                outRing[idx] = 0.0f;
+            float result = shifted;
+            if (lowLatencyExperiment && transitionBlendAge >= 0)
             {
-                const int64_t oldSourceIndex = outputIndex - transitionFromLatency;
-                const float dryOld = oldSourceIndex >= 0
-                                   ? inRing[static_cast<size_t>(oldSourceIndex & inMask)]
-                                   : 0.0f;
-                const float alpha = 1.0f - static_cast<float>(transitionRemaining)
-                                          / static_cast<float>(transitionLength);
-                dry = dryOld + (dryNew - dryOld) * alpha;
-                --transitionRemaining;
+                const int64_t dryTime = outputTime - latency;
+                if (dryTime >= 0 && dryTime < inCount)
+                {
+                    const float dry = inRing[static_cast<size_t>(dryTime & inMask)];
+                    const int attackSamples = std::max(1, static_cast<int>(std::ceil(sr * 0.0005)));
+                    const float attack = juce::jlimit(0.0f, 1.0f,
+                        static_cast<float>(transitionBlendAge) / static_cast<float>(attackSamples));
+                    const float decay = juce::jlimit(0.0f, 1.0f,
+                        1.0f - static_cast<float>(transitionBlendAge) / static_cast<float>(std::max(1, transitionBlendTotal)));
+                    const float dryWeight = attack * decay;
+                    result = shifted * (1.0f - dryWeight) + dry * dryWeight;
+                }
+                ++transitionBlendAge;
+                if (transitionBlendAge >= transitionBlendTotal)
+                    transitionBlendAge = -1;
             }
-
-            const float weight = weightRing[idx];
-            const double desiredMix = weight > 1.0e-4f ? targetWetMix : 0.0;
-            // Slew the mix per sample (not per host block) and only fade in when a complete
-            // wet grain exists. That avoids both note-change clicks and startup grain pops.
-            if (wetMixState < desiredMix)
-                wetMixState = std::min(desiredMix, wetMixState + mixStep);
-            else if (wetMixState > desiredMix)
-                wetMixState = std::max(desiredMix, wetMixState - mixStep);
-
-            if (weight > 1.0e-4f && wetMixState > 0.0)
-            {
-                // Normalize by the actual local overlap, rather than an average hop/width
-                // gain. Then fade to the delayed input for micro-corrections/unvoiced audio.
-                const float wet = outRing[idx] / weight;
-                const float wetMix = static_cast<float>(wetMixState);
-                data[i] = dry + wetMix * (wet - dry);
-            }
-            else
-            {
-                data[i] = dry;
-            }
-
-            outRing[idx] = 0.0f;
-            weightRing[idx] = 0.0f;
+            data[i] = result;
         }
         outRead += m;
     }
 
     double sr = 44100.0;
-    double minFrequency = kMinHz;
-    double latencyPeriods = kLowLatencyPeriods;
-    bool lowLatencyMode = true;
     int maxPeriod = 800, minPeriod = 32, latency = 2000;
     int inSize = 0, outSize = 0;
     int64_t inMask = 0, outMask = 0;
 
-    std::vector<float> inRing, outRing, weightRing;
+    std::vector<float> inRing, outRing;
+    std::vector<uint64_t> outRingEpoch;
+    uint64_t ringEpoch = 0;
 
     int64_t inCount = 0;
     int64_t outRead = 0;
     double  nextTs  = 0.0;
     double  markPos = 0.0;
     double  lastPeriod = 220.0;
-    double  smoothedRatio = 1.0;
-    double  wetMixState = 0.0;
-    int     transitionFromLatency = 0;
-    int     transitionLength = 0;
-    int     transitionRemaining = 0;
+    double  smoothedPeriod = 220.0;
+    double  lastInputPeriod = 220.0;
+    int     transitionBlendAge = -1;
+    int     transitionBlendTotal = 0;
     bool    formantPreserve = true;
+    bool    lowLatencyExperiment = false;
+    double  lowLatencyBudgetMs = 3.5;
 };
 
 } // namespace humtune

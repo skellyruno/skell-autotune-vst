@@ -5,7 +5,6 @@
 #include <JuceHeader.h>
 #include <array>
 #include <cmath>
-#include <limits>
 #include <vector>
 
 namespace humtune
@@ -14,31 +13,30 @@ namespace humtune
 class AutoTuneEngine
 {
 public:
-    static constexpr std::array<bool, 12> kMajor           = {true,false,true,false,true,true,false,true,false,true,false,true};
-    static constexpr std::array<bool, 12> kMinor           = {true,false,true,true,false,true,false,true,true,false,true,false};
-    static constexpr std::array<bool, 12> kChromatic       = {true,true,true,true,true,true,true,true,true,true,true,true};
-    static constexpr std::array<bool, 12> kHarmonicMinor   = {true,false,true,true,false,true,false,true,true,false,false,true};
-    static constexpr std::array<bool, 12> kMajorPentatonic = {true,false,true,false,true,false,false,true,false,true,false,false};
-    static constexpr std::array<bool, 12> kMinorPentatonic = {true,false,false,true,false,true,false,true,false,false,true,false};
-    static constexpr std::array<bool, 12> kBlues           = {true,false,false,true,false,true,true,true,false,false,true,false};
+    static constexpr std::array<bool, 12> kMajor     = {true,false,true,false,true,true,false,true,false,true,false,true};
+    static constexpr std::array<bool, 12> kMinor     = {true,false,true,true,false,true,false,true,true,false,true,false};
+    static constexpr std::array<bool, 12> kChromatic = {true,true,true,true,true,true,true,true,true,true,true,true};
 
     static constexpr int kMaxChannels = 2;
 
-    // Voice range = the lowest note the tuner follows. The low-latency TD-PSOLA shifter
-    // uses real samples and a reduced future-sample requirement. At 48 kHz, reported latency
-    // is approximately 16.6 / 14.5 / 11.7 / 9.0 / 6.6 ms for 70 / 80 / 100 / 130 / 180 Hz.
-    static constexpr int   kNumRanges    = 5;
-    static constexpr float kRangeMinHz[kNumRanges] = { 70.0f, 80.0f, 100.0f, 130.0f, 180.0f };
-    static constexpr int   kDefaultRange = 4;
+    // Voice range = the lowest note the tuner follows. Standard-mode delay is about 1.6
+    // periods of that note plus an 8-sample guard, so a higher floor means less delay.
+    // The legacy first five parameter indices are preserved for saved-session compatibility;
+    // the new Sub Bass option is appended as index 5 rather than shifting old values.
+    //    40 Hz -> 40.0 ms   70 Hz -> 23.0 ms   80 Hz -> 20.2 ms
+    //   100 Hz -> 16.2 ms  130 Hz -> 12.5 ms  180 Hz ->  9.1 ms
+    static constexpr int   kNumRanges    = 6;
+    static constexpr float kRangeMinHz[kNumRanges] = { 70.0f, 80.0f, 100.0f, 130.0f, 180.0f, 40.0f };
+    static constexpr int   kDefaultRange = 1;
+    static constexpr double kExperimentalLowLatencyMs = 1.9;
 
     void prepare (double sampleRate, int blockSize)
     {
         sr = sampleRate;
         detector.prepare(sampleRate, blockSize);
-        monoScratch.assign(static_cast<size_t>(std::max(1, detector.getHopSize())), 0.0f);
-        transientEnergySum = 0.0;
-        transientSampleCount = 0;
-        smoothedInputRms = 0.0f;
+        // Preallocate detector downmix storage off the audio thread. A generous
+        // cap handles oversized host blocks without allocating during process().
+        detectorMono.assign(static_cast<size_t>(std::max(8192, blockSize)), 0.0f);
         for (auto& s : shifters)
             s.prepare(sampleRate, blockSize);
 
@@ -53,8 +51,8 @@ public:
     int   getLatencySamples() const { return latencySamples; }
     float getMinFrequency()   const { return detector.getMinFrequency(); }
 
-    void setRootNote        (int note)    { rootNote = ((note % 12) + 12) % 12; }
-    void setScaleType       (int type)    { scaleType = juce::jlimit(0, 6, type); }
+    void setRootNote        (int note)    { rootNote = note % 12; }
+    void setScaleType       (int type)    { scaleType = type; }
     void setRetuneSpeed     (float spd)   { retuneSpeed = spd; }
     void setAmount          (float amt)   { amount = amt; }
     void setHumanize        (float h)     { humanize = h; }
@@ -62,41 +60,61 @@ public:
     void setNoteStabilizer  (bool on)     { noteStabilizer = on; }
     void setFormantPreserve (bool on)     { formantPreserve = on; }
     void setReferenceFreq   (float hz)    { referenceFreq = hz; }
-    void setEnabled         (bool on)     { enabled = on; }
-    void setLowLatencyMode  (bool on)
+    void setEnabled (bool on)
+    {
+        if (enabled == on)
+            return;
+
+        enabled = on;
+        smoothedCorrectionCents = 0.0;
+        lockedMidiNote = -1;
+        holdCounter = 0;
+        samplesSinceHop = 0;
+        curRatio = 1.0f;
+        curPeriod = 0.0f;
+        lastDetectedHz = lastTargetHz = lastCorrectionCents = 0.0f;
+        lastDetectedMidi = lastTargetMidi = -1;
+
+        // The shifter is not fed while tuning is bypassed. Clear its stale ring and
+        // detector history when re-enabling so it cannot resume with a time gap.
+        if (prepared && on)
+        {
+            detector.setMinFrequency(kRangeMinHz[rangeIndex]);
+            for (auto& s : shifters)
+                s.reset();
+        }
+    }
+
+    // Experimental fixed-delay resynthesis. The existing period-bound path remains
+    // the default; when enabled, the shifters use a fixed 1.9 ms processing budget.
+    // This budget is not a claim about end-to-end DAW latency.
+    void setLowLatencyMode (bool on)
     {
         if (lowLatencyMode == on)
             return;
+
         lowLatencyMode = on;
-        if (prepared)
+        for (auto& s : shifters)
         {
-            // Profile-only change: preserve detector and shifter history. Input Type
-            // still owns the pitch floor; the switch changes the shifter's delay profile.
-            for (auto& shifter : shifters)
-                shifter.configure(static_cast<double>(voiceFloorHz), lowLatencyMode);
-            latencySamples = shifters[0].getLatencySamples();
+            s.setLowLatencyExperiment(on);
+            if (on)
+                s.setLowLatencyBudgetMilliseconds(kExperimentalLowLatencyMs);
         }
+
+        if (prepared)
+            applyLatencyMode();
     }
+
     bool getLowLatencyMode() const { return lowLatencyMode; }
 
     // Chooses the voice range (index into kRangeMinHz). Safe to call from the audio thread
     // (no allocation). The latency changes, so the host must be told: see getLatencySamples().
-    void setVoiceRange (int index)
+    void setVoiceRange      (int index)
     {
         index = std::max(0, std::min(kNumRanges - 1, index));
-        rangeIndex = index;
-        setVoiceFloor(kRangeMinHz[index]);
-    }
-
-    // A finer floor setting lets the Low Latency control trade low-note coverage for
-    // algorithmic delay beyond the five broad voice presets. The shifter/detector buffers
-    // are sized for 70 Hz in prepare(), so this does not allocate when the floor changes.
-    void setVoiceFloor (float hz)
-    {
-        hz = juce::jlimit(kRangeMinHz[0], 400.0f, hz);
-        if (std::abs(hz - voiceFloorHz) < 0.5f)
+        if (index == rangeIndex)
             return;
-        voiceFloorHz = hz;
+        rangeIndex = index;
         if (prepared)
             applyLatencyMode();
     }
@@ -161,94 +179,71 @@ public:
             curRatio = 1.0f;
             curPeriod = 0.0f;
 
-            for (int ch = 0; ch < nch; ++ch)
-                shifters[static_cast<size_t>(ch)].process(buffer.getWritePointer(ch), numSamples, 0.0f, 1.0f);
+            // True delayed dry passthrough: do not run audio through the shifter at unity
+            // ratio, which can still reshape transients and phase. The dry delay line is
+            // kept warm during enabled processing so this transition remains aligned.
+            delayDry(buffer);
             return;
         }
 
-        // The correction is refreshed every `hop` samples (about 5 ms) instead of once
+        // Save the original input to the dry ring without altering the wet buffer. If
+        // the user disables tuning later, delayDry() can switch to exact latency-matched
+        // passthrough without allocating a second AudioBuffer on the audio thread.
+        storeDryInput(buffer);
+
+        // The correction is refreshed every `hop` samples (about 4 ms) instead of once
         // per DAW buffer, and each piece of audio is shifted straight after the pitch
         // of that piece was measured. That keeps the correction in step with the voice.
         const int hop = detector.getHopSize();
+        const float* left = buffer.getReadPointer(0);
+        const float* right = (nch > 1) ? buffer.getReadPointer(1) : nullptr;
 
         int pos = 0;
         while (pos < numSamples)
         {
-            const int seg = std::min(numSamples - pos, hop - samplesSinceHop);
-
-            // Sum(L+R)/2 style monophonic detection feed. Keep the original stereo
-            // channels intact for independent, phase-coherent pitch shifting.
-            double segmentEnergy = 0.0;
-            double channelEnergy[kMaxChannels] = { 0.0, 0.0 };
-            for (int i = 0; i < seg; ++i)
+            // Keep the scratch write bounded and allocation-free even if a host
+            // supplies an unusually large block.
+            const int seg = std::min({ numSamples - pos,
+                                       hop - samplesSinceHop,
+                                       static_cast<int>(detectorMono.size()) });
+            if (right != nullptr)
             {
-                float mono = 0.0f;
-                for (int ch = 0; ch < nch; ++ch)
+                // First measure the stereo block. Choosing the stronger sample
+                // independently for each sample creates a rectifier-like waveform
+                // when the channels are anti-phase. Instead, decide once per segment
+                // whether the normal mono sum is badly cancelled, then use one whole
+                // channel for the detector. The audible stereo paths remain untouched.
+                double leftEnergy = 0.0, rightEnergy = 0.0, sumEnergy = 0.0;
+                for (int i = 0; i < seg; ++i)
                 {
-                    const float sample = buffer.getReadPointer(ch)[pos + i];
-                    mono += sample;
-                    channelEnergy[ch] += static_cast<double>(sample) * sample;
+                    const double l = left[pos + i];
+                    const double r = right[pos + i];
+                    const double sum = 0.5 * (l + r);
+                    leftEnergy += l * l;
+                    rightEnergy += r * r;
+                    sumEnergy += sum * sum;
                 }
-                mono /= static_cast<float>(nch);
-                monoScratch[static_cast<size_t>(i)] = mono;
-                segmentEnergy += static_cast<double>(mono) * mono;
-            }
-
-            // Use the requested Sum(L+R)/2 detector feed for normal stereo material,
-            // but guard against phase-opposed stereo inputs. A near-cancelled downmix
-            // otherwise looks like silence and can leave the shifter stuck on the last note.
-            if (nch == 2 && seg > 0)
-            {
-                const double monoRms = std::sqrt(segmentEnergy / static_cast<double>(seg));
-                const int dominantChannel = channelEnergy[1] > channelEnergy[0] ? 1 : 0;
-                const double dominantRms = std::sqrt(channelEnergy[dominantChannel] / static_cast<double>(seg));
-                if (dominantRms > 0.001 && monoRms < 0.30 * dominantRms)
+                const double channelEnergy = std::max(leftEnergy, rightEnergy);
+                const bool downmixCancels = channelEnergy > 1.0e-12
+                    && sumEnergy < 0.08 * channelEnergy;
+                const bool useRight = rightEnergy > leftEnergy;
+                for (int i = 0; i < seg; ++i)
                 {
-                    segmentEnergy = 0.0;
-                    const float* fallback = buffer.getReadPointer(dominantChannel) + pos;
-                    for (int i = 0; i < seg; ++i)
-                    {
-                        const float sample = fallback[i];
-                        monoScratch[static_cast<size_t>(i)] = sample;
-                        segmentEnergy += static_cast<double>(sample) * sample;
-                    }
+                    const float l = left[pos + i];
+                    const float r = right[pos + i];
+                    detectorMono[static_cast<size_t>(i)] = downmixCancels
+                        ? (useRight ? r : l) : 0.5f * (l + r);
                 }
             }
+            else
+                std::copy(left + pos, left + pos + seg, detectorMono.begin());
 
-            detector.feedSamples(monoScratch.data(), seg);
-            transientEnergySum += segmentEnergy;
-            transientSampleCount += seg;
-
+            detector.feedSamples(detectorMono.data(), seg);
             samplesSinceHop += seg;
             if (samplesSinceHop >= hop)
             {
                 samplesSinceHop = 0;
-                const float hopRms = transientSampleCount > 0
-                    ? static_cast<float>(std::sqrt(transientEnergySum / transientSampleCount)) : 0.0f;
-                const bool transient = hopRms > 0.035f
-                    && hopRms > 2.4f * std::max(smoothedInputRms, 0.006f);
-
-                // Fast attack / slow release for the reference envelope. When a sharp
-                // plosive or transient arrives, still update the pitch display/history,
-                // but ease the shifter back toward delayed dry for this hop rather than
-                // imprinting the previous vowel's pitch ratio onto the transient.
-                if (hopRms > smoothedInputRms)
-                    smoothedInputRms = 0.65f * smoothedInputRms + 0.35f * hopRms;
-                else
-                    smoothedInputRms = 0.92f * smoothedInputRms + 0.08f * hopRms;
-                transientEnergySum = 0.0;
-                transientSampleCount = 0;
-
-                if (transient)
-                {
-                    detector.detectPitch();
-                    curRatio = 1.0f;
-                    curPeriod = 0.0f;
-                }
-                else
-                {
-                    updateCorrection(hop);
-                }
+                updateCorrection(hop);
             }
 
             for (int ch = 0; ch < nch; ++ch)
@@ -263,6 +258,31 @@ public:
     }
 
 private:
+    void storeDryInput (const juce::AudioBuffer<float>& buffer)
+    {
+        const int n = buffer.getNumSamples();
+        const int nch = std::min(buffer.getNumChannels(), kMaxChannels);
+        const int len = latencySamples;
+        if (n <= 0 || nch <= 0 || len <= 0)
+            return;
+
+        int endPos = dryPos;
+        for (int ch = 0; ch < nch; ++ch)
+        {
+            const float* input = buffer.getReadPointer(ch);
+            auto& line = dryLine[static_cast<size_t>(ch)];
+            int p = dryPos;
+            for (int i = 0; i < n; ++i)
+            {
+                line[static_cast<size_t>(p)] = input[i];
+                if (++p >= len)
+                    p = 0;
+            }
+            endPos = p;
+        }
+        dryPos = endPos;
+    }
+
     // Looks at the newest pitch measurement and works out the correction to apply.
     // Called once per detection hop.
     void updateCorrection (int hop)
@@ -324,14 +344,19 @@ private:
         float correctionCents = 1200.0f * std::log2(targetHz / detectedHz);
         lastCorrectionCents = correctionCents;
 
-        correctionCents *= juce::jlimit(0.0f, 1.0f, amount); // correction depth
+        correctionCents *= amount;               // correction depth
+        correctionCents *= (1.0f - humanize);    // humanize
 
-        // Retune Speed maps to an intuitive 0-60 ms one-pole response. Humanize adds
-        // response time instead of weakening the final correction (which would leave notes
-        // permanently flat/sharp and behave like a mix knob).
-        const double speedNorm = juce::jlimit(0.0, 1.0, static_cast<double>(retuneSpeed));
-        const double speedMs = speedNorm < 0.001 ? 0.02 : 60.0 * std::pow(speedNorm, 1.2);
-        const double timeConstant = std::max(0.00002, (speedMs + 45.0 * juce::jlimit(0.0f, 1.0f, humanize)) / 1000.0);
+        // Retune speed: time constant of a one-pole smoother on the correction
+        double timeConstant;
+        if (retuneSpeed < 0.01f)
+            timeConstant = 0.00008;     // nearly instant
+        else if (retuneSpeed < 0.1f)
+            timeConstant = 0.0003 + static_cast<double>(retuneSpeed) * 0.0005;
+        else if (retuneSpeed < 0.5f)
+            timeConstant = 0.0005 + static_cast<double>(retuneSpeed) * 0.05;
+        else
+            timeConstant = 0.02 + static_cast<double>(retuneSpeed) * 0.08;
 
         const double coeff = std::exp(-static_cast<double>(hop) / (sr * timeConstant));
         smoothedCorrectionCents = smoothedCorrectionCents * coeff
@@ -347,11 +372,11 @@ private:
 
     void applyLatencyMode()
     {
-        const float minHz = voiceFloorHz;
+        const float minHz = kRangeMinHz[rangeIndex];
 
         detector.setMinFrequency(minHz);
         for (auto& s : shifters)
-            s.configure(static_cast<double>(minHz), lowLatencyMode);
+            s.setMinFrequency(static_cast<double>(minHz));
 
         latencySamples = shifters[0].getLatencySamples();
 
@@ -363,9 +388,6 @@ private:
         lockedMidiNote = -1;
         holdCounter = 0;
         samplesSinceHop = 0;
-        transientEnergySum = 0.0;
-        transientSampleCount = 0;
-        smoothedInputRms = 0.0f;
         curRatio = 1.0f;
         curPeriod = 0.0f;
 
@@ -378,62 +400,56 @@ private:
         const auto& scale = useCustom ? customScale
                           : (scaleType == 1) ? kMinor
                           : (scaleType == 2) ? kChromatic
-                          : (scaleType == 3) ? kHarmonicMinor
-                          : (scaleType == 4) ? kMajorPentatonic
-                          : (scaleType == 5) ? kMinorPentatonic
-                          : (scaleType == 6) ? kBlues
                           : kMajor;
 
-        // Search the nearest allowed semitone by actual distance, rather than choosing
-        // a direction from the fractional part of round(midiNote). The old logic could
-        // snap an exactly centred pitch to the wrong side because float/YIN error made
-        // a nominal tie appear microscopically flat or sharp.
-        const int centre = static_cast<int>(std::round(midiNote));
-        int bestNote = centre;
-        float bestDistance = std::numeric_limits<float>::max();
-        constexpr float tieTolerance = 0.025f; // 2.5 cents; include short-window YIN startup error at exact scale midpoints
+        const int nearest = static_cast<int>(std::round(midiNote));
 
-        for (int offset = -6; offset <= 6; ++offset)
+        // Major / Minor are measured from the chosen Key. The piano keys (custom scale)
+        // are labelled C..B, so they are absolute and must not move with the Key.
+        const int noteInOctave = useCustom ? ((nearest % 12) + 120) % 12
+                                           : ((nearest % 12) - rootNote + 120) % 12;
+
+        if (scale[static_cast<size_t>(noteInOctave)])
+            return nearest;
+
+        for (int offset = 1; offset <= 6; ++offset)
         {
-            const int candidate = centre + offset;
-            const int pitchClass = useCustom ? ((candidate % 12) + 12) % 12
-                                             : ((candidate % 12) - rootNote + 120) % 12;
-            if (! scale[static_cast<size_t>(pitchClass)])
-                continue;
+            const int up   = (noteInOctave + offset) % 12;
+            const int down = (noteInOctave - offset + 12) % 12;
 
-            const float distance = std::abs(midiNote - static_cast<float>(candidate));
-            if (distance < bestDistance - tieTolerance
-                || (std::abs(distance - bestDistance) <= tieTolerance && candidate > bestNote))
+            const bool upOk   = scale[static_cast<size_t>(up)];
+            const bool downOk = scale[static_cast<size_t>(down)];
+
+            if (upOk && downOk)
             {
-                bestDistance = distance;
-                bestNote = candidate;
+                const float fracPart = midiNote - static_cast<float>(nearest);
+                return (fracPart >= 0.0f) ? nearest + offset : nearest - offset;
             }
+            if (upOk)   return nearest + offset;
+            if (downOk) return nearest - offset;
         }
-        return bestNote;
+
+        return nearest;
     }
 
     double sr = 44100.0;
     PitchDetector detector;
     std::array<PitchShifter, kMaxChannels> shifters;
-    std::vector<float> monoScratch; // fixed-size pitch-detection downmix; sized in prepare()
-    double transientEnergySum = 0.0;
-    int transientSampleCount = 0;
-    float smoothedInputRms = 0.0f;
+    std::vector<float> detectorMono;
 
     int   rootNote       = 0;
     int   scaleType      = 0;
     float retuneSpeed    = 0.0f;
-    float amount         = 1.0f;     // full correction (available to the user as Amount)
+    float amount         = 1.0f;     // full correction (the Amount knob was removed)
     float humanize       = 0.0f;
     float sustainCents   = 60.0f;     // Note Stabilizer: small hysteresis so vibrato near a
                                       // note boundary does not make the target flip (the Sustain knob was removed)
     bool  noteStabilizer = true;
     bool  formantPreserve = true;
-    bool  lowLatencyMode = true;
     float referenceFreq  = 440.0f;
     bool  enabled        = true;
+    bool  lowLatencyMode = false;
     int   rangeIndex     = kDefaultRange;
-    float voiceFloorHz   = kRangeMinHz[kDefaultRange];
     bool  prepared       = false;
     bool  useCustom      = false;
     std::array<bool, 12> customScale = kChromatic;

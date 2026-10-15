@@ -3,6 +3,7 @@
 
 // Note names for combo-box choices
 static const juce::StringArray kNoteNames {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+static const juce::StringArray kScaleNames {"Major","Minor","Chromatic"};
 
 // ---------------------------------------------------------------------------
 // Presets
@@ -48,15 +49,11 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::ParameterID{"humanize", 1}, "Humanize",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
 
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"amount", 1}, "Amount",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
-
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"rootNote", 1}, "Root Note", 0, 11, 0));
 
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"scaleType", 1}, "Scale Type", 0, 6, 0));
+        juce::ParameterID{"scaleType", 1}, "Scale Type", 0, 2, 0));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"referenceFreq", 1}, "Reference Frequency",
@@ -68,21 +65,16 @@ HumHouseVocalTuneProcessor::createParameterLayout()
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"formantPreserve", 1}, "Formant Preserve", true));
 
-    // Voice range: the lowest note the tuner follows. Lower notes require more shifter delay.
+    // Voice range: the lowest note the tuner follows. Lower notes need more delay.
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::AutoTuneEngine::kNumRanges - 1,
         humtune::AutoTuneEngine::kDefaultRange));
 
-    // Input Type chooses the expected source range. Low Latency is a binary
-    // quality/latency profile switch; the retired continuous control is no longer
-    // registered as an automatable parameter.
-    params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"inputType", 1}, "Input Type", 0, 4, 1));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"lowLatencyEnabled", 1}, "Low Latency", true));
-
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"enabled", 1}, "Enabled", true));
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"lowLatencyMode", 1}, "Low Latency (Experimental)", false));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"inputGain", 1}, "Input Gain",
@@ -115,6 +107,29 @@ HumHouseVocalTuneProcessor::HumHouseVocalTuneProcessor()
           .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "PARAMETERS", createParameterLayout())
 {
+    cacheParameterRefs();
+}
+
+void HumHouseVocalTuneProcessor::cacheParameterRefs()
+{
+    parameterRefs.retune = apvts.getRawParameterValue("retune");
+    parameterRefs.humanize = apvts.getRawParameterValue("humanize");
+    parameterRefs.rootNote = apvts.getRawParameterValue("rootNote");
+    parameterRefs.scaleType = apvts.getRawParameterValue("scaleType");
+    parameterRefs.referenceFreq = apvts.getRawParameterValue("referenceFreq");
+    parameterRefs.noteStabilizer = apvts.getRawParameterValue("noteStabilizer");
+    parameterRefs.formantPreserve = apvts.getRawParameterValue("formantPreserve");
+    parameterRefs.range = apvts.getRawParameterValue("range");
+    parameterRefs.enabled = apvts.getRawParameterValue("enabled");
+    parameterRefs.lowLatencyMode = apvts.getRawParameterValue("lowLatencyMode");
+    parameterRefs.inputGain = apvts.getRawParameterValue("inputGain");
+    parameterRefs.outputGain = apvts.getRawParameterValue("outputGain");
+
+    for (int i = 0; i < static_cast<int>(parameterRefs.notes.size()); ++i)
+    {
+        const auto id = "note" + juce::String(i);
+        parameterRefs.notes[static_cast<size_t>(i)] = apvts.getRawParameterValue(id);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -122,17 +137,12 @@ HumHouseVocalTuneProcessor::HumHouseVocalTuneProcessor()
 // ---------------------------------------------------------------------------
 void HumHouseVocalTuneProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    const int inputType = static_cast<int>(*apvts.getRawParameterValue("inputType"));
-    const bool lowLatency = *apvts.getRawParameterValue("lowLatencyEnabled") > 0.5f;
-    // Input Type defines the supported lower note range; the Low Latency switch changes
-    // only the shifter overlap profile, so it never silently drops bass notes.
-    constexpr float inputTypeFloorHz[5] = { 180.0f, 130.0f, 100.0f, 70.0f, 80.0f };
-    const float baseFloor = inputTypeFloorHz[juce::jlimit(0, 4, inputType)];
-    engine.setVoiceFloor(baseFloor);
-    engine.setLowLatencyMode(lowLatency);
+    engine.setVoiceRange(static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed)));
+    engine.setLowLatencyMode(parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f);
     engine.prepare(sampleRate, samplesPerBlock);
     reportedLatency = engine.getLatencySamples();
     setLatencySamples(reportedLatency);
+
 }
 
 void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
@@ -141,19 +151,20 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     juce::ScopedNoDenormals noDenormals;
 
     // Read parameters
-    float retune    = *apvts.getRawParameterValue("retune");   // 1 = fastest
-    float hum       = *apvts.getRawParameterValue("humanize");
-    float amount    = *apvts.getRawParameterValue("amount");
-    int   root      = static_cast<int>(*apvts.getRawParameterValue("rootNote"));
-    int   scale     = static_cast<int>(*apvts.getRawParameterValue("scaleType"));
-    float refFreq   = *apvts.getRawParameterValue("referenceFreq");
-    bool  stab      = *apvts.getRawParameterValue("noteStabilizer") > 0.5f;
-    bool  formant   = *apvts.getRawParameterValue("formantPreserve") > 0.5f;
-    const int inputType = static_cast<int>(*apvts.getRawParameterValue("inputType"));
-    const bool lowLatency = *apvts.getRawParameterValue("lowLatencyEnabled") > 0.5f;
-    bool  on        = *apvts.getRawParameterValue("enabled") > 0.5f;
-    float inGainDb  = *apvts.getRawParameterValue("inputGain");
-    float outGainDb = *apvts.getRawParameterValue("outputGain");
+    // Read cached atomics with relaxed ordering: values are independent scalar controls,
+    // and no pointer/map/string work is needed inside the audio callback.
+    const float retune     = parameterRefs.retune->load(std::memory_order_relaxed); // 1 = fastest
+    const float hum        = parameterRefs.humanize->load(std::memory_order_relaxed);
+    const int root         = static_cast<int>(parameterRefs.rootNote->load(std::memory_order_relaxed));
+    const int scale        = static_cast<int>(parameterRefs.scaleType->load(std::memory_order_relaxed));
+    const float refFreq    = parameterRefs.referenceFreq->load(std::memory_order_relaxed);
+    const bool stab        = parameterRefs.noteStabilizer->load(std::memory_order_relaxed) > 0.5f;
+    const bool formant     = parameterRefs.formantPreserve->load(std::memory_order_relaxed) > 0.5f;
+    const int range        = static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed));
+    const bool on          = parameterRefs.enabled->load(std::memory_order_relaxed) > 0.5f;
+    const bool lowLatency  = parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f;
+    const float inGainDb   = parameterRefs.inputGain->load(std::memory_order_relaxed);
+    const float outGainDb  = parameterRefs.outputGain->load(std::memory_order_relaxed);
 
     // The piano keys are the scale
     std::array<bool, 12> keyMask;
@@ -161,7 +172,7 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (int i = 0; i < 12; ++i)
     {
         keyMask[static_cast<size_t>(i)] =
-            *apvts.getRawParameterValue("note" + juce::String(i)) > 0.5f;
+            parameterRefs.notes[static_cast<size_t>(i)]->load(std::memory_order_relaxed) > 0.5f;
         anyKeyOn = anyKeyOn || keyMask[static_cast<size_t>(i)];
     }
 
@@ -169,19 +180,14 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     engine.setScaleType(scale);
     engine.setRetuneSpeed(1.0f - retune);      // the engine works in "0 = instant"
     engine.setHumanize(hum);
-    engine.setAmount(amount);
     engine.setReferenceFreq(refFreq);
     engine.setNoteStabilizer(stab);
     engine.setFormantPreserve(formant);
-    // Input Type chooses a realistic minimum fundamental. The binary Low Latency
-    // control alters overlap/latency only, preserving all notes in the selected type.
-    constexpr float inputTypeFloorHz[5] = { 180.0f, 130.0f, 100.0f, 70.0f, 80.0f };
-    const float baseFloor = inputTypeFloorHz[juce::jlimit(0, 4, inputType)];
-    engine.setVoiceFloor(baseFloor);
+    engine.setVoiceRange(range);
     engine.setLowLatencyMode(lowLatency);
     engine.setEnabled(on);
 
-    // The delay depends on the selected pitch floor: tell the host when it changes.
+    // The delay depends on the Voice Range: tell the host when it changes
     if (engine.getLatencySamples() != reportedLatency)
     {
         reportedLatency = engine.getLatencySamples();
@@ -253,12 +259,7 @@ void HumHouseVocalTuneProcessor::setCurrentProgram (int index)
     set("noteStabilizer",  p.stabilizer ? 1.0f : 0.0f);
     set("formantPreserve", p.formantPreserve ? 1.0f : 0.0f);
     if (p.range >= 0)
-    {
-        set("range", static_cast<float>(p.range)); // retained for older sessions/automation
-        // Map the preset's legacy tracking-floor index to the new Input Type selector.
-        static constexpr int rangeToInputType[5] = { 3, 4, 2, 1, 0 };
-        set("inputType", static_cast<float>(rangeToInputType[juce::jlimit(0, 4, p.range)]));
-    }
+        set("range",       static_cast<float>(p.range));
 }
 
 void HumHouseVocalTuneProcessor::applyScaleToKeys (int scaleType, int root)

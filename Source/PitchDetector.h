@@ -19,36 +19,31 @@ namespace humtune
 //  * The window is copied into a flat array first. The old inner loop did four
 //    integer divisions (modulo) per sample, which made it far too slow for the
 //    audio thread.
-//  * Detection runs on a short, overlapping hop (about every 5 ms) instead of once per
-//    host audio block, and silence is treated as unvoiced.
+//  * Detection runs once per "hop" (about every 6 ms) instead of once per audio
+//    block, and silence is treated as unvoiced.
 class PitchDetector
 {
 public:
-    static constexpr float kMinHz = 70.0f;     // lowest pitch we can ever track (buffers are sized for it)
+    static constexpr float kMinHz = 35.0f;     // preallocated analysis window supports E1-range bass
     static constexpr float kMaxHz = 1500.0f;   // highest pitch we track
 
     void prepare (double sampleRate, int /*blockSize*/)
     {
-        // Run the detector near 24 kHz regardless of host rate. A box-filtered
-        // decimation keeps the 70–1500 Hz fundamental range comfortably below
-        // Nyquist while cutting the quadratic YIN work by roughly 4x at 48 kHz.
-        // The shifter itself still runs at the full host sample rate.
-        const double hostRate = std::max(1.0, sampleRate);
-        dec = std::max(1, static_cast<int>(std::lround(hostRate / 24000.0)));
-        sr  = hostRate / static_cast<double>(dec);        // the rate the detector works at
-        accum = 0.0f;
+        // Keep the YIN analysis rate near 12 kHz at every host sample rate. Pitch analysis
+        // does not need full-band audio; 12 kHz still gives about 8 samples per period at
+        // the 1,500 Hz tracking ceiling, while cutting the O(maxTau * integLen) difference
+        // search dramatically for low notes (especially the new 40 Hz Sub Bass range).
+        // A low-pass FIR in feedSamples() protects the reduced analysis stream from aliasing.
+        dec = std::max(1, static_cast<int>(std::lround(sampleRate / 12000.0)));
+        sr  = sampleRate / static_cast<double>(dec);        // the rate the detector works at
         accCount = 0;
-        previousInput = previousHighPass = 0.0f;
-        // Detection-only high-pass: reject DC/handling rumble without putting a filter
-        // into the audible path. 45 Hz keeps the bottom of the 70-100 Hz range usable.
-        highPassCoeff = static_cast<float>(std::exp(-2.0 * juce::MathConstants<double>::pi
-                                                    * 45.0 / hostRate));
+        aaHistory.fill (0.0f);
+        aaWrite = 0;
+        configureAntiAliasFilter();
 
-        // The adaptive YIN window can grow to 1.5 periods while retaining enough
-        // history for the largest legal lag. Storage is fixed here: the audio thread
-        // never allocates when the previous pitch changes the analysis window.
+        // Allocate once for the lowest pitch we will ever support
         const int allocTau = std::max(16, static_cast<int>(std::ceil(sr / kMinHz)));
-        const int allocBuf = 3 * allocTau + 8;
+        const int allocBuf = allocTau + allocTau + 2;
 
         ring.assign(static_cast<size_t>(allocBuf), 0.0f);
         lin.assign(static_cast<size_t>(allocBuf), 0.0f);
@@ -56,17 +51,25 @@ public:
         cmndBuf.assign(static_cast<size_t>(allocTau + 2), 0.0f);
 
         minTau  = std::max(2, static_cast<int>(std::floor(sr / kMaxHz)));
-        hopSize = std::max(32, static_cast<int>(std::lround(sr / 200.0)));
+        hopSize = std::max(32, static_cast<int>(sr / 250.0));
 
+        // prepare() may be called again by a DAW after a sample-rate change.
+        // Force the first setMinFrequency() call to recalculate the window even if
+        // the requested minimum frequency is unchanged from the previous prepare.
+        bufLen = 0;
+        freshSamples = 0;
         setMinFrequency(kMinHz);
     }
 
     // Change the lowest pitch that is tracked. A higher value means a shorter
-    // analysis window (less delay). Does not allocate, so it is safe to call
-    // from the audio thread. Clears the detector's history.
+    // analysis window (less delay). Does not allocate. Old ring contents are
+    // invalidated logically; detection stays unvoiced until a full new window has
+    // been written, avoiding a bulk ring clear during host automation.
     void setMinFrequency (float hz)
     {
         hz = juce::jlimit(kMinHz, 400.0f, hz);
+        if (bufLen > 0 && minHz == hz)
+            return;
         minHz = hz;
 
         const int allocTau = static_cast<int>(diffBuf.size()) - 2;
@@ -74,9 +77,14 @@ public:
         integLen = maxTau;                       // samples compared per lag
         bufLen   = integLen + maxTau + 2;        // samples needed in total
 
-        std::fill(ring.begin(), ring.end(), 0.0f);
         writePos = 0;
+        freshSamples = 0;
         samplesSinceDetect = 0;
+        // Range changes invalidate pitch history and decimator memory, but do not
+        // clear the larger detector rings on the real-time thread.
+        aaHistory.fill (0.0f);
+        aaWrite = 0;
+        accCount = 0;
         haveResult = false;
         resetMedian();
 
@@ -86,7 +94,7 @@ public:
 
     float getMinFrequency() const { return minHz; }
 
-    // Detection runs once every hopSize samples (about 5 ms)
+    // Detection runs once every hopSize samples (about 4 ms)
     int getHopSize() const { return hopSize * dec; }
 
     // Feed samples into the ring buffer (at the detector's own, possibly reduced, rate).
@@ -98,21 +106,31 @@ public:
         int pushed = 0;
         for (int i = 0; i < numSamples; ++i)
         {
-            // Filter only the pitch-analysis tap. Audio passed to the shifter remains
-            // untouched, so the conditioning cannot change tone or add audible phase shift.
-            const float x = data[i];
-            const float filtered = highPassCoeff * (previousHighPass + x - previousInput);
-            previousInput = x;
-            previousHighPass = filtered;
-            accum += filtered;
+            // Keep the FIR history at the original sample rate. Only evaluate its
+            // output on decimation boundaries, so the extra filtering work scales
+            // with the ~12 kHz detector rate rather than the host sample rate.
+            aaHistory[static_cast<size_t>(aaWrite)] = data[i];
+            if (++aaWrite >= kDecimatorTaps)
+                aaWrite = 0;
+
             if (++accCount < dec)
                 continue;
 
-            ring[static_cast<size_t>(writePos)] = accum / static_cast<float>(dec);
-            accum = 0.0f;
             accCount = 0;
-            if (++writePos >= static_cast<int>(ring.size()))
+            float filtered = 0.0f;
+            int historyPos = aaWrite; // oldest sample after the just-written value
+            for (int tap = 0; tap < kDecimatorTaps; ++tap)
+            {
+                filtered += decimatorCoeffs[static_cast<size_t>(tap)]
+                          * aaHistory[static_cast<size_t>(historyPos)];
+                if (++historyPos >= kDecimatorTaps)
+                    historyPos = 0;
+            }
+            ring[static_cast<size_t>(writePos)] = filtered;
+            if (++writePos >= bufLen)
                 writePos = 0;
+            if (freshSamples < bufLen)
+                ++freshSamples;
             ++pushed;
         }
 
@@ -126,39 +144,23 @@ public:
         if (ring.empty())
             return 0.0f;
 
+        if (freshSamples < bufLen)
+        {
+            samplesSinceDetect = 0;
+            return setUnvoiced();
+        }
+
         if (haveResult && samplesSinceDetect < hopSize)
             return detectedHz;
 
         samplesSinceDetect = 0;
         haveResult = true;
 
-        // Use a pitch-dependent analysis window. Once a usable f0 is known, analyse
-        // about 1.5 cycles instead of always paying for the lowest configured note.
-        // The first estimate stays conservative so low bass fundamentals remain findable.
-        const int ringCapacity = static_cast<int>(ring.size());
-        const int maxAnalysis = std::min(ringCapacity - maxTau - 2,
-                                         static_cast<int>(std::ceil(1.5 * maxTau)));
-        const int minAnalysis = std::min(maxAnalysis, std::max(48, 2 * minTau));
-        int requestedAnalysis = maxTau;
-        if (detectedHz >= minHz && detectedHz <= kMaxHz)
-        {
-            const double previousTau = sr / static_cast<double>(detectedHz);
-            requestedAnalysis = static_cast<int>(std::ceil(1.5 * previousTau));
-        }
-        integLen = juce::jlimit(minAnalysis, maxAnalysis, requestedAnalysis);
-        bufLen = integLen + maxTau + 2;
-
-        // Copy the newest `bufLen` samples from the circular store to a contiguous
-        // analysis buffer, oldest first. The physical ring has fixed capacity while
-        // `bufLen` changes, so no data movement/reset is required when f0 changes.
-        int start = writePos - bufLen;
-        if (start < 0)
-            start += ringCapacity;
-        const int firstCount = std::min(bufLen, ringCapacity - start);
-        std::memcpy(lin.data(), ring.data() + start, static_cast<size_t>(firstCount) * sizeof(float));
-        if (firstCount < bufLen)
-            std::memcpy(lin.data() + firstCount, ring.data(),
-                        static_cast<size_t>(bufLen - firstCount) * sizeof(float));
+        // Copy the ring into a flat array, oldest sample first
+        const int tail = bufLen - writePos;
+        std::memcpy(lin.data(), ring.data() + writePos, static_cast<size_t>(tail) * sizeof(float));
+        if (writePos > 0)
+            std::memcpy(lin.data() + tail, ring.data(), static_cast<size_t>(writePos) * sizeof(float));
 
         // The analysis uses the NEWEST `integLen` samples (b) and the same number
         // of samples one lag earlier (a), so the result describes "now", not the past.
@@ -272,13 +274,47 @@ public:
 
     float getDetectedHz()  const { return detectedHz; }
     float getConfidence()  const { return confidence; }
-    int getAnalysisWindowSamples() const { return integLen; }
-    double getAnalysisWindowMilliseconds() const { return 1000.0 * static_cast<double>(integLen) / sr; }
 
     void setThreshold (float t) { yinThreshold = t; }
 
 private:
     static constexpr int kMedianSize = 3;
+    static constexpr int kDecimatorTaps = 31;
+    static constexpr double kPi = 3.14159265358979323846;
+
+    void configureAntiAliasFilter()
+    {
+        decimatorCoeffs.fill (0.0f);
+        if (dec <= 1)
+        {
+            decimatorCoeffs[static_cast<size_t>(kDecimatorTaps / 2)] = 1.0f;
+            return; // no downsampling means no anti-alias filter is needed
+        }
+
+        // Blackman-windowed low-pass FIR. The cutoff is 80% of the decimated
+        // Nyquist frequency to leave a practical transition band; 31 taps are
+        // evaluated only once per detector sample.
+        const double cutoff = 0.40 / static_cast<double>(dec); // cycles / input sample
+        const int centre = kDecimatorTaps / 2;
+        double sum = 0.0;
+        for (int n = 0; n < kDecimatorTaps; ++n)
+        {
+            const int m = n - centre;
+            const double ideal = (m == 0) ? 2.0 * cutoff
+                : std::sin (2.0 * kPi * cutoff * static_cast<double>(m))
+                  / (kPi * static_cast<double>(m));
+            const double phase = 2.0 * kPi * static_cast<double>(n)
+                               / static_cast<double>(kDecimatorTaps - 1);
+            const double window = 0.42 - 0.5 * std::cos (phase)
+                                        + 0.08 * std::cos (2.0 * phase);
+            const double coefficient = ideal * window;
+            decimatorCoeffs[static_cast<size_t>(n)] = static_cast<float>(coefficient);
+            sum += coefficient;
+        }
+        const float inverseSum = static_cast<float>(1.0 / std::max (sum, 1.0e-12));
+        for (auto& coefficient : decimatorCoeffs)
+            coefficient *= inverseSum;
+    }
 
     float setUnvoiced()
     {
@@ -313,14 +349,14 @@ private:
 
     double sr = 44100.0;      // rate the detector works at (host rate divided by dec)
     int dec = 1;              // decimation factor
-    float accum = 0.0f;       // running sum of the current group of input samples
-    float previousInput = 0.0f;
-    float previousHighPass = 0.0f;
-    float highPassCoeff = 0.0f;
+    std::array<float, kDecimatorTaps> aaHistory {};
+    std::array<float, kDecimatorTaps> decimatorCoeffs {};
+    int aaWrite = 0;
     int accCount = 0;
     int maxTau = 0, minTau = 0, integLen = 0, bufLen = 0, hopSize = 256;
     float minHz = kMinHz;
     int writePos = 0;
+    int freshSamples = 0;
     int samplesSinceDetect = 0;
     bool haveResult = false;
 

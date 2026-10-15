@@ -2,6 +2,8 @@
 
 #include "AutoTuneEngine.h"
 #include <JuceHeader.h>
+#include <array>
+#include <atomic>
 
 class HumHouseVocalTuneProcessor : public juce::AudioProcessor,
                                      private juce::AsyncUpdater
@@ -35,21 +37,14 @@ public:
 
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
 
-    // Scale type: 0 Major, 1 Minor, 2 Chromatic, 3 Harmonic Minor,
-    // 4 Major Pentatonic, 5 Minor Pentatonic, 6 Blues.
+    // True if pitch class `note` (0 = C ... 11 = B) belongs to the scale in the given key.
+    // scaleType: 0 = Major, 1 = Minor, 2 = Chromatic.
     static bool isNoteInScale (int scaleType, int root, int note)
     {
-        static constexpr bool major[12]           = { true, false, true, false, true, true, false, true, false, true, false, true };
-        static constexpr bool minor[12]           = { true, false, true, true, false, true, false, true, true, false, true, false };
-        static constexpr bool chromatic[12]       = { true, true, true, true, true, true, true, true, true, true, true, true };
-        static constexpr bool harmonicMinor[12]   = { true, false, true, true, false, true, false, true, true, false, false, true };
-        static constexpr bool majorPentatonic[12] = { true, false, true, false, true, false, false, true, false, true, false, false };
-        static constexpr bool minorPentatonic[12] = { true, false, false, true, false, true, false, true, false, false, true, false };
-        static constexpr bool blues[12]           = { true, false, false, true, false, true, true, true, false, false, true, false };
+        static constexpr bool major[12] = { true, false, true, false, true, true, false, true, false, true, false, true };
+        static constexpr bool minor[12] = { true, false, true, true, false, true, false, true, true, false, true, false };
         const int rel = (((note - root) % 12) + 12) % 12;
-        const bool* scales[] = { major, minor, chromatic, harmonicMinor, majorPentatonic, minorPentatonic, blues };
-        const int idx = juce::jlimit(0, 6, scaleType);
-        return scales[idx][rel];
+        return scaleType == 2 ? true : (scaleType == 1 ? minor[rel] : major[rel]);
     }
 
     // The piano keys ARE the scale: this lights the keys that belong to the chosen scale + key.
@@ -78,6 +73,26 @@ public:
 
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    void cacheParameterRefs();
+
+    // Resolve APVTS IDs off the audio thread. In particular, the note-key IDs are
+    // dynamic strings; constructing them in processBlock would create avoidable work.
+    struct ParameterRefs
+    {
+        std::atomic<float>* retune = nullptr;
+        std::atomic<float>* humanize = nullptr;
+        std::atomic<float>* rootNote = nullptr;
+        std::atomic<float>* scaleType = nullptr;
+        std::atomic<float>* referenceFreq = nullptr;
+        std::atomic<float>* noteStabilizer = nullptr;
+        std::atomic<float>* formantPreserve = nullptr;
+        std::atomic<float>* range = nullptr;
+        std::atomic<float>* enabled = nullptr;
+        std::atomic<float>* lowLatencyMode = nullptr;
+        std::atomic<float>* inputGain = nullptr;
+        std::atomic<float>* outputGain = nullptr;
+        std::array<std::atomic<float>*, 12> notes{};
+    } parameterRefs;
 
     // Tells the host about a latency change (must happen on the message thread)
     void handleAsyncUpdate() override { setLatencySamples(pendingLatency.load()); }
