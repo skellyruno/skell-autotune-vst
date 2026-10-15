@@ -240,17 +240,26 @@ public:
 
             detector.feedSamples(detectorMono.data(), seg);
             samplesSinceHop += seg;
-            if (samplesSinceHop >= hop)
-            {
-                samplesSinceHop = 0;
-                updateCorrection(hop);
-            }
+            const bool correctionHopComplete = samplesSinceHop >= hop;
 
+            // Process this segment with the correction state that was active when the
+            // segment began. Updating correction before shifting used the just-completed
+            // detector window on the *same* samples that created it; the retroactive
+            // segment length then depended on the host block size (e.g. 64 vs 256 samples
+            // could apply a new ratio to different portions of the same 192-sample hop).
+            // Commit the new estimate only after this segment has been processed, so the
+            // pitch/ratio timeline is independent of host callback boundaries.
             for (int ch = 0; ch < nch; ++ch)
             {
                 auto& s = shifters[static_cast<size_t>(ch)];
                 s.setFormantPreserve(formantPreserve);
                 s.process(buffer.getWritePointer(ch) + pos, seg, curPeriod, curRatio);
+            }
+
+            if (correctionHopComplete)
+            {
+                samplesSinceHop -= hop;
+                updateCorrection(hop);
             }
 
             pos += seg;

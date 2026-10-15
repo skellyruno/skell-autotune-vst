@@ -102,6 +102,7 @@ public:
         lastPeriod = juce::jlimit(static_cast<double>(minPeriod),
                                   static_cast<double>(maxPeriod), sr / 200.0);
         smoothedPeriod = lastPeriod;
+        lowLatencySlicePeriod = lastPeriod;
         lastInputPeriod = lastPeriod;
         transitionBlendAge = -1;
         transitionBlendTotal = 0;
@@ -140,31 +141,38 @@ public:
             lastInputPeriod = targetPeriod;
         }
 
-        double periodF = targetPeriod;
-        if (lowLatencyExperiment)
-        {
-            // Smooth once per caller-supplied segment. AutoTuneEngine feeds fixed detector
-            // hops, so this time constant is stable in the integrated path; keeping one
-            // period value across that segment also avoids overreacting during bass startup.
-            const double coeff = std::exp(-static_cast<double>(numSamples) / (sr * 0.0025));
-            smoothedPeriod = coeff * smoothedPeriod + (1.0 - coeff) * targetPeriod;
-            periodF = juce::jlimit(static_cast<double>(minPeriod), static_cast<double>(maxPeriod), smoothedPeriod);
-        }
-        else
-            smoothedPeriod = targetPeriod;
-
         const double ratio = std::isfinite(shiftRatio)
                            ? juce::jlimit(0.6, 1.8, static_cast<double>(shiftRatio))
                            : 1.0;
 
-        // Keep the low-delay mode independent of the host's block size. Writing a
-        // whole 128/256-sample host block into the input ring before producing output
-        // accidentally gives the predictor extra look-ahead that can exceed its declared
-        // delay. Smaller internal slices bound that hidden block buffering without
-        // changing the period trajectory used for the caller-supplied segment.
-        const int internalChunk = lowLatencyExperiment ? kLowLatencyChunk : kChunk;
-        for (int pos = 0; pos < numSamples; pos += internalChunk)
-            processChunk(data + pos, std::min(internalChunk, numSamples - pos), periodF, ratio);
+        if (lowLatencyExperiment)
+        {
+            // Update the predictor period on a persistent 32-sample timeline, rather
+            // than once per host call. The DSP work below is still scheduled sample by
+            // sample, so decisions are causal and callback-size invariant; holding the
+            // period geometry for each globally aligned slice avoids the bass instability
+            // seen when moving the grain spacing by tiny amounts every sample.
+            const double smoothingCoeff = std::exp(-static_cast<double>(kLowLatencyChunk)
+                                                   / (sr * 0.0025));
+            for (int i = 0; i < numSamples; ++i)
+            {
+                if ((inCount % kLowLatencyChunk) == 0)
+                {
+                    smoothedPeriod = smoothingCoeff * smoothedPeriod
+                                   + (1.0 - smoothingCoeff) * targetPeriod;
+                    lowLatencySlicePeriod = juce::jlimit(static_cast<double>(minPeriod),
+                                                         static_cast<double>(maxPeriod), smoothedPeriod);
+                }
+                processChunk(data + i, 1, lowLatencySlicePeriod, ratio);
+            }
+        }
+        else
+        {
+            smoothedPeriod = targetPeriod;
+            for (int pos = 0; pos < numSamples; pos += kChunk)
+                processChunk(data + pos, std::min(kChunk, numSamples - pos), targetPeriod, ratio);
+        }
+
     }
 
     bool isNearUnity (float ratio) const
@@ -397,6 +405,7 @@ private:
     double  markPos = 0.0;
     double  lastPeriod = 220.0;
     double  smoothedPeriod = 220.0;
+    double  lowLatencySlicePeriod = 220.0;
     double  lastInputPeriod = 220.0;
     int     transitionBlendAge = -1;
     int     transitionBlendTotal = 0;
