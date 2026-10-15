@@ -70,6 +70,8 @@ public:
         lockedMidiNote = -1;
         holdCounter = 0;
         samplesSinceHop = 0;
+        unvoicedHopCount = 0;
+        lastVoicedPeriodSamples = 0.0;
         curRatio = 1.0f;
         curPeriod = 0.0f;
         lastDetectedHz = lastTargetHz = lastCorrectionCents = 0.0f;
@@ -123,6 +125,7 @@ public:
     void clearCustomScale   ()            { useCustom = false; }
 
     float getDetectedHz()       const { return lastDetectedHz; }
+    float getAppliedPitchRatio() const { return curRatio; } // diagnostic: ratio currently applied by the shifter
     float getTargetHz()         const { return lastTargetHz; }
     float getCorrectionCents()  const { return lastCorrectionCents; }
     float getConfidence()       const { return detector.getConfidence(); }
@@ -310,14 +313,38 @@ private:
             lastDetectedMidi = -1;
             lastTargetMidi = -1;
 
-            smoothedCorrectionCents *= 0.95;
-            lockedMidiNote = -1;
-            holdCounter = 0;
+            // At voiced/unvoiced boundaries, a single low-confidence hop is common
+            // (breath, consonant, or a weak cycle). Avoid hard-snapping grain spacing
+            // to unity in one hop: release the current correction smoothly over a few
+            // milliseconds. If the gap persists, let the ratio reach unity and discard
+            // the note lock instead of carrying correction through extended silence.
+            ++unvoicedHopCount;
+            constexpr double releaseSeconds = 0.0045;
+            const double releaseCoeff = std::exp(-static_cast<double>(hop)
+                                                  / (std::max(1.0, sr) * releaseSeconds));
+            smoothedCorrectionCents *= releaseCoeff;
+            if (std::abs(smoothedCorrectionCents) < 1.0)
+                smoothedCorrectionCents = 0.0;
 
-            curRatio  = 1.0f;
-            curPeriod = 0.0f;
+            float ratio = std::pow(2.0f, static_cast<float>(smoothedCorrectionCents) / 1200.0f);
+            if (std::abs(ratio - 1.0f) < 0.0008f)
+                ratio = 1.0f;
+            curRatio = ratio;
+            curPeriod = (unvoicedHopCount <= 2 && lastVoicedPeriodSamples > 0.0)
+                      ? static_cast<float>(lastVoicedPeriodSamples) : 0.0f;
+
+            if (unvoicedHopCount >= 3)
+            {
+                lockedMidiNote = -1;
+                holdCounter = 0;
+            }
             return;
         }
+
+        // A confident voiced frame re-arms the short dropout hold and stores its last
+        // valid cycle period in host-sample units for any following brief unvoiced gap.
+        unvoicedHopCount = 0;
+        lastVoicedPeriodSamples = static_cast<double>(sr) / detectedHz;
 
         const float midiNote = 69.0f + 12.0f * std::log2(detectedHz / referenceFreq);
         lastDetectedMidi = static_cast<int>(std::round(midiNote));
@@ -397,6 +424,8 @@ private:
         lockedMidiNote = -1;
         holdCounter = 0;
         samplesSinceHop = 0;
+        unvoicedHopCount = 0;
+        lastVoicedPeriodSamples = 0.0;
         curRatio = 1.0f;
         curPeriod = 0.0f;
 
@@ -468,6 +497,8 @@ private:
     int    holdCounter    = 0;
     int    latencySamples = 0;
     int    samplesSinceHop = 0;     // samples fed to the detector since its last measurement
+    int    unvoicedHopCount = 0;    // short dropout hysteresis before releasing note lock
+    double lastVoicedPeriodSamples = 0.0;
     float  curRatio  = 1.0f;        // correction being applied right now
     float  curPeriod = 0.0f;
 
