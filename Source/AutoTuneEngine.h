@@ -67,6 +67,7 @@ public:
 
         enabled = on;
         smoothedCorrectionCents = 0.0;
+        smoothedHumanize = static_cast<double>(std::clamp(humanize, 0.0f, 1.0f));
         lockedMidiNote = -1;
         holdCounter = 0;
         samplesSinceHop = 0;
@@ -299,6 +300,15 @@ private:
     // Called once per detection hop.
     void updateCorrection (int hop)
     {
+        // Smooth host automation of Humanize independently from pitch correction. The
+        // correction smoother already controls retune speed; this short control smoother
+        // prevents a rapid knob/automation jump from changing correction depth abruptly.
+        const double humanizeCoeff = std::exp(-static_cast<double>(hop)
+                                               / (std::max(1.0, sr) * 0.015));
+        smoothedHumanize = smoothedHumanize * humanizeCoeff
+                         + static_cast<double>(std::clamp(humanize, 0.0f, 1.0f))
+                           * (1.0 - humanizeCoeff);
+
         const float detectedHz = detector.detectPitch();
         lastDetectedHz = detectedHz;
 
@@ -381,7 +391,7 @@ private:
         lastCorrectionCents = correctionCents;
 
         correctionCents *= amount;               // correction depth
-        correctionCents *= (1.0f - humanize);    // humanize
+        correctionCents *= (1.0f - static_cast<float>(smoothedHumanize)); // smoothed humanize
 
         // Retune speed: time constant of a one-pole smoother on the correction
         double timeConstant;
@@ -421,6 +431,7 @@ private:
         dryPos = 0;
 
         smoothedCorrectionCents = 0.0;
+        smoothedHumanize = static_cast<double>(std::clamp(humanize, 0.0f, 1.0f));
         lockedMidiNote = -1;
         holdCounter = 0;
         samplesSinceHop = 0;
@@ -482,7 +493,7 @@ private:
     float humanize       = 0.0f;
     float sustainCents   = 60.0f;     // Note Stabilizer: small hysteresis so vibrato near a
                                       // note boundary does not make the target flip (the Sustain knob was removed)
-    bool  noteStabilizer = true;
+    bool  noteStabilizer = false;
     bool  formantPreserve = true;
     float referenceFreq  = 440.0f;
     bool  enabled        = true;
@@ -493,6 +504,7 @@ private:
     std::array<bool, 12> customScale = kChromatic;
 
     double smoothedCorrectionCents = 0.0;
+    double smoothedHumanize = 0.0;
     int    lockedMidiNote = -1;
     int    holdCounter    = 0;
     int    latencySamples = 0;

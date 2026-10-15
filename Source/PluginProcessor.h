@@ -105,7 +105,9 @@ private:
     std::atomic<float> inputLevel  { 0.0f };
     std::atomic<float> outputLevel { 0.0f };
 
-    int currentPreset = 0;
+    // Default program index points at the verified quality-first program appended last.
+    static constexpr int kStudioMaxProgramIndex = 12;
+    int currentPreset = kStudioMaxProgramIndex;
 
     struct Preset
     {
@@ -115,7 +117,8 @@ private:
         int   scaleType;
         bool  stabilizer;
         bool  formantPreserve;
-        int   range;        // voice range 0..4, or -1 to leave the user's choice alone
+        int   range;        // voice range 0..5, or -1 to leave the user's choice alone
+        int   lowLatencyMode = -1; // -1 preserves existing behavior; 0 = Standard, 1 = experimental
     };
 
     static const std::vector<Preset>& getPresets();

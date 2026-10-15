@@ -15,18 +15,22 @@ HumHouseVocalTuneProcessor::getPresets()
     {
         // name,                   speed, human, scale, stab,  formant, range
         // (speed here: 0 = instant, 1 = slowest)
-        { "Hard Snap (T-Pain)",    0.00f, 0.00f, 2,    true,  true,    -1 },
-        { "Sharp Correct",         0.05f, 0.00f, 0,    true,  true,    -1 },
-        { "Natural Correct",       0.25f, 0.15f, 0,    true,  true,    -1 },
-        { "Gentle Touch",          0.50f, 0.30f, 0,    true,  true,    -1 },
-        { "Subtle Polish",         0.70f, 0.40f, 0,    true,  true,    -1 },
+        { "Hard Snap (T-Pain)",    0.00f, 0.00f, 2,    false, true,    -1 },
+        { "Sharp Correct",         0.05f, 0.00f, 0,    false, true,    -1 },
+        { "Natural Correct",       0.25f, 0.15f, 0,    false, true,    -1 },
+        { "Gentle Touch",          0.50f, 0.30f, 0,    false, true,    -1 },
+        { "Subtle Polish",         0.70f, 0.40f, 0,    false, true,    -1 },
         { "Robotic",               0.00f, 0.00f, 2,    false, false,   -1 },
-        { "Live Performance",      0.15f, 0.10f, 0,    true,  true,     2 },
-        { "R&B Smooth",            0.10f, 0.05f, 1,    true,  true,    -1 },
-        { "Pop Vocal",             0.08f, 0.02f, 0,    true,  true,    -1 },
-        { "Trap Vocal",            0.00f, 0.00f, 1,    true,  true,    -1 },
-        { "Gospel Sustain",        0.20f, 0.10f, 0,    true,  true,    -1 },
+        { "Live Performance",      0.15f, 0.10f, 0,    false, true,     2 },
+        { "R&B Smooth",            0.10f, 0.05f, 1,    false, true,    -1 },
+        { "Pop Vocal",             0.08f, 0.02f, 0,    false, true,    -1 },
+        { "Trap Vocal",            0.00f, 0.00f, 1,    false, true,    -1 },
+        { "Gospel Sustain",        0.20f, 0.10f, 0,    false, true,    -1 },
         { "Lo-Fi Drift",           0.60f, 0.50f, 2,    false, true,    -1 },
+        // Quality-first baseline: fastest retune, full correction, Note Stabilizer off,
+        // formant preservation enabled, and the established period-bound shifter. Preserve
+        // the host's voice-range choice for other singers.
+        { "Studio Max (Standard)", 0.00f, 0.00f, 0,    false, true,    -1, 0 },
     };
     return presets;
 }
@@ -60,7 +64,7 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::NormalisableRange<float>(400.0f, 480.0f, 0.1f), 440.0f));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"noteStabilizer", 1}, "Note Stabilizer", true));
+        juce::ParameterID{"noteStabilizer", 1}, "Note Stabilizer", false));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"formantPreserve", 1}, "Formant Preserve", true));
@@ -76,6 +80,7 @@ HumHouseVocalTuneProcessor::createParameterLayout()
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"lowLatencyMode", 1}, "Low Latency (Experimental)", false));
 
+    // Hidden from the current editor but retained so older sessions/automation remain valid.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"inputGain", 1}, "Input Gain",
         juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), 0.0f));
@@ -260,6 +265,11 @@ void HumHouseVocalTuneProcessor::setCurrentProgram (int index)
     set("formantPreserve", p.formantPreserve ? 1.0f : 0.0f);
     if (p.range >= 0)
         set("range",       static_cast<float>(p.range));
+    // Most legacy programs intentionally leave Low Latency alone. The new Studio Max
+    // program explicitly selects the established standard path because it is the current
+    // quality baseline; the experimental mode must be selected deliberately afterward.
+    if (p.lowLatencyMode >= 0)
+        set("lowLatencyMode", p.lowLatencyMode != 0 ? 1.0f : 0.0f);
 }
 
 void HumHouseVocalTuneProcessor::applyScaleToKeys (int scaleType, int root)

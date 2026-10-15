@@ -4,19 +4,10 @@
 #include "PluginProcessor.h"
 #include <JuceHeader.h>
 
-// SkellyTune interface.
-//
-// All positions in PluginEditor.cpp are written for a "design size" of 780 x 620.
-// The window is shown at 75% of that by default and can be resized by dragging the
-// bottom-right corner; everything scales together.
-//
-// Layout (top to bottom):
-//   - Top bar: logo, title, Enabled switch
-//   - Radar visualizer with the skull (centre), skeleton arms on either side,
-//     In/Out gain (left), Retune Speed + Humanize (right)
-//   - Key, scale buttons, Note Stabilizer / Formant switches, Voice Range
-//   - Pitch heatmap + piano keyboard (the piano keys are the scale)
-//   - Monitor panel: level meters, pitch readouts, pitch reference
+// SkellyTune interface: left Retune Speed dial, central skull/radar and live pitch
+// monitor, right Humanize dial, then key/scale controls and a full-width pitch keyboard.
+// Note Stabilizer defaults off; its legacy parameter remains available for saved-session
+// compatibility. Input/output gain controls are omitted from this focused interface.
 
 class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor,
                                 public juce::AudioProcessorParameter::Listener,
@@ -87,19 +78,19 @@ private:
 
     // Knobs
     juce::Slider speedKnob, humanizeKnob;
-    juce::Slider inputGainKnob, outputGainKnob;
     juce::Slider referenceFreqKnob;
 
     // Labels for knobs
-    juce::Label speedLabel, humanizeLabel;
-    juce::Label inputGainLabel, outputGainLabel, referenceFreqLabel;
+    juce::Label speedLabel, humanizeLabel, referenceFreqLabel;
+
+    // Factory programs (keep a visible in-plugin route to the quality-first profile).
+    juce::ComboBox presetBox;
 
     // Buttons
     juce::TextButton majorBtn {"Major"};
     juce::TextButton minorBtn {"Minor"};
     juce::TextButton chromBtn {"Chromatic"};
 
-    juce::ToggleButton stabilizerBtn {"Note Stabilizer"};
     juce::ToggleButton formantBtn    {"Formant"};
     juce::ToggleButton lowLatencyBtn {"Low Latency"};
     juce::ToggleButton enableBtn     {"Enabled"};
@@ -120,9 +111,8 @@ private:
     using ComboAttach  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     std::unique_ptr<SliderAttach> speedAtt;
-    std::unique_ptr<SliderAttach> humanizeAtt;
-    std::unique_ptr<SliderAttach> inputGainAtt, outputGainAtt, referenceFreqAtt;
-    std::unique_ptr<ButtonAttach> stabilizerAtt, formantAtt, lowLatencyAtt, enableAtt;
+    std::unique_ptr<SliderAttach> humanizeAtt, referenceFreqAtt;
+    std::unique_ptr<ButtonAttach> formantAtt, lowLatencyAtt, enableAtt;
     std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt;
     std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
 
