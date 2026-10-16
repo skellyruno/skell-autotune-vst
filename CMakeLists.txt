@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(HumHouseVocalTune VERSION 1.0.0 LANGUAGES C CXX)
+project(HumHouseVocalTune VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +37,7 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
     endif()
 
     enable_testing()
+    find_package(Threads REQUIRED)
     set(SKELLYTUNE_DSP_TESTS
         stereo_detector_smoke
         pitch_shifter_quality
@@ -44,12 +45,16 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
         realtime_allocation_smoke
         scale_quantizer_regression
         key_glide_regression
+        key_estimator_regression
+        latency_sweep_regression
+        engine_safety_regression
     )
 
     foreach(test_name IN LISTS SKELLYTUNE_DSP_TESTS)
         add_executable(${test_name} "tests/${test_name}.cpp")
         target_include_directories(${test_name} PRIVATE tests Source)
         target_compile_features(${test_name} PRIVATE cxx_std_20)
+        target_link_libraries(${test_name} PRIVATE Threads::Threads)
         if(SKELLYTUNE_ENABLE_SANITIZERS)
             target_compile_options(${test_name} PRIVATE
                 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
