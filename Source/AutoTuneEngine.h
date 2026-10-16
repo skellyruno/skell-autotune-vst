@@ -23,12 +23,12 @@ public:
 
     static constexpr int kMaxChannels = 2;
 
-    // Voice range = the lowest note the tuner follows. Standard-mode delay is about 1.6
+    // Voice range = the lowest note the tuner follows. Standard-mode delay is about 1.3
     // periods of that note plus an 8-sample guard, so a higher floor means less delay.
     // The legacy first five parameter indices are preserved for saved-session compatibility;
     // the new Sub Bass option is appended as index 5 rather than shifting old values.
-    //    40 Hz -> 40.0 ms   70 Hz -> 23.0 ms   80 Hz -> 20.2 ms
-    //   100 Hz -> 16.2 ms  130 Hz -> 12.5 ms  180 Hz ->  9.1 ms
+    //    40 Hz -> 32.7 ms   70 Hz -> 18.8 ms   80 Hz -> 16.4 ms
+    //   100 Hz -> 13.2 ms  130 Hz -> 10.2 ms  180 Hz ->  7.4 ms   (at 48 kHz)
     static constexpr int   kNumRanges    = 6;
     static constexpr float kRangeMinHz[kNumRanges] = { 70.0f, 80.0f, 100.0f, 130.0f, 180.0f, 40.0f };
     static constexpr int   kDefaultRange = 1;
@@ -59,11 +59,11 @@ public:
     int   getLatencySamples() const { return latencySamples; }
     float getMinFrequency()   const { return detector.getMinFrequency(); }
 
-    void setRootNote        (int note)    { rootNote = note % 12; }
+    void setRootNote        (int note)    { rootNote = ((note % 12) + 12) % 12; }
     void setScaleType       (int type)    { scaleType = ScaleQuantizer::clampType(type); }
-    void setRetuneSpeed     (float spd)   { retuneSpeed = spd; }
-    void setAmount          (float amt)   { amount = amt; }
-    void setHumanize        (float h)     { humanize = std::clamp(h, 0.0f, 1.0f); }
+    void setRetuneSpeed     (float spd)   { retuneSpeed = std::clamp(std::isfinite(spd) ? spd : 0.0f, 0.0f, 1.0f); }
+    void setAmount          (float amt)   { amount = std::clamp(std::isfinite(amt) ? amt : 1.0f, 0.0f, 1.0f); }
+    void setHumanize        (float h)     { humanize = std::clamp(std::isfinite(h) ? h : 0.0f, 0.0f, 1.0f); }
     void setFlexTune        (float f)     { flexTune = std::clamp(std::isfinite(f) ? f : 0.0f, 0.0f, 1.0f); }
     void setGlideMilliseconds (float ms)  { glideMilliseconds = std::clamp(std::isfinite(ms) ? ms : 0.0f, 0.0f, 500.0f); }
 
@@ -84,14 +84,14 @@ public:
         const float smooth = x * x * (3.0f - 2.0f * x);
         return std::clamp(1.0f - flex * smooth, 0.0f, 1.0f);
     }
-    void setSustain         (float s)     { sustainCents = s; }
+    void setSustain         (float s)     { sustainCents = std::clamp(std::isfinite(s) ? s : 60.0f, 0.0f, 1200.0f); }
     void setNoteStabilizer  (bool on)     { noteStabilizer = on; }
     void setFormantPreserve (bool on)     { formantPreserve = on; }
     void setFormantShiftSemitones (float semitones)
     {
         formantShiftSemitones = std::isfinite(semitones) ? std::clamp(semitones, -4.0f, 4.0f) : 0.0f;
     }
-    void setReferenceFreq   (float hz)    { referenceFreq = hz; }
+    void setReferenceFreq   (float hz)    { referenceFreq = std::clamp(std::isfinite(hz) ? hz : 440.0f, 400.0f, 480.0f); }
     void setEnabled (bool on)
     {
         if (enabled == on)
@@ -116,8 +116,12 @@ public:
         lastVoicedPeriodSamples = 0.0;
         curRatio = 1.0f;
         curPeriod = 0.0f;
-        lastDetectedHz = lastTargetHz = lastCorrectionCents = 0.0f;
-        lastDetectedMidi = lastTargetMidi = -1;
+        lastDetectedHz = 0.0f;
+        lastTargetHz = 0.0f;
+        lastCorrectionCents = 0.0f;
+        publishedConfidence = 0.0f;
+        lastDetectedMidi = -1;
+        lastTargetMidi = -1;
         lastTargetMidiFloat = -1.0f;
 
         // The shifter is not fed while tuning is bypassed. Clear its stale ring and
@@ -167,14 +171,14 @@ public:
     void setCustomScale     (const std::array<bool, 12>& s) { customScale = s; useCustom = true; }
     void clearCustomScale   ()            { useCustom = false; }
 
-    float getDetectedHz()       const { return lastDetectedHz; }
+    float getDetectedHz()       const { return lastDetectedHz.load(std::memory_order_relaxed); }
     float getAppliedPitchRatio() const { return curRatio; } // diagnostic: ratio currently applied by the shifter
-    float getTargetHz()         const { return lastTargetHz; }
-    float getCorrectionCents()  const { return lastCorrectionCents; }
-    float getConfidence()       const { return detector.getConfidence(); }
-    int   getDetectedMidiNote() const { return lastDetectedMidi; }
-    int   getTargetMidiNote()   const { return lastTargetMidi; } // nearest piano-key label
-    float getTargetMidiFloat()  const { return lastTargetMidiFloat; } // exact applied target, including fractional/microtonal glide
+    float getTargetHz()         const { return lastTargetHz.load(std::memory_order_relaxed); }
+    float getCorrectionCents()  const { return lastCorrectionCents.load(std::memory_order_relaxed); }
+    float getConfidence()       const { return publishedConfidence.load(std::memory_order_relaxed); }
+    int   getDetectedMidiNote() const { return lastDetectedMidi.load(std::memory_order_relaxed); }
+    int   getTargetMidiNote()   const { return lastTargetMidi.load(std::memory_order_relaxed); } // nearest piano-key label
+    float getTargetMidiFloat()  const { return lastTargetMidiFloat.load(std::memory_order_relaxed); } // exact applied target, including fractional/microtonal glide
 
     KeyEstimator::Estimate getAutoKeyEstimate() const noexcept
     {
@@ -226,10 +230,21 @@ public:
 
         const int nch = std::min(numChannels, kMaxChannels);
 
+        // Guard against non-finite input poisoning the detector's long history or
+        // the overlap-add output ring. Ordinary finite samples are left untouched.
+        for (int ch = 0; ch < nch; ++ch)
+        {
+            float* data = buffer.getWritePointer(ch);
+            for (int i = 0; i < numSamples; ++i)
+                if (!std::isfinite(data[i]))
+                    data[i] = 0.0f;
+        }
+
         // When disabled, just pass audio through (with the same delay)
         if (!enabled)
         {
             lastDetectedHz = 0.0f;
+            publishedConfidence = 0.0f;
             lastTargetHz = 0.0f;
             lastCorrectionCents = 0.0f;
             lastDetectedMidi = -1;
@@ -435,6 +450,7 @@ private:
                            * (1.0 - humanizeCoeff);
 
         const float observedHz = detector.detectPitch();
+        publishedConfidence.store(detector.getConfidence(), std::memory_order_relaxed);
 
         const bool voiced = observedHz >= detector.getMinFrequency()
                          && observedHz <= PitchDetector::kMaxHz
@@ -597,8 +613,12 @@ private:
         curRatio = 1.0f;
         curPeriod = 0.0f;
 
-        lastDetectedHz = lastTargetHz = lastCorrectionCents = 0.0f;
-        lastDetectedMidi = lastTargetMidi = -1;
+        lastDetectedHz = 0.0f;
+        lastTargetHz = 0.0f;
+        lastCorrectionCents = 0.0f;
+        publishedConfidence = 0.0f;
+        lastDetectedMidi = -1;
+        lastTargetMidi = -1;
         lastTargetMidiFloat = -1.0f;
     }
 
@@ -676,12 +696,16 @@ private:
     std::array<std::vector<float>, kMaxChannels> dryLine;
     int dryPos = 0;
 
-    float lastDetectedHz      = 0.0f;
-    float lastTargetHz        = 0.0f;
-    float lastCorrectionCents = 0.0f;
-    int   lastDetectedMidi    = -1;
-    int   lastTargetMidi      = -1;
-    float lastTargetMidiFloat = -1.0f;
+    // Written by the audio callback, read by the editor's timer. Atomic mirrors avoid
+    // a C++ data race without locks or heap work in the real-time path. Individual
+    // values are snapshots and are not guaranteed to be from the same analysis hop.
+    std::atomic<float> lastDetectedHz { 0.0f };
+    std::atomic<float> lastTargetHz { 0.0f };
+    std::atomic<float> lastCorrectionCents { 0.0f };
+    std::atomic<float> publishedConfidence { 0.0f };
+    std::atomic<int> lastDetectedMidi { -1 };
+    std::atomic<int> lastTargetMidi { -1 };
+    std::atomic<float> lastTargetMidiFloat { -1.0f };
 };
 
 } // namespace humtune

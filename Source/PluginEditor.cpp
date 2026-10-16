@@ -79,8 +79,12 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     // responsibility for applying parameter changes and notifying the host.
     for (int i = 0; i < proc.getNumPrograms(); ++i)
         presetBox.addItem(proc.getProgramName(i), i + 1);
-    presetBox.setSelectedId(proc.getCurrentProgram() + 1, juce::dontSendNotification);
-    presetBox.setTooltip("Factory profiles. Studio Max uses the Standard path, Note Stabilizer off, Formant on, and Low Latency off.");
+    // A restored legacy session may contain settings that do not match a factory
+    // program. Show that explicitly instead of labelling it "Studio Max".
+    presetBox.addItem("Custom / Saved Settings", 1000);
+    presetBox.setSelectedId(proc.getCurrentProgram() < 0 ? 1000 : proc.getCurrentProgram() + 1,
+                            juce::dontSendNotification);
+    presetBox.setTooltip("Factory profiles. Studio Max (Standard) uses the established quality-first shifter, Note Stabilizer off, and Formant Preserve on. Low Latency is experimental and opt-in.");
     presetBox.onChange = [this]()
     {
         const int itemId = presetBox.getSelectedId();
@@ -180,7 +184,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
 
     // --- Toggle buttons ---
     formantBtn.setTooltip("On: keeps the natural character of the voice.\nOff: robotic / chipmunk effect.");
-    lowLatencyBtn.setTooltip("Experimental fixed-delay resynthesis.\nTargets a 1.9 ms shifter budget; unverified on real vocals and not a DAW round-trip measurement.");
+    lowLatencyBtn.setTooltip("On: experimental fixed ~1.9 ms shifter delay for live monitoring.\nOff (default): established, higher-quality Standard shifter with 9-40 ms delay depending on Voice Range.");
     enableBtn.setTooltip("Turns the tuning on and off.");
 
     addAndMakeVisible(formantBtn);
@@ -382,7 +386,7 @@ void HumHouseVocalTuneEditor::timerCallback()
                                  "Play a few notes first; sparse or chromatic performances may be ambiguous.");
     }
 
-    const int desiredPresetId = proc.getCurrentProgram() + 1;
+    const int desiredPresetId = proc.getCurrentProgram() < 0 ? 1000 : proc.getCurrentProgram() + 1;
     if (presetBox.getSelectedId() != desiredPresetId)
         presetBox.setSelectedId(desiredPresetId, juce::dontSendNotification);
 
@@ -397,7 +401,7 @@ void HumHouseVocalTuneEditor::timerCallback()
     displayOutputLevel     = proc.getOutputLevel();
 
     // The tiny secondary control has no floating textbox at this scale, so keep
-    // its current semitone value visible in the label itself.
+    // its current value in milliseconds visible in the label itself.
     const float glideValue = proc.getAPVTS().getRawParameterValue("glide")->load(std::memory_order_relaxed);
     const juce::String glideText = "GLIDE " + juce::String(juce::roundToInt(glideValue)) + "ms";
     if (glideLabel.getText() != glideText)
@@ -508,7 +512,7 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
     }
 
     {
-        auto titleArea = juce::Rectangle<int>(60, 0, kDesignW - 60 - 130, 44);
+        auto titleArea = juce::Rectangle<int>(52, 0, 280, 44); // ends before the AUTO KEY button (x=340)
         const juce::String title = "SkellyTune";
         g.setFont(juce::Font(juce::FontOptions(28.0f).withStyle("Bold")));
 
@@ -820,14 +824,17 @@ void HumHouseVocalTuneEditor::resized()
         l->setFont(labelFont);
 
     // --- Top bar ---
-    autoKeyButton.setBounds(R(348, 8, 96, 28));
+    autoKeyButton.setBounds(R(340, 8, 104, 28));
     presetBox.setBounds(R(452, 8, 190, 28));
     enableBtn.setBounds(R(kDesignW - 112, 8, 98, 28));
 
     // --- Main performance controls: Retune left, Humanize right ---
     place(speedKnob,    speedLabel,    35, 112, 112);
-    place(flexTuneKnob, flexTuneLabel, 63, 258, 54);
-    place(glideKnob, glideLabel, 132, 258, 54);
+    // Two 54 px knobs side by side inside the left panel (x 18..166) with a 12 px gap.
+    place(flexTuneKnob, flexTuneLabel, 32, 258, 54);
+    place(glideKnob, glideLabel, 98, 258, 54);
+    flexTuneLabel.setBounds(R(26, 310, 66, 16));
+    glideLabel.setBounds(R(88, 310, 74, 16));   // wide enough for "GLIDE 500ms", stays inside the panel
 
     place(humanizeKnob, humanizeLabel, 632, 112, 112);
     place(referenceFreqKnob, referenceFreqLabel, 682, 254, 43);

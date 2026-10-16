@@ -18,9 +18,13 @@ public:
     // the shifter waited until real audio had arrived for the whole length of every grain.
     // Now it only waits for part of it and "guesses" the rest by repeating the previous
     // cycle of the voice (see processChunk), which is why a much smaller number works.
-    // Legacy period-bound mode retains this conservative setting until real-vocal
-    // comparisons justify a different default. The experimental mode uses its own budget.
-    static constexpr double kLatencyPeriods = 1.6;
+    // Lowered from 1.6 to 1.3 (about 19% less delay: 80 Hz range 20.2 -> 16.4 ms at 48 kHz).
+    // A floor-edge stress sweep (tests/latency_sweep.cpp: 80/130/180 Hz floors, shifts of
+    // -2/0/+1 semitones, with and without vibrato) showed identical pitch accuracy, the same
+    // worst-case level deviation as 1.6 and fewer waveform discontinuities. Below ~1.25 the
+    // output level starts to drift upward (1.65 dB at 1.2, 2.8 dB at 1.1), so do not go lower
+    // without a real-vocal comparison. The experimental mode uses its own budget.
+    static constexpr double kLatencyPeriods = 1.3;
     static constexpr double kMaxHz = 1500.0;
 
     void prepare (double sampleRate, int /*blockSize*/)

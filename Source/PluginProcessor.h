@@ -6,11 +6,12 @@
 #include <atomic>
 
 class HumHouseVocalTuneProcessor : public juce::AudioProcessor,
-                                     private juce::AsyncUpdater
+                                     private juce::AsyncUpdater,
+                                     private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     HumHouseVocalTuneProcessor();
-    ~HumHouseVocalTuneProcessor() override { cancelPendingUpdate(); }
+    ~HumHouseVocalTuneProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -27,7 +28,7 @@ public:
     double getTailLengthSeconds() const override { return 0.0; }
 
     int  getNumPrograms() override;
-    int  getCurrentProgram() override { return currentPreset; }
+    int  getCurrentProgram() override { return currentPreset.load(std::memory_order_relaxed); }
     void setCurrentProgram (int index) override;
     const juce::String getProgramName (int index) override;
     void changeProgramName (int, const juce::String&) override {}
@@ -76,6 +77,8 @@ public:
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     void cacheParameterRefs();
+    void parameterChanged(const juce::String&, float) override;
+    void registerPresetTracking(bool add);
 
     // Resolve APVTS IDs off the audio thread. In particular, the note-key IDs are
     // dynamic strings; constructing them in processBlock would create avoidable work.
@@ -113,7 +116,7 @@ private:
 
     // Default program index points at the verified quality-first program appended last.
     static constexpr int kStudioMaxProgramIndex = 12;
-    int currentPreset = kStudioMaxProgramIndex;
+    std::atomic<int> currentPreset { kStudioMaxProgramIndex };
 
     struct Preset
     {

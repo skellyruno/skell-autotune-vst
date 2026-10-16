@@ -39,7 +39,7 @@ public:
             return;
         // Approx. 18 s exponential time constant: recent phrases dominate, but a normal
         // melodic phrase can accumulate enough evidence before the estimate expires.
-        const double decay = std::exp(-std::min(seconds, 1.0) / 18.0);
+        const double decay = std::exp(-seconds / 18.0);
         for (double& value : histogram)
             value *= decay;
     }
@@ -51,8 +51,10 @@ public:
             return;
 
         const double confWeight = std::clamp((static_cast<double>(confidence) - 0.35) / 0.55, 0.0, 1.0);
-        const int midi = static_cast<int>(std::lround(midiNote));
-        const int pc = ((midi % 12) + 12) % 12;
+        // Reduce to a pitch class before integer conversion: extreme but finite
+        // inputs must not overflow lround/int in the audio callback.
+        const double wrapped = std::fmod(std::round(static_cast<double>(midiNote)), 12.0);
+        const int pc = static_cast<int>(wrapped < 0.0 ? wrapped + 12.0 : wrapped);
         histogram[static_cast<std::size_t>(pc)] += std::min(seconds, 0.05) * confWeight;
     }
 

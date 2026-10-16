@@ -26,10 +26,11 @@ HumHouseVocalTuneProcessor::getPresets()
         { "Trap Vocal",            0.00f, 0.00f, 1,    false, true,    -1 },
         { "Gospel Sustain",        0.20f, 0.10f, 0,    false, true,    -1 },
         { "Lo-Fi Drift",           0.60f, 0.50f, 2,    false, true,    -1 },
-        // Quality-first baseline: fastest retune, full correction, Note Stabilizer off,
-        // formant preservation enabled, and the established period-bound shifter. Preserve
-        // the host's voice-range choice for other singers.
-        { "Studio Max (Standard)", 0.00f, 0.00f, 0,    false, true,    -1, 0 },
+        // Default program: fastest retune, full correction, Note Stabilizer off, formant
+        // preservation enabled, and the established quality-first Standard shifter.
+        // Preserve the host's voice-range choice for other singers. Low Latency remains an
+        // explicit experimental opt-in rather than silently changing the default sound.
+        { "Studio Max (Standard)",   0.00f, 0.00f, 0,    false, true,    -1, 0 },
     };
     return presets;
 }
@@ -133,6 +134,40 @@ HumHouseVocalTuneProcessor::HumHouseVocalTuneProcessor()
       apvts(*this, nullptr, "PARAMETERS", createParameterLayout())
 {
     cacheParameterRefs();
+    registerPresetTracking(true);
+}
+
+HumHouseVocalTuneProcessor::~HumHouseVocalTuneProcessor()
+{
+    cancelPendingUpdate();
+    registerPresetTracking(false);
+}
+
+void HumHouseVocalTuneProcessor::parameterChanged(const juce::String&, float)
+{
+    // Called from either the host's automation thread or a UI thread.
+    // An atomic write is safe and does not allocate or block the audio callback.
+    currentPreset.store(-1, std::memory_order_relaxed);
+}
+
+void HumHouseVocalTuneProcessor::registerPresetTracking(bool add)
+{
+    static constexpr const char* kParameters[] = {
+        "retune", "humanize", "flexTune", "glide", "rootNote", "scaleType",
+        "scaleExtension", "referenceFreq", "noteStabilizer", "formantPreserve",
+        "formantShift", "range", "enabled", "lowLatencyMode", "inputGain", "outputGain"
+    };
+    for (const auto* id : kParameters)
+    {
+        if (add) apvts.addParameterListener(id, this);
+        else apvts.removeParameterListener(id, this);
+    }
+    for (int note = 0; note < 12; ++note)
+    {
+        const auto id = "note" + juce::String(note);
+        if (add) apvts.addParameterListener(id, this);
+        else apvts.removeParameterListener(id, this);
+    }
 }
 
 void HumHouseVocalTuneProcessor::cacheParameterRefs()
@@ -282,7 +317,8 @@ void HumHouseVocalTuneProcessor::setCurrentProgram (int index)
     if (index < 0 || index >= static_cast<int>(presets.size()))
         return;
 
-    currentPreset = index;
+    // Set after broadcasting preset controls so the selector reflects this profile.
+    currentPreset.store(-1, std::memory_order_relaxed);
     const auto& p = presets[static_cast<size_t>(index)];
 
     auto set = [&](const juce::String& id, float val)
@@ -300,11 +336,16 @@ void HumHouseVocalTuneProcessor::setCurrentProgram (int index)
     set("formantPreserve", p.formantPreserve ? 1.0f : 0.0f);
     if (p.range >= 0)
         set("range",       static_cast<float>(p.range));
-    // Most legacy programs intentionally leave Low Latency alone. The new Studio Max
-    // program explicitly selects the established standard path because it is the current
-    // quality baseline; the experimental mode must be selected deliberately afterward.
+    // Most legacy programs intentionally leave Low Latency alone. Studio Max (Standard)
+    // explicitly selects the quality-first Standard path; Low Latency is opt-in.
     if (p.lowLatencyMode >= 0)
         set("lowLatencyMode", p.lowLatencyMode != 0 ? 1.0f : 0.0f);
+    // These controls were added after the original factory profiles. A preset
+    // must not unexpectedly inherit a prior preset's Glide or Flex-Tune state.
+    set("flexTune", 0.0f);
+    set("glide", 0.0f);
+    set("formantShift", 0.0f);
+    currentPreset.store(index, std::memory_order_relaxed);
 }
 
 humtune::KeyEstimator::Estimate HumHouseVocalTuneProcessor::applyAutoKeyEstimate()
@@ -350,6 +391,9 @@ const juce::String HumHouseVocalTuneProcessor::getProgramName (int index)
 void HumHouseVocalTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
+    // Parameter values are host-managed; program identity is editor metadata.
+    // Store it outside the parameter list to preserve existing automation IDs.
+    state.setProperty("factoryProgramIndex", currentPreset.load(std::memory_order_relaxed), nullptr);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
 }
@@ -358,7 +402,17 @@ void HumHouseVocalTuneProcessor::setStateInformation (const void* data, int size
 {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
     if (xml && xml->hasTagName(apvts.state.getType()))
-        apvts.replaceState(juce::ValueTree::fromXml(*xml));
+    {
+        auto restored = juce::ValueTree::fromXml(*xml);
+        // Older projects did not save program identity. Avoid falsely showing
+        // Studio Max for an arbitrary restored collection of parameter values.
+        const int index = static_cast<int>(restored.getProperty("factoryProgramIndex", -1));
+        apvts.replaceState(restored);
+        // Restore identity last: parameter listeners may mark the replacement
+        // custom while the host applies its saved values.
+        currentPreset.store(index >= 0 && index < getNumPrograms() ? index : -1,
+                            std::memory_order_relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------
