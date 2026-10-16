@@ -36,18 +36,19 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
+    humtune::KeyEstimator::Estimate getAutoKeyEstimate() const { return engine.getAutoKeyEstimate(); }
+    humtune::KeyEstimator::Estimate applyAutoKeyEstimate();
 
-    // True if pitch class `note` (0 = C ... 11 = B) belongs to the scale in the given key.
-    // scaleType: 0 = Major, 1 = Minor, 2 = Chromatic.
+    // The scale selector and piano-key mask share one source of truth. Microtonal
+    // scales highlight approximate semitone keys while the DSP follows exact intervals.
     static bool isNoteInScale (int scaleType, int root, int note)
     {
-        static constexpr bool major[12] = { true, false, true, false, true, true, false, true, false, true, false, true };
-        static constexpr bool minor[12] = { true, false, true, true, false, true, false, true, true, false, true, false };
-        const int rel = (((note - root) % 12) + 12) % 12;
-        return scaleType == 2 ? true : (scaleType == 1 ? minor[rel] : major[rel]);
+        const auto mask = humtune::ScaleQuantizer::approximateMask(scaleType, root);
+        const int pc = ((note % 12) + 12) % 12;
+        return mask[static_cast<size_t>(pc)];
     }
 
-    // The piano keys ARE the scale: this lights the keys that belong to the chosen scale + key.
+    // Refresh the piano's 12-semitone projection of the chosen named scale + key.
     void applyScaleToKeys (int scaleType, int root);
 
     // Readbacks for editor
@@ -57,6 +58,7 @@ public:
     float getConfidence()       const { return engine.getConfidence(); }
     int   getDetectedMidiNote() const { return engine.getDetectedMidiNote(); }
     int   getTargetMidiNote()   const { return engine.getTargetMidiNote(); }
+    float getTargetMidiFloat()  const { return engine.getTargetMidiFloat(); }
 
     // Input/output levels for meters
     float getInputLevel()  const { return inputLevel.load(); }
@@ -81,11 +83,15 @@ private:
     {
         std::atomic<float>* retune = nullptr;
         std::atomic<float>* humanize = nullptr;
+        std::atomic<float>* flexTune = nullptr;
+        std::atomic<float>* glide = nullptr;
         std::atomic<float>* rootNote = nullptr;
         std::atomic<float>* scaleType = nullptr;
+        std::atomic<float>* scaleExtension = nullptr;
         std::atomic<float>* referenceFreq = nullptr;
         std::atomic<float>* noteStabilizer = nullptr;
         std::atomic<float>* formantPreserve = nullptr;
+        std::atomic<float>* formantShift = nullptr;
         std::atomic<float>* range = nullptr;
         std::atomic<float>* enabled = nullptr;
         std::atomic<float>* lowLatencyMode = nullptr;

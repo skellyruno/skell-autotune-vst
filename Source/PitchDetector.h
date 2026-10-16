@@ -94,8 +94,31 @@ public:
 
     float getMinFrequency() const { return minHz; }
 
-    // Detection runs once every hopSize samples (about 4 ms)
+    // Detection runs once every hopSize samples (about 4 ms).
     int getHopSize() const { return hopSize * dec; }
+
+    // Approximate age of the current YIN estimate. The estimate correlates two
+    // windows separated by one candidate period; their combined midpoint trails
+    // the newest sample by roughly half the analysis window plus half a period.
+    // The three-frame median adds one hop of group delay for a smoothly moving pitch.
+    // Returning this timing metadata lets the engine compensate for detector lag
+    // without adding a separate audio buffer or increasing reported plugin latency.
+    double getPitchEstimateAgeSeconds (float frequencyHz) const noexcept
+    {
+        if (sr <= 0.0 || hopSize <= 0 || integLen <= 0
+            || !std::isfinite(frequencyHz) || frequencyHz <= 0.0f)
+            return 0.0;
+
+        const double tau = std::clamp(sr / static_cast<double>(frequencyHz),
+                                       static_cast<double>(minTau),
+                                       static_cast<double>(maxTau));
+        const double pairedWindowMidpoint = 0.5 * (static_cast<double>(integLen - 1) + tau);
+        // During the first two voiced frames the median filter is not yet full,
+        // so do not compensate it as if it already had its full one-hop delay.
+        const double medianGroupDelay = medianCount >= kMedianSize ? static_cast<double>(hopSize)
+            : (medianCount == 2 ? 0.5 * static_cast<double>(hopSize) : 0.0);
+        return (pairedWindowMidpoint + medianGroupDelay) / sr;
+    }
 
     // Feed samples into the ring buffer (at the detector's own, possibly reduced, rate).
     void feedSamples (const float* data, int numSamples)

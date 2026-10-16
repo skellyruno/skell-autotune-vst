@@ -3,7 +3,6 @@
 
 // Note names for combo-box choices
 static const juce::StringArray kNoteNames {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-static const juce::StringArray kScaleNames {"Major","Minor","Chromatic"};
 
 // ---------------------------------------------------------------------------
 // Presets
@@ -53,11 +52,26 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::ParameterID{"humanize", 1}, "Humanize",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
 
+    // Flex-Tune is additive and defaults to zero so existing sessions keep their sound.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"flexTune", 1}, "Flex-Tune",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+
+    // Independent target portamento; zero is deliberately neutral for legacy sessions.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"glide", 1}, "Target Glide",
+        juce::NormalisableRange<float>(0.0f, 500.0f, 1.0f), 0.0f, "ms"));
+
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"rootNote", 1}, "Root Note", 0, 11, 0));
 
+    // Keep the historical 0..2 Scale Type parameter untouched for saved sessions and
+    // host automation. New scale families are selected through a separate extension ID.
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"scaleType", 1}, "Scale Type", 0, 2, 0));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"scaleExtension", 1}, "Scale Extension", 0,
+        humtune::ScaleQuantizer::kNumScales - 3, 0));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"referenceFreq", 1}, "Reference Frequency",
@@ -68,6 +82,12 @@ HumHouseVocalTuneProcessor::createParameterLayout()
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"formantPreserve", 1}, "Formant Preserve", true));
+
+    // Independent vocal-tract colour shift. The zero default is intentionally
+    // neutral so prior sessions retain the existing sound until this is adjusted.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"formantShift", 1}, "Formant Shift",
+        juce::NormalisableRange<float>(-4.0f, 4.0f, 0.1f), 0.0f, "st"));
 
     // Voice range: the lowest note the tuner follows. Lower notes need more delay.
     params.push_back(std::make_unique<juce::AudioParameterInt>(
@@ -119,11 +139,15 @@ void HumHouseVocalTuneProcessor::cacheParameterRefs()
 {
     parameterRefs.retune = apvts.getRawParameterValue("retune");
     parameterRefs.humanize = apvts.getRawParameterValue("humanize");
+    parameterRefs.flexTune = apvts.getRawParameterValue("flexTune");
+    parameterRefs.glide = apvts.getRawParameterValue("glide");
     parameterRefs.rootNote = apvts.getRawParameterValue("rootNote");
     parameterRefs.scaleType = apvts.getRawParameterValue("scaleType");
+    parameterRefs.scaleExtension = apvts.getRawParameterValue("scaleExtension");
     parameterRefs.referenceFreq = apvts.getRawParameterValue("referenceFreq");
     parameterRefs.noteStabilizer = apvts.getRawParameterValue("noteStabilizer");
     parameterRefs.formantPreserve = apvts.getRawParameterValue("formantPreserve");
+    parameterRefs.formantShift = apvts.getRawParameterValue("formantShift");
     parameterRefs.range = apvts.getRawParameterValue("range");
     parameterRefs.enabled = apvts.getRawParameterValue("enabled");
     parameterRefs.lowLatencyMode = apvts.getRawParameterValue("lowLatencyMode");
@@ -160,11 +184,16 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // and no pointer/map/string work is needed inside the audio callback.
     const float retune     = parameterRefs.retune->load(std::memory_order_relaxed); // 1 = fastest
     const float hum        = parameterRefs.humanize->load(std::memory_order_relaxed);
+    const float flexTune   = parameterRefs.flexTune->load(std::memory_order_relaxed);
+    const float glideMs    = parameterRefs.glide->load(std::memory_order_relaxed);
     const int root         = static_cast<int>(parameterRefs.rootNote->load(std::memory_order_relaxed));
-    const int scale        = static_cast<int>(parameterRefs.scaleType->load(std::memory_order_relaxed));
+    const int legacyScale  = static_cast<int>(parameterRefs.scaleType->load(std::memory_order_relaxed));
+    const int extension    = static_cast<int>(parameterRefs.scaleExtension->load(std::memory_order_relaxed));
+    const int scale        = extension > 0 ? extension + 2 : legacyScale;
     const float refFreq    = parameterRefs.referenceFreq->load(std::memory_order_relaxed);
     const bool stab        = parameterRefs.noteStabilizer->load(std::memory_order_relaxed) > 0.5f;
     const bool formant     = parameterRefs.formantPreserve->load(std::memory_order_relaxed) > 0.5f;
+    const float formantShift = parameterRefs.formantShift->load(std::memory_order_relaxed);
     const int range        = static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed));
     const bool on          = parameterRefs.enabled->load(std::memory_order_relaxed) > 0.5f;
     const bool lowLatency  = parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f;
@@ -185,9 +214,12 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     engine.setScaleType(scale);
     engine.setRetuneSpeed(1.0f - retune);      // the engine works in "0 = instant"
     engine.setHumanize(hum);
+    engine.setFlexTune(flexTune);
+    engine.setGlideMilliseconds(glideMs);
     engine.setReferenceFreq(refFreq);
     engine.setNoteStabilizer(stab);
     engine.setFormantPreserve(formant);
+    engine.setFormantShiftSemitones(formantShift);
     engine.setVoiceRange(range);
     engine.setLowLatencyMode(lowLatency);
     engine.setEnabled(on);
@@ -200,8 +232,10 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         triggerAsyncUpdate();
     }
 
-    // With every key switched off there is nothing to snap to: fall back to Scale + Key
-    if (anyKeyOn)
+    // If the piano matches the selected named scale, use its full interval definition
+    // (including quarter tones). A changed piano mask is an explicit 12-TET custom scale.
+    const auto expectedMask = humtune::ScaleQuantizer::approximateMask(scale, root);
+    if (anyKeyOn && keyMask != expectedMask)
         engine.setCustomScale(keyMask);
     else
         engine.clearCustomScale();
@@ -260,6 +294,7 @@ void HumHouseVocalTuneProcessor::setCurrentProgram (int index)
     set("retune",          1.0f - p.speed);
     set("humanize",        p.humanize);
     set("scaleType",       static_cast<float>(p.scaleType));
+    set("scaleExtension",  0.0f);
     applyScaleToKeys(p.scaleType, static_cast<int>(*apvts.getRawParameterValue("rootNote")));
     set("noteStabilizer",  p.stabilizer ? 1.0f : 0.0f);
     set("formantPreserve", p.formantPreserve ? 1.0f : 0.0f);
@@ -272,11 +307,33 @@ void HumHouseVocalTuneProcessor::setCurrentProgram (int index)
         set("lowLatencyMode", p.lowLatencyMode != 0 ? 1.0f : 0.0f);
 }
 
+humtune::KeyEstimator::Estimate HumHouseVocalTuneProcessor::applyAutoKeyEstimate()
+{
+    const auto estimate = engine.getAutoKeyEstimate();
+    if (!estimate.valid)
+        return estimate;
+
+    auto set = [this](const juce::String& id, float value)
+    {
+        if (auto* parameter = apvts.getParameter(id))
+            parameter->setValueNotifyingHost(parameter->convertTo0to1(value));
+    };
+
+    // Auto-key intentionally selects the familiar 12-TET Major/Minor modes only;
+    // microtonal or custom-scale choices remain user-controlled when this button is not used.
+    set("rootNote", static_cast<float>(estimate.root));
+    set("scaleType", estimate.minor ? 1.0f : 0.0f);
+    set("scaleExtension", 0.0f);
+    applyScaleToKeys(estimate.minor ? 1 : 0, estimate.root);
+    return estimate;
+}
+
 void HumHouseVocalTuneProcessor::applyScaleToKeys (int scaleType, int root)
 {
+    const auto mask = humtune::ScaleQuantizer::approximateMask(scaleType, root);
     for (int i = 0; i < 12; ++i)
         if (auto* param = apvts.getParameter("note" + juce::String(i)))
-            param->setValueNotifyingHost(isNoteInScale(scaleType, root, i) ? 1.0f : 0.0f);
+            param->setValueNotifyingHost(mask[static_cast<size_t>(i)] ? 1.0f : 0.0f);
 }
 
 const juce::String HumHouseVocalTuneProcessor::getProgramName (int index)

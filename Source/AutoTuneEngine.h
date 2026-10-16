@@ -2,8 +2,12 @@
 
 #include "PitchDetector.h"
 #include "PitchShifter.h"
+#include "ScaleQuantizer.h"
+#include "KeyEstimator.h"
+#include "TargetGlide.h"
 #include <JuceHeader.h>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <vector>
 
@@ -45,6 +49,10 @@ public:
             line.reserve(static_cast<size_t>(maxLatency));
 
         prepared = true;
+        keyEstimator.reset();
+        keyEstimateSampleCounter = 0;
+        publishKeyEstimate();
+        targetGlide.reset();
         applyLatencyMode();
     }
 
@@ -52,13 +60,37 @@ public:
     float getMinFrequency()   const { return detector.getMinFrequency(); }
 
     void setRootNote        (int note)    { rootNote = note % 12; }
-    void setScaleType       (int type)    { scaleType = type; }
+    void setScaleType       (int type)    { scaleType = ScaleQuantizer::clampType(type); }
     void setRetuneSpeed     (float spd)   { retuneSpeed = spd; }
     void setAmount          (float amt)   { amount = amt; }
-    void setHumanize        (float h)     { humanize = h; }
+    void setHumanize        (float h)     { humanize = std::clamp(h, 0.0f, 1.0f); }
+    void setFlexTune        (float f)     { flexTune = std::clamp(std::isfinite(f) ? f : 0.0f, 0.0f, 1.0f); }
+    void setGlideMilliseconds (float ms)  { glideMilliseconds = std::clamp(std::isfinite(ms) ? ms : 0.0f, 0.0f, 500.0f); }
+
+    // Flex-Tune keeps full correction when disabled. As the control rises, correction
+    // tapers away for larger pitch excursions so scoops/bends can pass through, while
+    // small errors near the selected note still receive correction. This is an
+    // independently implemented response curve; it does not copy FreeTune's DSP code.
+    static float flexCorrectionWeight (float absoluteErrorCents, float flex) noexcept
+    {
+        flex = std::clamp(std::isfinite(flex) ? flex : 0.0f, 0.0f, 1.0f);
+        if (flex <= 0.0f)
+            return 1.0f; // exact legacy behavior when the new parameter is at its default
+
+        const float error = std::max(0.0f, std::isfinite(absoluteErrorCents) ? absoluteErrorCents : 0.0f);
+        const float fullCorrectionRadius = 6.0f + 42.0f * (1.0f - flex);
+        const float fadeWidth = 12.0f + 18.0f * (1.0f - flex);
+        const float x = std::clamp((error - fullCorrectionRadius) / fadeWidth, 0.0f, 1.0f);
+        const float smooth = x * x * (3.0f - 2.0f * x);
+        return std::clamp(1.0f - flex * smooth, 0.0f, 1.0f);
+    }
     void setSustain         (float s)     { sustainCents = s; }
     void setNoteStabilizer  (bool on)     { noteStabilizer = on; }
     void setFormantPreserve (bool on)     { formantPreserve = on; }
+    void setFormantShiftSemitones (float semitones)
+    {
+        formantShiftSemitones = std::isfinite(semitones) ? std::clamp(semitones, -4.0f, 4.0f) : 0.0f;
+    }
     void setReferenceFreq   (float hz)    { referenceFreq = hz; }
     void setEnabled (bool on)
     {
@@ -67,9 +99,18 @@ public:
 
         enabled = on;
         smoothedCorrectionCents = 0.0;
+        targetGlide.reset();
+        if (on)
+        {
+            keyEstimator.reset();
+            keyEstimateSampleCounter = 0;
+            publishKeyEstimate();
+        }
         smoothedHumanize = static_cast<double>(std::clamp(humanize, 0.0f, 1.0f));
+        smoothedFlexTune = static_cast<double>(std::clamp(flexTune, 0.0f, 1.0f));
         lockedMidiNote = -1;
         holdCounter = 0;
+        resetPitchMotionTracker();
         samplesSinceHop = 0;
         unvoicedHopCount = 0;
         lastVoicedPeriodSamples = 0.0;
@@ -77,6 +118,7 @@ public:
         curPeriod = 0.0f;
         lastDetectedHz = lastTargetHz = lastCorrectionCents = 0.0f;
         lastDetectedMidi = lastTargetMidi = -1;
+        lastTargetMidiFloat = -1.0f;
 
         // The shifter is not fed while tuning is bypassed. Clear its stale ring and
         // detector history when re-enabling so it cannot resume with a time gap.
@@ -131,7 +173,22 @@ public:
     float getCorrectionCents()  const { return lastCorrectionCents; }
     float getConfidence()       const { return detector.getConfidence(); }
     int   getDetectedMidiNote() const { return lastDetectedMidi; }
-    int   getTargetMidiNote()   const { return lastTargetMidi; }
+    int   getTargetMidiNote()   const { return lastTargetMidi; } // nearest piano-key label
+    float getTargetMidiFloat()  const { return lastTargetMidiFloat; } // exact applied target, including fractional/microtonal glide
+
+    KeyEstimator::Estimate getAutoKeyEstimate() const noexcept
+    {
+        KeyEstimator::Estimate e;
+        e.root = estimatedKeyRoot.load(std::memory_order_relaxed);
+        e.minor = estimatedKeyMinor.load(std::memory_order_relaxed) != 0;
+        e.confidence = estimatedKeyConfidence.load(std::memory_order_relaxed);
+        e.evidenceSeconds = estimatedKeyEvidence.load(std::memory_order_relaxed);
+        e.profileScore = estimatedKeyScore.load(std::memory_order_relaxed);
+        e.scoreMargin = estimatedKeyMargin.load(std::memory_order_relaxed);
+        e.distinctPitchClasses = estimatedKeyDistinct.load(std::memory_order_relaxed);
+        e.valid = estimatedKeyValid.load(std::memory_order_relaxed) != 0;
+        return e;
+    }
 
     void delayDry (juce::AudioBuffer<float>& buffer)
     {
@@ -177,6 +234,7 @@ public:
             lastCorrectionCents = 0.0f;
             lastDetectedMidi = -1;
             lastTargetMidi = -1;
+            lastTargetMidiFloat = -1.0f;
             smoothedCorrectionCents = 0.0;
             lockedMidiNote = -1;
             holdCounter = 0;
@@ -257,6 +315,7 @@ public:
             {
                 auto& s = shifters[static_cast<size_t>(ch)];
                 s.setFormantPreserve(formantPreserve);
+                s.setFormantShiftSemitones(formantShiftSemitones);
                 s.process(buffer.getWritePointer(ch) + pos, seg, curPeriod, curRatio);
             }
 
@@ -271,6 +330,60 @@ public:
     }
 
 private:
+    void resetPitchMotionTracker() noexcept
+    {
+        pitchMotionHasPrevious = false;
+        previousObservedMidi = 0.0f;
+    }
+
+    float predictPitchMotion (float observedMidi, float observedHz, float confidence, int hop) noexcept
+    {
+        if (!std::isfinite(observedMidi) || !std::isfinite(observedHz)
+            || observedHz <= 0.0f || !std::isfinite(confidence) || confidence < 0.55f
+            || hop <= 0 || sr <= 0.0)
+        {
+            resetPitchMotionTracker();
+            return observedMidi;
+        }
+
+        if (!pitchMotionHasPrevious)
+        {
+            previousObservedMidi = observedMidi;
+            pitchMotionHasPrevious = true;
+            return observedMidi;
+        }
+
+        const double deltaCents = (static_cast<double>(observedMidi)
+                                   - static_cast<double>(previousObservedMidi)) * 100.0;
+        previousObservedMidi = observedMidi;
+
+        // Do not extrapolate a discrete note jump or likely octave correction.
+        // A 1.75-semitone frame-to-frame step is well outside normal vibrato and
+        // short glides at this hop rate; seed the tracker again after the jump.
+        if (std::abs(deltaCents) > 175.0)
+        {
+            return observedMidi;
+        }
+
+        const double dt = static_cast<double>(hop) / sr;
+        if (dt <= 0.0)
+            return observedMidi;
+
+        const double measuredVelocity = std::clamp(deltaCents / dt, -6000.0, 6000.0);
+        // Ignore detector jitter on held notes. A real expressive glide typically
+        // exceeds this threshold over a single 4 ms analysis hop. Confidence scales
+        // the forecast smoothly instead of adding another hard voicing gate.
+        if (std::abs(deltaCents) < 1.5 || std::abs(measuredVelocity) < 350.0)
+            return observedMidi;
+
+        const double confidenceWeight = std::clamp((static_cast<double>(confidence) - 0.55) / 0.35,
+                                                   0.0, 1.0);
+        const double estimateAge = detector.getPitchEstimateAgeSeconds(observedHz);
+        const double predictionCents = std::clamp(
+            measuredVelocity * estimateAge * confidenceWeight, -85.0, 85.0);
+        return observedMidi + static_cast<float>(predictionCents / 100.0);
+    }
+
     void storeDryInput (const juce::AudioBuffer<float>& buffer)
     {
         const int n = buffer.getNumSamples();
@@ -300,6 +413,15 @@ private:
     // Called once per detection hop.
     void updateCorrection (int hop)
     {
+        const double hopSeconds = static_cast<double>(hop) / std::max(1.0, sr);
+        keyEstimator.advanceTime(hopSeconds);
+        keyEstimateSampleCounter += hop;
+        if (keyEstimateSampleCounter >= static_cast<int>(std::max(1.0, sr * 0.25)))
+        {
+            keyEstimateSampleCounter = 0;
+            publishKeyEstimate();
+        }
+
         // Smooth host automation of Humanize independently from pitch correction. The
         // correction smoother already controls retune speed; this short control smoother
         // prevents a rapid knob/automation jump from changing correction depth abruptly.
@@ -308,20 +430,25 @@ private:
         smoothedHumanize = smoothedHumanize * humanizeCoeff
                          + static_cast<double>(std::clamp(humanize, 0.0f, 1.0f))
                            * (1.0 - humanizeCoeff);
+        smoothedFlexTune = smoothedFlexTune * humanizeCoeff
+                         + static_cast<double>(std::clamp(flexTune, 0.0f, 1.0f))
+                           * (1.0 - humanizeCoeff);
 
-        const float detectedHz = detector.detectPitch();
-        lastDetectedHz = detectedHz;
+        const float observedHz = detector.detectPitch();
 
-        const bool voiced = detectedHz >= detector.getMinFrequency()
-                         && detectedHz <= PitchDetector::kMaxHz
+        const bool voiced = observedHz >= detector.getMinFrequency()
+                         && observedHz <= PitchDetector::kMaxHz
                          && detector.getConfidence() >= 0.3f;
 
         if (!voiced)
         {
-            lastTargetHz = detectedHz;
+            lastDetectedHz = observedHz;
+            resetPitchMotionTracker();
+            lastTargetHz = observedHz;
             lastCorrectionCents = 0.0f;
             lastDetectedMidi = -1;
             lastTargetMidi = -1;
+            lastTargetMidiFloat = -1.0f;
 
             // At voiced/unvoiced boundaries, a single low-confidence hop is common
             // (breath, consonant, or a weak cycle). Avoid hard-snapping grain spacing
@@ -348,24 +475,43 @@ private:
                 lockedMidiNote = -1;
                 holdCounter = 0;
             }
+            // Preserve target glide across brief consonants and detector dropouts, but
+            // reset it after a genuine pause so the next phrase starts on its first note.
+            const int glideResetHops = std::max(3, static_cast<int>(0.12 * sr / std::max(1, hop)));
+            if (unvoicedHopCount == glideResetHops)
+                targetGlide.reset();
             return;
         }
 
         // A confident voiced frame re-arms the short dropout hold and stores its last
         // valid cycle period in host-sample units for any following brief unvoiced gap.
         unvoicedHopCount = 0;
-        lastVoicedPeriodSamples = static_cast<double>(sr) / detectedHz;
+        lastVoicedPeriodSamples = static_cast<double>(sr) / observedHz;
 
-        const float midiNote = 69.0f + 12.0f * std::log2(detectedHz / referenceFreq);
-        lastDetectedMidi = static_cast<int>(std::round(midiNote));
+        // The YIN estimate is accurate on steady notes, but it describes a past
+        // window (and then passes through a 3-frame median). Predict its pitch
+        // contour to the current input time so the shifter receives a timely ratio
+        // during vibrato and legato glides. Large note jumps reset the predictor,
+        // preventing the forecast from shooting across octaves or scale targets.
+        const float midiNote = 69.0f + 12.0f * std::log2(observedHz / referenceFreq);
+        keyEstimator.observePitch(midiNote, detector.getConfidence(), hopSeconds);
+        const float predictedMidiNote = predictPitchMotion(midiNote, observedHz,
+                                                           detector.getConfidence(), hop);
+        const float detectedHz = referenceFreq
+            * std::pow(2.0f, (predictedMidiNote - 69.0f) / 12.0f);
+        lastDetectedHz = detectedHz;
+        lastDetectedMidi = static_cast<int>(std::round(predictedMidiNote));
 
-        int targetMidi = quantizeToScale(midiNote);
+        // Keep scale quantization on the measured pitch rather than the prediction.
+        // That way anticipation improves the applied ratio without making the target
+        // note change early as a singer approaches a note boundary.
+        float targetMidi = quantizeToScale(midiNote);
 
         // Note stabilizer: stay on the locked note while the voice is within sustainCents of it
         if (noteStabilizer && lockedMidiNote >= 0)
         {
-            const float lockedHz = referenceFreq * std::pow(2.0f, (static_cast<float>(lockedMidiNote) - 69.0f) / 12.0f);
-            const float centsDiff = std::abs(1200.0f * std::log2(detectedHz / lockedHz));
+            const float lockedHz = referenceFreq * std::pow(2.0f, (lockedMidiNote - 69.0f) / 12.0f);
+            const float centsDiff = std::abs(1200.0f * std::log2(observedHz / lockedHz));
 
             if (centsDiff < sustainCents)
             {
@@ -383,15 +529,23 @@ private:
             lockedMidiNote = targetMidi;
         }
 
-        lastTargetMidi = targetMidi;
-        const float targetHz = referenceFreq * std::pow(2.0f, (static_cast<float>(targetMidi) - 69.0f) / 12.0f);
+        const float appliedTargetMidi = targetGlide.process(targetMidi, glideMilliseconds, hopSeconds);
+        lastTargetMidiFloat = appliedTargetMidi;
+        lastTargetMidi = static_cast<int>(std::round(appliedTargetMidi));
+        const float targetHz = referenceFreq * std::pow(2.0f, (appliedTargetMidi - 69.0f) / 12.0f);
         lastTargetHz = targetHz;
 
+        const float observedCorrectionCents = 1200.0f * std::log2(targetHz / observedHz);
         float correctionCents = 1200.0f * std::log2(targetHz / detectedHz);
         lastCorrectionCents = correctionCents;
 
         correctionCents *= amount;               // correction depth
         correctionCents *= (1.0f - static_cast<float>(smoothedHumanize)); // smoothed humanize
+        // Flex-Tune describes the singer's measured excursion from the note, not
+        // the predictor's forecast. Keep its bend-preservation curve tied to the
+        // observed pitch so prediction cannot accidentally reduce Flex correction.
+        correctionCents *= flexCorrectionWeight(std::abs(observedCorrectionCents),
+                                                 static_cast<float>(smoothedFlexTune));
 
         // Retune speed: time constant of a one-pole smoother on the correction
         double timeConstant;
@@ -432,8 +586,11 @@ private:
 
         smoothedCorrectionCents = 0.0;
         smoothedHumanize = static_cast<double>(std::clamp(humanize, 0.0f, 1.0f));
+        smoothedFlexTune = static_cast<double>(std::clamp(flexTune, 0.0f, 1.0f));
+        targetGlide.reset();
         lockedMidiNote = -1;
         holdCounter = 0;
+        resetPitchMotionTracker();
         samplesSinceHop = 0;
         unvoicedHopCount = 0;
         lastVoicedPeriodSamples = 0.0;
@@ -442,43 +599,28 @@ private:
 
         lastDetectedHz = lastTargetHz = lastCorrectionCents = 0.0f;
         lastDetectedMidi = lastTargetMidi = -1;
+        lastTargetMidiFloat = -1.0f;
     }
 
-    int quantizeToScale (float midiNote) const
+    void publishKeyEstimate() noexcept
     {
-        const auto& scale = useCustom ? customScale
-                          : (scaleType == 1) ? kMinor
-                          : (scaleType == 2) ? kChromatic
-                          : kMajor;
+        const auto e = keyEstimator.estimate();
+        estimatedKeyRoot.store(e.root, std::memory_order_relaxed);
+        estimatedKeyMinor.store(e.minor ? 1 : 0, std::memory_order_relaxed);
+        estimatedKeyConfidence.store(e.confidence, std::memory_order_relaxed);
+        estimatedKeyEvidence.store(e.evidenceSeconds, std::memory_order_relaxed);
+        estimatedKeyScore.store(e.profileScore, std::memory_order_relaxed);
+        estimatedKeyMargin.store(e.scoreMargin, std::memory_order_relaxed);
+        estimatedKeyDistinct.store(e.distinctPitchClasses, std::memory_order_relaxed);
+        estimatedKeyValid.store(e.valid ? 1 : 0, std::memory_order_relaxed);
+    }
 
-        const int nearest = static_cast<int>(std::round(midiNote));
-
-        // Major / Minor are measured from the chosen Key. The piano keys (custom scale)
-        // are labelled C..B, so they are absolute and must not move with the Key.
-        const int noteInOctave = useCustom ? ((nearest % 12) + 120) % 12
-                                           : ((nearest % 12) - rootNote + 120) % 12;
-
-        if (scale[static_cast<size_t>(noteInOctave)])
-            return nearest;
-
-        for (int offset = 1; offset <= 6; ++offset)
-        {
-            const int up   = (noteInOctave + offset) % 12;
-            const int down = (noteInOctave - offset + 12) % 12;
-
-            const bool upOk   = scale[static_cast<size_t>(up)];
-            const bool downOk = scale[static_cast<size_t>(down)];
-
-            if (upOk && downOk)
-            {
-                const float fracPart = midiNote - static_cast<float>(nearest);
-                return (fracPart >= 0.0f) ? nearest + offset : nearest - offset;
-            }
-            if (upOk)   return nearest + offset;
-            if (downOk) return nearest - offset;
-        }
-
-        return nearest;
+    float quantizeToScale (float midiNote) const
+    {
+        // A manually edited piano overrides the named scale and remains 12-TET.
+        // Otherwise use the named scale's exact intervals, including quarter tones.
+        return useCustom ? ScaleQuantizer::quantizeMidiToMask(midiNote, customScale)
+                         : ScaleQuantizer::quantizeMidi(midiNote, rootNote, scaleType);
     }
 
     double sr = 44100.0;
@@ -491,10 +633,13 @@ private:
     float retuneSpeed    = 0.0f;
     float amount         = 1.0f;     // full correction (the Amount knob was removed)
     float humanize       = 0.0f;
+    float flexTune       = 0.0f;
+    float glideMilliseconds = 0.0f;
     float sustainCents   = 60.0f;     // Note Stabilizer: small hysteresis so vibrato near a
                                       // note boundary does not make the target flip (the Sustain knob was removed)
     bool  noteStabilizer = false;
     bool  formantPreserve = true;
+    float formantShiftSemitones = 0.0f;
     float referenceFreq  = 440.0f;
     bool  enabled        = true;
     bool  lowLatencyMode = false;
@@ -504,8 +649,22 @@ private:
     std::array<bool, 12> customScale = kChromatic;
 
     double smoothedCorrectionCents = 0.0;
+    bool   pitchMotionHasPrevious = false;
+    float  previousObservedMidi = 0.0f;
     double smoothedHumanize = 0.0;
-    int    lockedMidiNote = -1;
+    double smoothedFlexTune = 0.0;
+    TargetGlide targetGlide;
+    KeyEstimator keyEstimator;
+    int keyEstimateSampleCounter = 0;
+    std::atomic<int> estimatedKeyRoot { 0 };
+    std::atomic<int> estimatedKeyMinor { 0 };
+    std::atomic<float> estimatedKeyConfidence { 0.0f };
+    std::atomic<float> estimatedKeyEvidence { 0.0f };
+    std::atomic<float> estimatedKeyScore { 0.0f };
+    std::atomic<float> estimatedKeyMargin { 0.0f };
+    std::atomic<int> estimatedKeyDistinct { 0 };
+    std::atomic<int> estimatedKeyValid { 0 };
+    float  lockedMidiNote = -1.0f;
     int    holdCounter    = 0;
     int    latencySamples = 0;
     int    samplesSinceHop = 0;     // samples fed to the detector since its last measurement
@@ -522,6 +681,7 @@ private:
     float lastCorrectionCents = 0.0f;
     int   lastDetectedMidi    = -1;
     int   lastTargetMidi      = -1;
+    float lastTargetMidiFloat = -1.0f;
 };
 
 } // namespace humtune

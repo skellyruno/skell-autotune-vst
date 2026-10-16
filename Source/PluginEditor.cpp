@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include "Artwork.h"
+#include <cmath>
 
 using Palette = humtune::Palette;
 
@@ -17,6 +18,22 @@ constexpr bool isBlackKey (int idx)
 constexpr float kCx = 390.0f;
 constexpr float kCy = 188.0f;
 constexpr float kR  = 112.0f;
+
+juce::String targetNoteLabel (int nearestMidi, float exactMidi)
+{
+    auto name = HumHouseVocalTuneProcessor::midiNoteToName(nearestMidi);
+    if (nearestMidi < 0 || ! std::isfinite(exactMidi) || exactMidi < 0.0f)
+        return name.isEmpty() ? juce::String("--") : name;
+
+    const int cents = juce::roundToInt((exactMidi - static_cast<float>(nearestMidi)) * 100.0f);
+    if (std::abs(cents) >= 1)
+    {
+        if (cents > 0) name += "+";
+        name += juce::String(cents);
+        name += juce::String::fromUTF8("¢");
+    }
+    return name;
+}
 
 // Shrinks an image in steps of at most 2x, which keeps the result smooth
 juce::Image scaledImage (const juce::Image& src, int w, int h)
@@ -72,6 +89,29 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     };
     addAndMakeVisible(presetBox);
 
+    autoKeyButton.setTooltip("Estimate the key from recent detected vocal notes, then apply that Major/Minor key.\n"
+                             "Play a few notes first; sparse or chromatic performances may be ambiguous.");
+    autoKeyButton.onClick = [this]()
+    {
+        const auto estimate = proc.applyAutoKeyEstimate();
+        if (estimate.valid)
+        {
+            rootNoteBox.setSelectedId(estimate.root + 1, juce::dontSendNotification);
+            scaleBox.setSelectedId((estimate.minor ? 1 : 0) + 1, juce::dontSendNotification);
+            applyScaleFromControls();
+            autoKeyButton.setButtonText(kNoteNames[estimate.root] + juce::String(estimate.minor ? " MIN " : " MAJ ")
+                                        + juce::String(juce::roundToInt(estimate.confidence * 100.0f)) + "%");
+            autoKeyButton.setTooltip("Applied estimated key. Confidence is a heuristic based on profile fit and runner-up separation, not a probability.");
+        }
+        else
+        {
+            autoKeyButton.setButtonText("PLAY MORE");
+            autoKeyButton.setTooltip("Not enough distinct, confident vocal pitch history yet. Play/sing a phrase and try again.");
+        }
+        autoKeyFeedbackTicks = 75;
+    };
+    addAndMakeVisible(autoKeyButton);
+
     // --- Knobs ---
     setupKnob(speedKnob, speedLabel, "RETUNE SPEED",
               "How fast the pitch snaps to the note. Turn right for faster.\n0 = instant (hard tune), 100 = slow and natural.");
@@ -79,35 +119,64 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     speedKnob.getProperties().set("displayFlip", true);     // fully right = 0 (fastest), fully left = 100 (slowest)
 
     setupKnob(humanizeKnob, humanizeLabel, "HUMANIZE",
-              "Keeps some of the natural pitch movement of the voice.");
+              "Eases off correction on sustained notes.");
+    setupKnob(flexTuneKnob, flexTuneLabel, "FLEX 0",
+              "Lets expressive bends and larger pitch excursions pass through more naturally.\n"
+              "Low = conventional correction. High = correction is strongest close to the target note.");
+    flexTuneKnob.getProperties().set("displayScale", 100.0); // shown as 0..100
+    setupKnob(glideKnob, glideLabel, "GLIDE 0ms",
+              "Smooths movement between target notes independently of Retune Speed.\n"
+              "0 ms snaps to the selected target immediately; higher values add portamento.");
+    glideKnob.setTextValueSuffix(" ms");
+    glideKnob.getProperties().set("hideValue", true);
     setupKnob(referenceFreqKnob, referenceFreqLabel, "PITCH REF",
               "What frequency the note A4 is tuned to. 440 Hz is the standard.");
     referenceFreqKnob.setTextValueSuffix(" Hz");
     referenceFreqKnob.getProperties().set("hideValue", true);   // the value is shown next to the knob
 
+    setupKnob(formantShiftKnob, formantShiftLabel, "FORMANT",
+              "Independently shifts vocal tone colour from -4 to +4 semitones.\n"
+              "Negative = darker/deeper; positive = brighter. Zero leaves your existing formant setting unchanged.");
+    formantShiftKnob.setTextValueSuffix(" st");
+
     speedAtt     = std::make_unique<SliderAttach>(apvts, "retune",    speedKnob);
     humanizeAtt  = std::make_unique<SliderAttach>(apvts, "humanize",  humanizeKnob);
+    flexTuneAtt  = std::make_unique<SliderAttach>(apvts, "flexTune",  flexTuneKnob);
+    glideAtt     = std::make_unique<SliderAttach>(apvts, "glide",     glideKnob);
     referenceFreqAtt = std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
+    formantShiftAtt = std::make_unique<SliderAttach>(apvts, "formantShift", formantShiftKnob);
 
-    // --- Scale buttons: pick a scale and the piano keys light up for it ---
-    auto makeScaleBtn = [this](juce::TextButton& btn, int scaleIdx, const juce::String& tip)
+    // --- Scale selector: western modes plus optional quarter-tone / Maqam scales ---
+    for (int i = 0; i < humtune::ScaleQuantizer::kNumScales; ++i)
+        scaleBox.addItem(humtune::ScaleQuantizer::name(i), i + 1);
+    scaleBox.setSelectedId(currentScaleType() + 1, juce::dontSendNotification);
+    scaleBox.setTooltip("Choose the target-note scale. 24-TET and several Maqam modes use quarter-tone targets.\n"
+                        "The piano keys show the nearest semitone classes; manual key edits switch to a custom 12-TET scale.");
+    scaleBox.onChange = [this]()
     {
-        btn.setClickingTogglesState(true);
-        btn.setRadioGroupId(1001);
-        btn.setToggleState(scaleIdx == 0, juce::dontSendNotification);
-        btn.setTooltip(tip);
-        btn.onClick = [this, scaleIdx]()
+        const int scaleIndex = scaleBox.getSelectedId() - 1;
+        if (scaleIndex < 0 || scaleIndex >= humtune::ScaleQuantizer::kNumScales)
+            return;
+        auto& state = proc.getAPVTS();
+        if (scaleIndex < 3)
         {
-            if (auto* param = proc.getAPVTS().getParameter("scaleType"))
-                param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(scaleIdx)));
-            proc.applyScaleToKeys(scaleIdx, currentRoot());
-            repaint();
-        };
-        addAndMakeVisible(btn);
+            if (auto* legacyParam = state.getParameter("scaleType"))
+                legacyParam->setValueNotifyingHost(legacyParam->convertTo0to1(static_cast<float>(scaleIndex)));
+            if (auto* extensionParam = state.getParameter("scaleExtension"))
+                extensionParam->setValueNotifyingHost(extensionParam->convertTo0to1(0.0f));
+        }
+        else
+        {
+            // Extension 1 maps to full scale index 3, extension 17 to index 19.
+            if (auto* extensionParam = state.getParameter("scaleExtension"))
+                extensionParam->setValueNotifyingHost(extensionParam->convertTo0to1(static_cast<float>(scaleIndex - 2)));
+        }
+        proc.applyScaleToKeys(scaleIndex, currentRoot());
+        lastAppliedScale = scaleIndex;
+        lastAppliedRoot = currentRoot();
+        repaint();
     };
-    makeScaleBtn(majorBtn, 0, "Major scale in the chosen key.\nLights the matching piano keys.");
-    makeScaleBtn(minorBtn, 1, "Minor scale in the chosen key.\nLights the matching piano keys.");
-    makeScaleBtn(chromBtn, 2, "Every note is allowed.");
+    addAndMakeVisible(scaleBox);
 
     // --- Toggle buttons ---
     formantBtn.setTooltip("On: keeps the natural character of the voice.\nOff: robotic / chipmunk effect.");
@@ -149,9 +218,13 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor& p)
     addAndMakeVisible(rootNoteLabel);
     rootNoteAtt = std::make_unique<ComboAttach>(apvts, "rootNote", rootNoteBox);
 
-    // When the user changes the Key, the piano keys follow (see parameterGestureChanged)
+    // Host automation and GUI edits keep the piano projection in sync with the scale/key.
     if (auto* rootParam = apvts.getParameter("rootNote"))
         rootParam->addListener(this);
+    if (auto* scaleParam = apvts.getParameter("scaleType"))
+        scaleParam->addListener(this);
+    lastAppliedScale = currentScaleType();
+    lastAppliedRoot = currentRoot();
 
     // --- Piano keys: lit = the tuner may snap to this note ---
     for (int i = 0; i < 12; ++i)
@@ -187,6 +260,8 @@ HumHouseVocalTuneEditor::~HumHouseVocalTuneEditor()
 {
     if (auto* rootParam = proc.getAPVTS().getParameter("rootNote"))
         rootParam->removeListener(this);
+    if (auto* scaleParam = proc.getAPVTS().getParameter("scaleType"))
+        scaleParam->removeListener(this);
 
     setLookAndFeel(nullptr);
 }
@@ -211,7 +286,9 @@ void HumHouseVocalTuneEditor::setupKnob (juce::Slider& knob, juce::Label& label,
 
 int HumHouseVocalTuneEditor::currentScaleType() const
 {
-    return static_cast<int>(*proc.getAPVTS().getRawParameterValue("scaleType"));
+    const int extension = static_cast<int>(*proc.getAPVTS().getRawParameterValue("scaleExtension"));
+    return extension > 0 ? extension + 2
+                         : static_cast<int>(*proc.getAPVTS().getRawParameterValue("scaleType"));
 }
 
 int HumHouseVocalTuneEditor::currentRoot() const
@@ -221,12 +298,18 @@ int HumHouseVocalTuneEditor::currentRoot() const
 
 void HumHouseVocalTuneEditor::applyScaleFromControls()
 {
-    proc.applyScaleToKeys(currentScaleType(), currentRoot());
+    const int scale = currentScaleType();
+    const int root = currentRoot();
+    proc.applyScaleToKeys(scale, root);
+    lastAppliedScale = scale;
+    lastAppliedRoot = root;
+    if (scaleBox.getSelectedId() != scale + 1)
+        scaleBox.setSelectedId(scale + 1, juce::dontSendNotification);
     repaint();
 }
 
-// The Key can also be changed by the host (automation, presets): only a change made with
-// the mouse (a "gesture") re-lights the piano keys, so loading a session keeps its own keys.
+// Named-scale/root changes from the host or UI relight the keyboard. Unchanged values do
+// not overwrite a manual key mask; the timer tracks the last applied scale/root pair.
 void HumHouseVocalTuneEditor::parameterValueChanged (int, float)
 {
     juce::MessageManager::callAsync([safe = juce::Component::SafePointer<juce::Component>(this)]
@@ -290,6 +373,15 @@ void HumHouseVocalTuneEditor::rebuildScaledArt()
 // ---------------------------------------------------------------------------
 void HumHouseVocalTuneEditor::timerCallback()
 {
+    // Keep Auto Key feedback transient rather than leaving the estimated key/count
+    // permanently in the compact header button.
+    if (autoKeyFeedbackTicks > 0 && --autoKeyFeedbackTicks == 0)
+    {
+        autoKeyButton.setButtonText("AUTO KEY");
+        autoKeyButton.setTooltip("Estimate the key from recent detected vocal notes, then apply that Major/Minor key.\n"
+                                 "Play a few notes first; sparse or chromatic performances may be ambiguous.");
+    }
+
     const int desiredPresetId = proc.getCurrentProgram() + 1;
     if (presetBox.getSelectedId() != desiredPresetId)
         presetBox.setSelectedId(desiredPresetId, juce::dontSendNotification);
@@ -300,8 +392,28 @@ void HumHouseVocalTuneEditor::timerCallback()
     displayConfidence      = proc.getConfidence();
     displayDetectedMidi    = proc.getDetectedMidiNote();
     displayTargetMidi      = proc.getTargetMidiNote();
+    displayTargetMidiFloat = proc.getTargetMidiFloat();
     displayInputLevel      = proc.getInputLevel();
     displayOutputLevel     = proc.getOutputLevel();
+
+    // The tiny secondary control has no floating textbox at this scale, so keep
+    // its current semitone value visible in the label itself.
+    const float glideValue = proc.getAPVTS().getRawParameterValue("glide")->load(std::memory_order_relaxed);
+    const juce::String glideText = "GLIDE " + juce::String(juce::roundToInt(glideValue)) + "ms";
+    if (glideLabel.getText() != glideText)
+        glideLabel.setText(glideText, juce::dontSendNotification);
+
+    const float flexValue = proc.getAPVTS().getRawParameterValue("flexTune")->load(std::memory_order_relaxed);
+    const juce::String flexText = "FLEX " + juce::String(juce::roundToInt(flexValue * 100.0f));
+    if (flexTuneLabel.getText() != flexText)
+        flexTuneLabel.setText(flexText, juce::dontSendNotification);
+
+    const float formantShiftValue = proc.getAPVTS().getRawParameterValue("formantShift")->load(std::memory_order_relaxed);
+    const juce::String formantShiftText = "FORM "
+        + juce::String(formantShiftValue > 0.0f ? "+" : "")
+        + juce::String(formantShiftValue, 1);
+    if (formantShiftLabel.getText() != formantShiftText)
+        formantShiftLabel.setText(formantShiftText, juce::dontSendNotification);
 
     // Meters: dB scale (-48 dB .. 0 dB), instant attack, smooth release
     auto toMeter = [](float level)
@@ -319,18 +431,18 @@ void HumHouseVocalTuneEditor::timerCallback()
     heatmapTarget[static_cast<size_t>(heatmapWriteIdx)]   = displayTargetHz;
     heatmapWriteIdx = (heatmapWriteIdx + 1) % kHeatmapWidth;
 
-    // A scale button is lit only while the piano keys exactly match it (otherwise: custom)
+    // Reflect host automation and presets. Only rewrite the keyboard when the named
+    // scale or root actually changes, so a user's manual key mask is not overwritten.
     const int scaleVal = currentScaleType();
-    const int root     = currentRoot();
-    bool keysMatch = true;
-    for (int i = 0; i < 12; ++i)
-        if (noteButtons[static_cast<size_t>(i)].getToggleState()
-                != HumHouseVocalTuneProcessor::isNoteInScale(scaleVal, root, i))
-            keysMatch = false;
-
-    majorBtn.setToggleState(keysMatch && scaleVal == 0, juce::dontSendNotification);
-    minorBtn.setToggleState(keysMatch && scaleVal == 1, juce::dontSendNotification);
-    chromBtn.setToggleState(keysMatch && scaleVal == 2, juce::dontSendNotification);
+    const int root = currentRoot();
+    if (scaleBox.getSelectedId() != scaleVal + 1)
+        scaleBox.setSelectedId(scaleVal + 1, juce::dontSendNotification);
+    if (scaleVal != lastAppliedScale || root != lastAppliedRoot)
+    {
+        proc.applyScaleToKeys(scaleVal, root);
+        lastAppliedScale = scaleVal;
+        lastAppliedRoot = root;
+    }
 
     // The skull lights up with the singer's level (fast attack, quick release)
     const float glowTarget = juce::jlimit(0.0f, 1.0f, displayInputLevel * 1.6f);
@@ -555,13 +667,15 @@ void HumHouseVocalTuneEditor::paint (juce::Graphics& g)
     // --- Compact live monitor strip centered beneath the radar ---
     panel(248.0f, 309.0f, 284.0f, 39.0f, 6.0f, Palette::bgSection.withAlpha(0.96f), Palette::accent);
     const juce::String detNote = HumHouseVocalTuneProcessor::midiNoteToName(displayDetectedMidi);
-    const juce::String tgtNote = HumHouseVocalTuneProcessor::midiNoteToName(displayTargetMidi);
+    const juce::String tgtNote = targetNoteLabel(displayTargetMidi, displayTargetMidiFloat);
     const double latencyMs = 1000.0 * static_cast<double>(proc.getLatencySamples())
                            / juce::jmax(1.0, proc.getSampleRate());
     const juce::String detectedText = detNote.isEmpty() ? juce::String("--")
         : detNote + " " + juce::String(juce::roundToInt(displayDetectedHz)) + " Hz";
+    const bool microtonalTarget = displayTargetMidi >= 0
+        && std::abs(displayTargetMidiFloat - static_cast<float>(displayTargetMidi)) > 0.005f;
     const juce::String targetText = tgtNote.isEmpty() ? juce::String("--")
-        : tgtNote + " " + juce::String(juce::roundToInt(displayTargetHz)) + " Hz";
+        : (microtonalTarget ? tgtNote : tgtNote + " " + juce::String(juce::roundToInt(displayTargetHz)) + "Hz");
     const juce::String correctionText = detNote.isEmpty() ? juce::String("--")
         : (displayCorrectionCents >= 0.0f ? "+" : "")
           + juce::String(juce::roundToInt(displayCorrectionCents)) + " ct";
@@ -642,7 +756,7 @@ void HumHouseVocalTuneEditor::paintOverChildren (juce::Graphics& g)
         g.setColour(Palette::textBright);
         g.drawText(noteText, noteRect, juce::Justification::centred, false);
 
-        const juce::String tgt = HumHouseVocalTuneProcessor::midiNoteToName(displayTargetMidi);
+        const juce::String tgt = targetNoteLabel(displayTargetMidi, displayTargetMidiFloat);
         g.setColour(Palette::textDim);
         g.setFont(juce::Font(juce::FontOptions(12.5f)));
         g.drawText("Target: " + (tgt.isEmpty() ? juce::String("--") : tgt),
@@ -702,18 +816,23 @@ void HumHouseVocalTuneEditor::resized()
 
     // Small caps labels never get smaller than 9 px
     const juce::Font labelFont(juce::FontOptions(juce::jmax(9.0f, 11.0f * s)));
-    for (auto* l : { &speedLabel, &humanizeLabel, &referenceFreqLabel, &rootNoteLabel })
+    for (auto* l : { &speedLabel, &humanizeLabel, &flexTuneLabel, &glideLabel, &referenceFreqLabel, &formantShiftLabel, &rootNoteLabel })
         l->setFont(labelFont);
 
     // --- Top bar ---
+    autoKeyButton.setBounds(R(348, 8, 96, 28));
     presetBox.setBounds(R(452, 8, 190, 28));
     enableBtn.setBounds(R(kDesignW - 112, 8, 98, 28));
 
     // --- Main performance controls: Retune left, Humanize right ---
     place(speedKnob,    speedLabel,    35, 112, 112);
+    place(flexTuneKnob, flexTuneLabel, 63, 258, 54);
+    place(glideKnob, glideLabel, 132, 258, 54);
 
     place(humanizeKnob, humanizeLabel, 632, 112, 112);
     place(referenceFreqKnob, referenceFreqLabel, 682, 254, 43);
+    place(formantShiftKnob, formantShiftLabel, 682, 312, 43);
+    formantShiftLabel.setBounds(R(650, 353, 96, 16));
 
     // --- Key, scale buttons, switches ---
     const int rowY = 370;
@@ -721,9 +840,7 @@ void HumHouseVocalTuneEditor::resized()
     rootNoteLabel.setBounds(R(14, rowY, 32, rowH));
     rootNoteBox.setBounds(R(50, rowY, 58, rowH));
 
-    majorBtn.setBounds(R(116, rowY, 66, rowH));
-    minorBtn.setBounds(R(186, rowY, 66, rowH));
-    chromBtn.setBounds(R(256, rowY, 82, rowH));
+    scaleBox.setBounds(R(116, rowY, 222, rowH));
 
     formantBtn.setBounds(R(348, rowY, 80, rowH));
     lowLatencyBtn.setBounds(R(436, rowY, 106, rowH));

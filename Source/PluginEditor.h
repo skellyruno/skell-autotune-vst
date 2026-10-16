@@ -77,19 +77,19 @@ private:
     juce::Image skullSolidImg, skullHoloImg, armImg;
 
     // Knobs
-    juce::Slider speedKnob, humanizeKnob;
-    juce::Slider referenceFreqKnob;
+    juce::Slider speedKnob, humanizeKnob, flexTuneKnob, glideKnob;
+    juce::Slider referenceFreqKnob, formantShiftKnob;
 
     // Labels for knobs
-    juce::Label speedLabel, humanizeLabel, referenceFreqLabel;
+    juce::Label speedLabel, humanizeLabel, flexTuneLabel, glideLabel, referenceFreqLabel, formantShiftLabel;
 
     // Factory programs (keep a visible in-plugin route to the quality-first profile).
     juce::ComboBox presetBox;
+    juce::TextButton autoKeyButton { "AUTO KEY" };
+    int autoKeyFeedbackTicks = 0;
 
-    // Buttons
-    juce::TextButton majorBtn {"Major"};
-    juce::TextButton minorBtn {"Minor"};
-    juce::TextButton chromBtn {"Chromatic"};
+    // Scale selector (western scales plus optional 24-TET and Maqam modes)
+    juce::ComboBox scaleBox;
 
     juce::ToggleButton formantBtn    {"Formant"};
     juce::ToggleButton lowLatencyBtn {"Low Latency"};
@@ -111,9 +111,11 @@ private:
     using ComboAttach  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     std::unique_ptr<SliderAttach> speedAtt;
-    std::unique_ptr<SliderAttach> humanizeAtt, referenceFreqAtt;
+    std::unique_ptr<SliderAttach> humanizeAtt, flexTuneAtt, glideAtt, referenceFreqAtt, formantShiftAtt;
     std::unique_ptr<ButtonAttach> formantAtt, lowLatencyAtt, enableAtt;
     std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt;
+    int lastAppliedScale = -1;
+    int lastAppliedRoot  = -1;
     std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
 
     // Pitch display state
@@ -123,6 +125,7 @@ private:
     float displayConfidence      = 0.0f;
     int   displayDetectedMidi    = -1;
     int   displayTargetMidi      = -1;
+    float displayTargetMidiFloat = -1.0f;
     float displayInputLevel      = 0.0f;
     float displayOutputLevel     = 0.0f;
     float meterIn                = 0.0f;   // smoothed 0..1 meter positions

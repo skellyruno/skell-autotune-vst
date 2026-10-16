@@ -54,6 +54,18 @@ public:
 
     void setFormantPreserve (bool on) { formantPreserve = on; }
 
+    // Independent vocal-tract/formant colour shift. Zero keeps the current
+    // behaviour exactly; non-zero values move the spectral envelope without
+    // changing the grain spacing that determines the corrected fundamental.
+    // The range is deliberately modest because extreme rates can make PSOLA
+    // grains too short for a stable overlap at low fundamentals.
+    void setFormantShiftSemitones (float semitones) noexcept
+    {
+        if (! std::isfinite(semitones))
+            semitones = 0.0f;
+        formantShiftRatioTarget = std::exp2(static_cast<double>(juce::jlimit(-4.0f, 4.0f, semitones)) / 12.0);
+    }
+
     // Experimental fixed-budget path for evaluating predictive cycle resynthesis.
     // This is intentionally opt-in until the regression suite proves quality.
     void setLowLatencyExperiment (bool on)
@@ -106,6 +118,7 @@ public:
         lastInputPeriod = lastPeriod;
         transitionBlendAge = -1;
         transitionBlendTotal = 0;
+        smoothedFormantShiftRatio = formantShiftRatioTarget;
     }
 
     int getLatencySamples() const { return latency; }
@@ -154,6 +167,8 @@ public:
             // seen when moving the grain spacing by tiny amounts every sample.
             const double smoothingCoeff = std::exp(-static_cast<double>(kLowLatencyChunk)
                                                    / (sr * 0.0025));
+            const double formantCoeff = std::exp(-static_cast<double>(kLowLatencyChunk)
+                                                  / (sr * kFormantShiftSmoothingSeconds));
             for (int i = 0; i < numSamples; ++i)
             {
                 if ((inCount % kLowLatencyChunk) == 0)
@@ -162,15 +177,42 @@ public:
                                    + (1.0 - smoothingCoeff) * targetPeriod;
                     lowLatencySlicePeriod = juce::jlimit(static_cast<double>(minPeriod),
                                                          static_cast<double>(maxPeriod), smoothedPeriod);
+                    smoothedFormantShiftRatio = formantShiftRatioTarget
+                        + (smoothedFormantShiftRatio - formantShiftRatioTarget) * formantCoeff;
+                    snapNeutralFormantShiftIfSettled();
                 }
-                processChunk(data + i, 1, lowLatencySlicePeriod, ratio);
+                processChunk(data + i, 1, lowLatencySlicePeriod, ratio, smoothedFormantShiftRatio);
+            }
+        }
+        else if (formantShiftIsActive())
+        {
+            // Use a persistent 32-sample timeline for the new control. Automation
+            // and host block boundaries therefore cannot change its smoothing rate.
+            // The neutral setting stays on the old 256-sample path below to keep
+            // existing presets/renders bit-identical.
+            const double formantCoeff = std::exp(-static_cast<double>(kFormantUpdateChunk)
+                                                  / (sr * kFormantShiftSmoothingSeconds));
+            int pos = 0;
+            while (pos < numSamples)
+            {
+                const int offset = static_cast<int>(inCount % kFormantUpdateChunk);
+                const int n = std::min(numSamples - pos, kFormantUpdateChunk - offset);
+                if (offset == 0)
+                {
+                    smoothedFormantShiftRatio = formantShiftRatioTarget
+                        + (smoothedFormantShiftRatio - formantShiftRatioTarget) * formantCoeff;
+                    snapNeutralFormantShiftIfSettled();
+                }
+                processChunk(data + pos, n, targetPeriod, ratio, smoothedFormantShiftRatio);
+                pos += n;
             }
         }
         else
         {
             smoothedPeriod = targetPeriod;
             for (int pos = 0; pos < numSamples; pos += kChunk)
-                processChunk(data + pos, std::min(kChunk, numSamples - pos), targetPeriod, ratio);
+                processChunk(data + pos, std::min(kChunk, numSamples - pos), targetPeriod, ratio,
+                             smoothedFormantShiftRatio);
         }
 
     }
@@ -183,6 +225,21 @@ public:
 private:
     static constexpr int kChunk = 256;
     static constexpr int kLowLatencyChunk = 32;
+    static constexpr int kFormantUpdateChunk = 32;
+    static constexpr double kFormantShiftSmoothingSeconds = 0.012;
+
+    bool formantShiftIsActive() const noexcept
+    {
+        return std::abs(formantShiftRatioTarget - 1.0) > 1.0e-7
+            || std::abs(smoothedFormantShiftRatio - 1.0) > 1.0e-7;
+    }
+
+    void snapNeutralFormantShiftIfSettled() noexcept
+    {
+        if (std::abs(formantShiftRatioTarget - 1.0) < 1.0e-7
+            && std::abs(smoothedFormantShiftRatio - 1.0) < 1.0e-6)
+            smoothedFormantShiftRatio = 1.0;
+    }
 
     static int nextPow2 (int v)
     {
@@ -252,7 +309,7 @@ private:
         return static_cast<double>(best);
     }
 
-    void processChunk (float* data, int m, double periodF, double ratio)
+    void processChunk (float* data, int m, double periodF, double ratio, double formantShiftRatio)
     {
         for (int i = 0; i < m; ++i)
             inRing[static_cast<size_t>((inCount + i) & inMask)] = data[i];
@@ -262,13 +319,11 @@ private:
         const double hop    = periodF / ratio;
         const double margin = 8.0;
 
-        // Every grain covers exactly one period of the voice on each side of its centre.
-        // That length matters: it puts the zeros of the window's spectrum exactly on the
-        // voice's harmonics, so nothing leaks into the output (any other length adds
-        // low-frequency rumble when the pitch is changed).
-        //   formants kept : the grain is read at normal speed  -> output half-window = period
-        //   formants moved: the grain is read at `ratio` speed -> output half-window = hop
-        double wo = formantPreserve ? periodF : hop;
+        // The output grain spacing controls corrected pitch; source read rate controls
+        // vocal colour. Keeping these rates independent preserves formants during tuning
+        // while allowing a separate, modest timbre shift when requested.
+        const double formantRate = (formantPreserve ? 1.0 : ratio) * formantShiftRatio;
+        double wo = periodF / formantRate;
 
         // Longest half-window the delay budget allows, keeping a little real audio ahead.
         // Only the very lowest notes get anywhere near this limit.
@@ -412,6 +467,8 @@ private:
     bool    formantPreserve = true;
     bool    lowLatencyExperiment = false;
     double  lowLatencyBudgetMs = 3.5;
+    double  formantShiftRatioTarget = 1.0;
+    double  smoothedFormantShiftRatio = 1.0;
 };
 
 } // namespace humtune
