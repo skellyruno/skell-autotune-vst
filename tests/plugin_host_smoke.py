@@ -12,7 +12,12 @@ from pedalboard import load_plugin
 
 SR = 44100
 BLOCK = 96
-PATH = str(Path(sys.argv[1]).resolve(strict=True))
+PLUGIN_PATH = Path(sys.argv[1]).resolve(strict=True)
+# Pedalboard's Windows scanner expects the loadable VST3 module file. JUCE's
+# Windows output is a standard bundle folder containing that module.
+if sys.platform == "win32" and PLUGIN_PATH.is_dir():
+    PLUGIN_PATH = PLUGIN_PATH / "Contents" / "x86_64-win" / (PLUGIN_PATH.stem + ".vst3")
+PATH = str(PLUGIN_PATH)
 
 
 def render(plugin, frequency):
