@@ -2,7 +2,7 @@ name: Build plugin artifacts
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, codex/skellytune-low-latency]
   pull_request:
   workflow_dispatch:
   release:
@@ -18,6 +18,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure low-latency regressions
+        run: cmake -S . -B build-dsp -DSKELLYTUNE_LOW_LATENCY_TESTS_ONLY=ON
+
+      - name: Build low-latency regressions
+        run: cmake --build build-dsp --config Release --parallel 3
+
+      - name: Test low-latency processing
+        run: ctest --test-dir build-dsp -C Release --output-on-failure
 
       - name: Configure
         run: cmake -S . -B build -A x64

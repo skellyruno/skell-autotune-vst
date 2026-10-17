@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -119,9 +120,8 @@ public:
                                   static_cast<double>(maxPeriod), sr / 200.0);
         smoothedPeriod = lastPeriod;
         lowLatencySlicePeriod = lastPeriod;
-        lastInputPeriod = lastPeriod;
-        transitionBlendAge = -1;
-        transitionBlendTotal = 0;
+        for (auto& grain : liveGrains) grain.active = false;
+        lowLatencyWet = 0.0f;
         smoothedFormantShiftRatio = formantShiftRatioTarget;
     }
 
@@ -132,6 +132,7 @@ public:
         if (numSamples <= 0 || inRing.empty())
             return;
 
+        lowLatencyVoiced = std::isfinite(periodSamples) && periodSamples >= static_cast<float>(minPeriod);
         double targetPeriod;
         if (std::isfinite(periodSamples) && periodSamples >= static_cast<float>(minPeriod))
         {
@@ -144,20 +145,6 @@ public:
             targetPeriod = juce::jlimit(static_cast<double>(minPeriod), static_cast<double>(maxPeriod),
                                         std::min(lastPeriod, 0.006 * sr));
         }
-        if (lowLatencyExperiment)
-        {
-            // Detect a real note transition, then crossfade smoothly toward latency-aligned
-            // input for transient preservation before returning to resynthesis. The short
-            // attack avoids introducing a new discontinuity at the blend boundary.
-            if (lastInputPeriod > 0.0
-                && std::abs(targetPeriod - lastInputPeriod) / lastInputPeriod > 0.05)
-            {
-                transitionBlendTotal = std::max(1, static_cast<int>(std::ceil(sr * 0.016)));
-                transitionBlendAge = 0;
-            }
-            lastInputPeriod = targetPeriod;
-        }
-
         const double ratio = std::isfinite(shiftRatio)
                            ? juce::jlimit(0.6, 1.8, static_cast<double>(shiftRatio))
                            : 1.0;
@@ -185,7 +172,7 @@ public:
                         + (smoothedFormantShiftRatio - formantShiftRatioTarget) * formantCoeff;
                     snapNeutralFormantShiftIfSettled();
                 }
-                processChunk(data + i, 1, lowLatencySlicePeriod, ratio, smoothedFormantShiftRatio);
+                processLowLatencySample(data[i], lowLatencySlicePeriod, ratio, smoothedFormantShiftRatio);
             }
         }
         else if (formantShiftIsActive())
@@ -252,65 +239,86 @@ private:
         return p;
     }
 
-    double refinePitchMark (double predicted, double periodF) const
+    struct LiveGrain
     {
-        // A fixed-delay predictor can be forced to repeat part of a previous cycle.
-        // Align those predicted cycles to a real waveform peak instead of assuming
-        // that a period-only mark is phase-aligned. Restrict the search to available
-        // history and a small fraction of a cycle so marks cannot jump octaves.
-        const double radius = std::min(0.12 * periodF, 0.0015 * sr);
-        const int64_t first = std::max<int64_t>(2, static_cast<int64_t>(std::ceil(predicted - radius)));
-        const int64_t last = std::min<int64_t>(inCount - 3, static_cast<int64_t>(std::floor(predicted + radius)));
-        if (first > last || predicted < 2.0 || predicted >= static_cast<double>(inCount - 3))
-            return predicted;
+        double centre = 0.0, source = 0.0, halfWindow = 1.0, period = 1.0, rate = 1.0;
+        bool active = false;
+    };
 
-        int64_t best = static_cast<int64_t>(std::llround(predicted));
-        float bestMagnitude = 0.0f;
-        // Prefer the same-polarity crest as the preceding predicted cycle. Searching
-        // absolute magnitude alone can snap a mark onto a nearby opposite-polarity
-        // harmonic peak, especially just after a falling pitch transition.
-        const int64_t previous = static_cast<int64_t>(std::llround(predicted - periodF));
-        const float reference = (previous >= 1 && previous < inCount)
-            ? inRing[static_cast<size_t>(previous & inMask)] : 0.0f;
-        const bool positiveReference = reference >= 0.0f;
-        for (int64_t i = first; i <= last; ++i)
+    float readInput(double pos) const noexcept
+    {
+        const double fl = std::floor(pos);
+        const auto a = static_cast<int64_t>(fl);
+        if (a < 1 || a - 1 < inCount - inSize || a + 2 >= inCount)
+            return 0.0f;
+        const float t = static_cast<float>(pos - fl);
+        const float p0 = inRing[static_cast<size_t>((a - 1) & inMask)];
+        const float p1 = inRing[static_cast<size_t>(a & inMask)];
+        const float p2 = inRing[static_cast<size_t>((a + 1) & inMask)];
+        const float p3 = inRing[static_cast<size_t>((a + 2) & inMask)];
+        return p1 + 0.5f * t * (p2 - p0 + t * (2*p0 - 5*p1 + 4*p2 - p3 + t * (3*(p1-p2) + p3-p0)));
+    }
+
+    float readPredictedInput(double pos, double period) const noexcept
+    {
+        const double limit = static_cast<double>(inCount - 3);
+        if (pos > limit)
+            pos -= std::ceil((pos - limit) / period) * period;
+        // At the edge of available history, crossfade to the preceding cycle
+        // BEFORE wrapping. A discontinuous cycle substitution crackles on a
+        // changing or imperfectly periodic voice even if a sine-wave test passes.
+        const double fade = std::max(1.0, std::min(period * 0.08, latency * 0.5));
+        const double u = juce::jlimit(0.0, 1.0, (pos - (limit - fade)) / fade);
+        const float blend = static_cast<float>(u * u * (3.0 - 2.0 * u));
+        return readInput(pos) * (1.0f - blend) + readInput(pos - period) * blend;
+    }
+
+    void processLowLatencySample(float& sample, double period, double ratio, double formantShiftRatio)
+    {
+        inRing[static_cast<size_t>(inCount & inMask)] = sample;
+        ++inCount;
+        const double time = static_cast<double>(outRead);
+        const double rate = (formantPreserve ? 1.0 : ratio) * formantShiftRatio;
+        const double halfWindow = std::max(period / rate, 0.5 * period);
+        const double hop = period / ratio;
+        // Start each grain at its LEFT edge. The former fixed-budget path waited
+        // for the source centre, then inserted the middle of a window into output
+        // already in flight. That dropped overlap weight and modulated the level.
+        while (nextTs - halfWindow <= time)
         {
-            const float sample = inRing[static_cast<size_t>(i & inMask)];
-            if ((sample >= 0.0f) != positiveReference)
-                continue;
-            const float value = std::abs(sample);
-            if (value > bestMagnitude)
+            const double sourceTime = nextTs - latency;
+            while (markPos + 0.5 * period < sourceTime)
+                markPos += period;
+            for (auto& grain : liveGrains)
             {
-                bestMagnitude = value;
-                best = i;
-            }
-        }
-        // Very quiet/near-zero reference points can have no candidate of the chosen
-        // sign; fall back to the old bounded maximum rather than freezing the mark.
-        if (bestMagnitude <= 1.0e-8f)
-        {
-            for (int64_t i = first; i <= last; ++i)
-            {
-                const float value = std::abs(inRing[static_cast<size_t>(i & inMask)]);
-                if (value > bestMagnitude)
+                if (!grain.active)
                 {
-                    bestMagnitude = value;
-                    best = i;
+                    grain = {nextTs, markPos, halfWindow, period, period / halfWindow, true};
+                    break;
                 }
             }
+            nextTs += hop;
         }
-
-        // Sub-sample parabolic interpolation around the selected absolute peak.
-        if (best > first && best < last)
+        double total = 0.0, weight = 0.0;
+        for (auto& grain : liveGrains)
         {
-            const double ym = std::abs(inRing[static_cast<size_t>((best - 1) & inMask)]);
-            const double y0 = std::abs(inRing[static_cast<size_t>( best      & inMask)]);
-            const double yp = std::abs(inRing[static_cast<size_t>((best + 1) & inMask)]);
-            const double denom = ym - 2.0 * y0 + yp;
-            if (std::abs(denom) > 1.0e-12)
-                return static_cast<double>(best) + juce::jlimit(-0.5, 0.5, 0.5 * (ym - yp) / denom);
+            if (!grain.active) continue;
+            const double offset = time - grain.centre;
+            if (offset >= grain.halfWindow) { grain.active = false; continue; }
+            if (offset < -grain.halfWindow) continue;
+            const double w = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * offset / grain.halfWindow));
+            total += w * readPredictedInput(grain.source + offset * grain.rate, grain.period);
+            weight += w;
         }
-        return static_cast<double>(best);
+        const int64_t dryTime = outRead - latency;
+        const float dry = dryTime >= 0 ? inRing[static_cast<size_t>(dryTime & inMask)] : 0.0f;
+        const float shifted = weight > 1.0e-6 ? static_cast<float>(total / weight) : dry;
+        const bool needsShift = std::abs(ratio - 1.0) > 0.00001 || formantShiftIsActive();
+        const float targetWet = lowLatencyVoiced && needsShift ? 1.0f : 0.0f;
+        const float step = static_cast<float>(1.0 / std::max(1.0, sr * 0.003));
+        lowLatencyWet += juce::jlimit(-step, step, targetWet - lowLatencyWet);
+        sample = dry + lowLatencyWet * (shifted - dry);
+        ++outRead;
     }
 
     void processChunk (float* data, int m, double periodF, double ratio, double formantShiftRatio)
@@ -332,10 +340,7 @@ private:
         // Longest half-window the delay budget allows, keeping a little real audio ahead.
         // Only the very lowest notes get anywhere near this limit.
         const double woMax = static_cast<double>(latency) - margin - 0.6 * periodF;
-        if (! lowLatencyExperiment)
-            wo = std::max(std::min(wo, woMax), 0.5 * periodF);
-        else
-            wo = std::max(wo, 0.5 * periodF); // keep nominal cycle geometry; predict unavailable tail
+        wo = std::max(std::min(wo, woMax), 0.5 * periodF);
 
         const double rate = periodF / wo;                      // source samples per output sample
         const float  gain = static_cast<float>(hop / wo);      // keeps the loudness constant
@@ -354,8 +359,6 @@ private:
             while (markPos + 0.5 * periodF < ta0)
             {
                 markPos += periodF;
-                if (lowLatencyExperiment)
-                    markPos = refinePitchMark(markPos, periodF);
             }
 
             if (static_cast<int64_t>(std::floor(markPos + xNeed)) + 3 >= inCount)
@@ -426,35 +429,20 @@ private:
             if (outRingEpoch[idx] == ringEpoch)
                 outRing[idx] = 0.0f;
             float result = shifted;
-            if (lowLatencyExperiment && transitionBlendAge >= 0)
-            {
-                const int64_t dryTime = outputTime - latency;
-                if (dryTime >= 0 && dryTime < inCount)
-                {
-                    const float dry = inRing[static_cast<size_t>(dryTime & inMask)];
-                    const int attackSamples = std::max(1, static_cast<int>(std::ceil(sr * 0.0005)));
-                    const float attack = juce::jlimit(0.0f, 1.0f,
-                        static_cast<float>(transitionBlendAge) / static_cast<float>(attackSamples));
-                    const float decay = juce::jlimit(0.0f, 1.0f,
-                        1.0f - static_cast<float>(transitionBlendAge) / static_cast<float>(std::max(1, transitionBlendTotal)));
-                    const float dryWeight = attack * decay;
-                    result = shifted * (1.0f - dryWeight) + dry * dryWeight;
-                }
-                ++transitionBlendAge;
-                if (transitionBlendAge >= transitionBlendTotal)
-                    transitionBlendAge = -1;
-            }
             data[i] = result;
         }
         outRead += m;
     }
 
+    std::array<LiveGrain, 16> liveGrains {};
     double sr = 44100.0;
     int maxPeriod = 800, minPeriod = 32, latency = 2000;
     int inSize = 0, outSize = 0;
     int64_t inMask = 0, outMask = 0;
 
     std::vector<float> inRing, outRing;
+    float lowLatencyWet = 0.0f;
+    bool lowLatencyVoiced = false;
     std::vector<uint64_t> outRingEpoch;
     uint64_t ringEpoch = 0;
 
@@ -465,9 +453,6 @@ private:
     double  lastPeriod = 220.0;
     double  smoothedPeriod = 220.0;
     double  lowLatencySlicePeriod = 220.0;
-    double  lastInputPeriod = 220.0;
-    int     transitionBlendAge = -1;
-    int     transitionBlendTotal = 0;
     bool    formantPreserve = true;
     bool    lowLatencyExperiment = false;
     double  lowLatencyBudgetMs = 3.5;

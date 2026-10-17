@@ -19,6 +19,16 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
 
+# Focused low-latency engine regressions, independent of JUCE and the legacy suite.
+option(SKELLYTUNE_LOW_LATENCY_TESTS_ONLY "Build focused offline low-latency regressions" OFF)
+if(SKELLYTUNE_LOW_LATENCY_TESTS_ONLY)
+    enable_testing()
+    add_executable(low_latency_regression tests/low_latency_regression.cpp)
+    target_include_directories(low_latency_regression PRIVATE tests/support Source)
+    add_test(NAME low_latency_regression COMMAND low_latency_regression)
+    return()
+endif()
+
 # ---------------------------------------------------------------------------
 # Offline DSP-only build (no JUCE download required)
 # ---------------------------------------------------------------------------

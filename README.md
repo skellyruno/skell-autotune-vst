@@ -26,11 +26,11 @@ Ships as:
 | **Note Sustain** | Configurable cent threshold — once locked to a note, holds as long as vocal stays in range |
 | **Note Stabilizer** | Ignores micro-fluctuations to prevent jittery correction |
 | **Humanize** | Reduces correction amount for natural imperfection |
-| **Low Latency Mode (Experimental)** | Opt-in fixed-delay resynthesis targeting a 1.9 ms shifter budget; not yet validated on real vocals or measured DAW round-trip latency |
+| **Low Latency Mode (Experimental)** | Live overlap-normalized resynthesis with a nominal 1.9 ms shifter budget, transparent unchanged/unvoiced audio, and smoothed cycle joins |
 | **Pitch Orb Display** | Real-time visual feedback showing detected note and correction direction |
 | **In/Out Heatmap** | Scrolling pitch history showing detected vs corrected pitch |
 | **12 Presets** | Hard Snap, Sharp Correct, Natural, R&B Smooth, Trap Vocal, Gospel, and more |
-| **Purple UI** | HumHouse signature dark purple aesthetic inspired by MetaTune |
+| **Studio Interface** | Resizable charcoal interface, mint accents, live input/target pitch monitor, correction ruler, and interactive scale keyboard |
 
 
 
@@ -63,4 +63,39 @@ See [installer/eula.txt](installer/eula.txt).
 
 ## Low Latency Development Status
 
-The experimental low-latency mode is off by default. Repository tests measure nominal ~1.9 ms scheduling and below-2 ms integrated sweep lag at 44.1/48/88.2/96 kHz for unity-ratio synthetic sweeps across several block sizes. The selectable Sub Bass range now reaches 40 Hz, including E1 (41.20 Hz), without changing the existing five saved voice-range indices. Synthetic harmonic/noisy E1→F#1 and changing-bass E1→G1 / E2→G2 cases pass across host block sizes, and integrated E1→F1 active correction passes at 44.1/48/88.2/96 kHz. The detector's YIN analysis now runs at approximately 12 kHz at every host rate, with a 31-tap low-pass FIR before decimation to reject aliasing. Regression tests include a strong 10.3 kHz interferer while tracking a 220 Hz fundamental at 44.1/48/96 kHz, plus 1,000 Hz and 1,450 Hz tracking. A detector-only GCC steady-clock benchmark measures about 9–19x lower elapsed time than the previous detector at the legacy 70 Hz floor across noisy repeated runs; the updated Sub Bass floor is more computationally expensive but remains far below the old full-rate search. These are synthetic DSP tests and detector-only timings, not full audio-callback, real-vocal or DAW certification. Repeated low-latency/standard mode changes are tested for stale-grain leakage; generation-stamped output slots avoid bulk ring clears during ordinary resets. Detector range changes invalidate history and wait for a fresh analysis window, and a 44.1-to-48 kHz re-prepare regression checks the sample-rate transition. Vocal artifact quality, formant behavior, DAW plug-in delay compensation, full callback CPU load and end-to-end device/DAW loopback still require validation. The full JUCE plugin build could not be run in the current environment because GitHub DNS resolution failed during dependency fetch. See [`LOW-LATENCY-CHECKLIST.md`](LOW-LATENCY-CHECKLIST.md) before using the experimental switch in performance.
+Low Latency remains opt-in. Its shifter budget is 84 samples at 44.1 kHz (1.905 ms),
+92 at 48 kHz, and 183 at 96 kHz. This is the plugin's reported audio delay, not
+pitch-detection response time or complete device/DAW round-trip latency. The detector
+still needs several cycles to identify a new note, especially in the bass ranges.
+
+The low-latency shifter now starts live grains at their left edges and normalizes
+simultaneous overlap. The former implementation could insert grains after their
+left edges had passed, losing window weight and producing level modulation. Joins
+between predicted cycles are crossfaded. At unity correction with neutral formant
+shift, and for unvoiced audio, the signal follows the exact latency-matched dry path;
+transitions into and out of correction are ramped over 3 ms. Standard mode's DSP is
+unchanged.
+
+Run the focused regressions without downloading JUCE:
+
+```sh
+cmake -S . -B build/low-latency -DCMAKE_BUILD_TYPE=Release -DSKELLYTUNE_LOW_LATENCY_TESTS_ONLY=ON
+cmake --build build/low-latency --parallel 3
+ctest --test-dir build/low-latency --output-on-failure
+```
+
+These checks cover exact delayed passthrough and startup transients, 48 harmonic
+pitch-shift cases at 40/80/220/880 Hz across 44.1/48/96 kHz, integrated 223-to-220 Hz
+correction at 44.1 kHz/96 samples, changing notes with vibrato, stereo phase,
+32–512-sample callback consistency, callback allocation detection, mode resets and
+sample-rate changes. The runner reports callback timing rather than enforcing a
+machine-dependent wall-clock threshold. The older `SKELLYTUNE_DSP_TESTS_ONLY` option
+references legacy test files absent from this revision; it is separate from the
+focused suite above.
+
+These are synthetic checks. Real-vocal artifacts, formant quality, Windows/macOS
+host performance and device loopback latency still need listening and host validation.
+For FL Studio at 44.1 kHz/96 samples, the audio buffer is about 2.18 ms per buffer;
+interface and driver latency are additional. Avoid changing latency mode during a
+take: the host must update delay compensation, and the DSP history resets on a mode
+change.
