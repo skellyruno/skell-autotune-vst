@@ -44,10 +44,6 @@ public:
         for (auto& s : shifters)
             s.prepare(sampleRate, blockSize);
 
-        const int maxLatency = static_cast<int>(std::ceil(2.5 * std::ceil(sr / PitchDetector::kMinHz))) + 16;
-        for (auto& line : dryLine)
-            line.reserve(static_cast<size_t>(maxLatency));
-
         prepared = true;
         keyEstimator.reset();
         keyEstimateSampleCounter = 0;
@@ -124,13 +120,12 @@ public:
         lastTargetMidi = -1;
         lastTargetMidiFloat = -1.0f;
 
-        // The shifter is not fed while tuning is bypassed. Clear its stale ring and
-        // detector history when re-enabling so it cannot resume with a time gap.
+        // The shifter keeps a warm delayed-dry history while bypassed; invalidate
+        // only pitch analysis so a resumed phrase cannot inherit an old note.
         if (prepared && on)
         {
             detector.setMinFrequency(kRangeMinHz[rangeIndex]);
-            for (auto& s : shifters)
-                s.reset();
+            detector.reset();
         }
     }
 
@@ -196,29 +191,9 @@ public:
 
     void delayDry (juce::AudioBuffer<float>& buffer)
     {
-        const int n   = buffer.getNumSamples();
         const int nch = std::min(buffer.getNumChannels(), kMaxChannels);
-        const int len = latencySamples;
-        if (n <= 0 || nch <= 0 || len <= 0)
-            return;
-
-        int endPos = dryPos;
         for (int ch = 0; ch < nch; ++ch)
-        {
-            float* d = buffer.getWritePointer(ch);
-            auto& line = dryLine[static_cast<size_t>(ch)];
-            int p = dryPos;
-            for (int i = 0; i < n; ++i)
-            {
-                const float x = d[i];
-                d[i] = line[static_cast<size_t>(p)];
-                line[static_cast<size_t>(p)] = x;
-                if (++p >= len)
-                    p = 0;
-            }
-            endPos = p;
-        }
-        dryPos = endPos;
+            shifters[static_cast<size_t>(ch)].processBypassed(buffer.getWritePointer(ch), buffer.getNumSamples());
     }
 
     void process (juce::AudioBuffer<float>& buffer)
@@ -263,12 +238,7 @@ public:
             return;
         }
 
-        // Save the original input to the dry ring without altering the wet buffer. If
-        // the user disables tuning later, delayDry() can switch to exact latency-matched
-        // passthrough without allocating a second AudioBuffer on the audio thread.
-        storeDryInput(buffer);
-
-        // The correction is refreshed every `hop` samples (about 4 ms) instead of once
+        // The correction is refreshed every `hop` samples (about 2 ms) instead of once
         // per DAW buffer, and each piece of audio is shifted straight after the pitch
         // of that piece was measured. That keeps the correction in step with the voice.
         const int hop = detector.getHopSize();
@@ -349,6 +319,7 @@ private:
     {
         pitchMotionHasPrevious = false;
         previousObservedMidi = 0.0f;
+        pitchMotionVelocity = 0.0;
     }
 
     float predictPitchMotion (float observedMidi, float observedHz, float confidence, int hop) noexcept
@@ -377,6 +348,7 @@ private:
         // short glides at this hop rate; seed the tracker again after the jump.
         if (std::abs(deltaCents) > 175.0)
         {
+            pitchMotionVelocity = 0.0;
             return observedMidi;
         }
 
@@ -385,43 +357,24 @@ private:
             return observedMidi;
 
         const double measuredVelocity = std::clamp(deltaCents / dt, -6000.0, 6000.0);
-        // Ignore detector jitter on held notes. A real expressive glide typically
-        // exceeds this threshold over a single 4 ms analysis hop. Confidence scales
-        // the forecast smoothly instead of adding another hard voicing gate.
-        if (std::abs(deltaCents) < 1.5 || std::abs(measuredVelocity) < 350.0)
+        // A raw one-hop derivative magnifies YIN jitter into audible pitch modulation.
+        // Smooth velocity in time (not frames) so faster analysis remains stable.
+        const double velocityCoeff = std::exp(-dt / 0.006);
+        pitchMotionVelocity = velocityCoeff * pitchMotionVelocity
+                            + (1.0 - velocityCoeff) * measuredVelocity;
+        if (std::abs(pitchMotionVelocity) < 150.0)
             return observedMidi;
 
         const double confidenceWeight = std::clamp((static_cast<double>(confidence) - 0.55) / 0.35,
                                                    0.0, 1.0);
-        const double estimateAge = detector.getPitchEstimateAgeSeconds(observedHz);
+        // Align the estimate to the audio being heard, not just the newest input.
+        // Standard mode reads older audio than live mode; forecasting both to "now"
+        // over-corrects a moving voice in the longer-delay path.
+        const double estimateAge = detector.getPitchEstimateAgeSeconds(observedHz)
+                                 - (lowLatencyMode ? 0.0 : static_cast<double>(latencySamples) / sr);
         const double predictionCents = std::clamp(
-            measuredVelocity * estimateAge * confidenceWeight, -85.0, 85.0);
+            pitchMotionVelocity * estimateAge * confidenceWeight, -85.0, 85.0);
         return observedMidi + static_cast<float>(predictionCents / 100.0);
-    }
-
-    void storeDryInput (const juce::AudioBuffer<float>& buffer)
-    {
-        const int n = buffer.getNumSamples();
-        const int nch = std::min(buffer.getNumChannels(), kMaxChannels);
-        const int len = latencySamples;
-        if (n <= 0 || nch <= 0 || len <= 0)
-            return;
-
-        int endPos = dryPos;
-        for (int ch = 0; ch < nch; ++ch)
-        {
-            const float* input = buffer.getReadPointer(ch);
-            auto& line = dryLine[static_cast<size_t>(ch)];
-            int p = dryPos;
-            for (int i = 0; i < n; ++i)
-            {
-                line[static_cast<size_t>(p)] = input[i];
-                if (++p >= len)
-                    p = 0;
-            }
-            endPos = p;
-        }
-        dryPos = endPos;
     }
 
     // Looks at the newest pitch measurement and works out the correction to apply.
@@ -523,8 +476,17 @@ private:
         // note change early as a singer approaches a note boundary.
         float targetMidi = quantizeToScale(midiNote);
 
+        // A small distance hysteresis prevents target chatter at a scale boundary,
+        // without the optional sustained-note lock. An actual note change still
+        // commits as soon as the new target is clearly closer (10 cents past midpoint).
+        const bool lockedTargetAllowed = lockedMidiNote >= 0.0f
+            && std::abs(quantizeToScale(lockedMidiNote) - lockedMidiNote) < 0.001f;
+        if (lockedTargetAllowed
+            && std::abs(midiNote - lockedMidiNote) < std::abs(midiNote - targetMidi) + 0.20f)
+            targetMidi = lockedMidiNote;
+
         // Note stabilizer: stay on the locked note while the voice is within sustainCents of it
-        if (noteStabilizer && lockedMidiNote >= 0)
+        if (noteStabilizer && lockedTargetAllowed)
         {
             const float lockedHz = referenceFreq * std::pow(2.0f, (lockedMidiNote - 69.0f) / 12.0f);
             const float centsDiff = std::abs(1200.0f * std::log2(observedHz / lockedHz));
@@ -583,7 +545,7 @@ private:
             ratio = 1.0f;                        // too small to matter
 
         curRatio  = ratio;
-        curPeriod = static_cast<float>(sr) / detectedHz;
+        curPeriod = static_cast<float>(sr) / observedHz;
     }
 
     void applyLatencyMode()
@@ -591,14 +553,11 @@ private:
         const float minHz = kRangeMinHz[rangeIndex];
 
         detector.setMinFrequency(minHz);
+        detector.reset();
         for (auto& s : shifters)
             s.setMinFrequency(static_cast<double>(minHz));
 
         latencySamples = shifters[0].getLatencySamples();
-
-        for (auto& line : dryLine)
-            line.assign(static_cast<size_t>(latencySamples), 0.0f);
-        dryPos = 0;
 
         smoothedCorrectionCents = 0.0;
         smoothedHumanize = static_cast<double>(std::clamp(humanize, 0.0f, 1.0f));
@@ -671,6 +630,7 @@ private:
     double smoothedCorrectionCents = 0.0;
     bool   pitchMotionHasPrevious = false;
     float  previousObservedMidi = 0.0f;
+    double pitchMotionVelocity = 0.0;
     double smoothedHumanize = 0.0;
     double smoothedFlexTune = 0.0;
     TargetGlide targetGlide;
@@ -692,9 +652,6 @@ private:
     double lastVoicedPeriodSamples = 0.0;
     float  curRatio  = 1.0f;        // correction being applied right now
     float  curPeriod = 0.0f;
-
-    std::array<std::vector<float>, kMaxChannels> dryLine;
-    int dryPos = 0;
 
     // Written by the audio callback, read by the editor's timer. Atomic mirrors avoid
     // a C++ data race without locks or heap work in the real-time path. Individual

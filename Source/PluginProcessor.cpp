@@ -31,6 +31,8 @@ HumHouseVocalTuneProcessor::getPresets()
         // Preserve the host's voice-range choice for other singers. Low Latency remains an
         // explicit experimental opt-in rather than silently changing the default sound.
         { "Studio Max (Standard)",   0.00f, 0.00f, 0,    false, true,    -1, 0 },
+        // Appended so all previously saved program indices remain stable.
+        { "Live Hard Snap",          0.00f, 0.00f, 0,    false, true,    -1, 1 },
     };
     return presets;
 }
@@ -143,11 +145,43 @@ HumHouseVocalTuneProcessor::~HumHouseVocalTuneProcessor()
     registerPresetTracking(false);
 }
 
-void HumHouseVocalTuneProcessor::parameterChanged(const juce::String&, float)
+void HumHouseVocalTuneProcessor::parameterChanged(const juce::String& id, float)
 {
-    // Called from either the host's automation thread or a UI thread.
-    // An atomic write is safe and does not allocate or block the audio callback.
+    const bool pianoNote = id.startsWith("note") && id != "noteStabilizer";
+    if (applyingNamedScale.load() && pianoNote)
+        return;
+
     currentPreset.store(-1, std::memory_order_relaxed);
+    if (restoringState.load())
+        return;
+
+    if (id == "rootNote" || id == "scaleType" || id == "scaleExtension")
+    {
+        pendingNamedScale.store(true);
+        triggerAsyncUpdate();
+    }
+    else if (pianoNote)
+    {
+        // A manual piano edit after a scale change is an explicit custom mask.
+        pendingNamedScale.store(false);
+    }
+}
+
+void HumHouseVocalTuneProcessor::handleAsyncUpdate()
+{
+    setLatencySamples(pendingLatency.load());
+    const juce::ScopedLock lock(namedScaleLock);
+    // Set the guard before clearing pending so the audio thread never sees a
+    // partially rewritten piano mask as a custom scale.
+    applyingNamedScale.store(true);
+    if (pendingNamedScale.exchange(false))
+    {
+        const int extension = static_cast<int>(parameterRefs.scaleExtension->load());
+        const int scale = extension > 0 ? extension + 2
+                                       : static_cast<int>(parameterRefs.scaleType->load());
+        applyScaleToKeys(scale, static_cast<int>(parameterRefs.rootNote->load()));
+    }
+    applyingNamedScale.store(false);
 }
 
 void HumHouseVocalTuneProcessor::registerPresetTracking(bool add)
@@ -205,6 +239,7 @@ void HumHouseVocalTuneProcessor::prepareToPlay (double sampleRate, int samplesPe
     engine.setLowLatencyMode(parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f);
     engine.prepare(sampleRate, samplesPerBlock);
     reportedLatency = engine.getLatencySamples();
+    pendingLatency.store(reportedLatency);
     setLatencySamples(reportedLatency);
 
 }
@@ -236,6 +271,7 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float outGainDb  = parameterRefs.outputGain->load(std::memory_order_relaxed);
 
     // The piano keys are the scale
+    const auto maskRevision = namedScaleRevision.load();
     std::array<bool, 12> keyMask;
     bool anyKeyOn = false;
     for (int i = 0; i < 12; ++i)
@@ -270,7 +306,9 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // If the piano matches the selected named scale, use its full interval definition
     // (including quarter tones). A changed piano mask is an explicit 12-TET custom scale.
     const auto expectedMask = humtune::ScaleQuantizer::approximateMask(scale, root);
-    if (anyKeyOn && keyMask != expectedMask)
+    if ((maskRevision & 1u) == 0 && maskRevision == namedScaleRevision.load()
+        && !pendingNamedScale.load() && !applyingNamedScale.load()
+        && anyKeyOn && keyMask != expectedMask)
         engine.setCustomScale(keyMask);
     else
         engine.clearCustomScale();
@@ -371,10 +409,19 @@ humtune::KeyEstimator::Estimate HumHouseVocalTuneProcessor::applyAutoKeyEstimate
 
 void HumHouseVocalTuneProcessor::applyScaleToKeys (int scaleType, int root)
 {
+    const juce::ScopedLock lock(namedScaleLock);
+    const bool wasApplying = applyingNamedScale.exchange(true);
+    namedScaleRevision.fetch_add(1);
     const auto mask = humtune::ScaleQuantizer::approximateMask(scaleType, root);
     for (int i = 0; i < 12; ++i)
         if (auto* param = apvts.getParameter("note" + juce::String(i)))
-            param->setValueNotifyingHost(mask[static_cast<size_t>(i)] ? 1.0f : 0.0f);
+        {
+            const float value = mask[static_cast<size_t>(i)] ? 1.0f : 0.0f;
+            if ((param->getValue() > 0.5f) != mask[static_cast<size_t>(i)])
+                param->setValueNotifyingHost(value);
+        }
+    namedScaleRevision.fetch_add(1);
+    applyingNamedScale.store(wasApplying);
 }
 
 const juce::String HumHouseVocalTuneProcessor::getProgramName (int index)
@@ -390,7 +437,22 @@ const juce::String HumHouseVocalTuneProcessor::getProgramName (int index)
 // ---------------------------------------------------------------------------
 void HumHouseVocalTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
+    const juce::ScopedLock lock(namedScaleLock);
     auto state = apvts.copyState();
+    if (pendingNamedScale.load())
+    {
+        // Hosts may save before the message thread has reflected automation into
+        // the keyboard. Serialize the intended mask without notifying the host.
+        const int extension = static_cast<int>(parameterRefs.scaleExtension->load());
+        const int scale = extension > 0 ? extension + 2
+                                       : static_cast<int>(parameterRefs.scaleType->load());
+        const auto mask = humtune::ScaleQuantizer::approximateMask(
+            scale, static_cast<int>(parameterRefs.rootNote->load()));
+        for (auto child : state)
+            for (int i = 0; i < 12; ++i)
+                if (child.getProperty("id").toString() == "note" + juce::String(i))
+                    child.setProperty("value", mask[static_cast<size_t>(i)] ? 1.0f : 0.0f, nullptr);
+    }
     // Parameter values are host-managed; program identity is editor metadata.
     // Store it outside the parameter list to preserve existing automation IDs.
     state.setProperty("factoryProgramIndex", currentPreset.load(std::memory_order_relaxed), nullptr);
@@ -407,7 +469,11 @@ void HumHouseVocalTuneProcessor::setStateInformation (const void* data, int size
         // Older projects did not save program identity. Avoid falsely showing
         // Studio Max for an arbitrary restored collection of parameter values.
         const int index = static_cast<int>(restored.getProperty("factoryProgramIndex", -1));
+        const juce::ScopedLock lock(namedScaleLock);
+        restoringState.store(true);
+        pendingNamedScale.store(false);
         apvts.replaceState(restored);
+        restoringState.store(false);
         // Restore identity last: parameter listeners may mark the replacement
         // custom while the host applies its saved values.
         currentPreset.store(index >= 0 && index < getNumPrograms() ? index : -1,

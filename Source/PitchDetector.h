@@ -19,7 +19,7 @@ namespace humtune
 //  * The window is copied into a flat array first. The old inner loop did four
 //    integer divisions (modulo) per sample, which made it far too slow for the
 //    audio thread.
-//  * Detection runs once per "hop" (about every 6 ms) instead of once per audio
+//  * Detection runs once per "hop" (about every 2 ms) instead of once per audio
 //    block, and silence is treated as unvoiced.
 class PitchDetector
 {
@@ -51,7 +51,7 @@ public:
         cmndBuf.assign(static_cast<size_t>(allocTau + 2), 0.0f);
 
         minTau  = std::max(2, static_cast<int>(std::floor(sr / kMaxHz)));
-        hopSize = std::max(32, static_cast<int>(sr / 250.0));
+        hopSize = std::max(16, static_cast<int>(sr / 500.0));
 
         // prepare() may be called again by a DAW after a sample-rate change.
         // Force the first setMinFrequency() call to recalculate the window even if
@@ -77,6 +77,13 @@ public:
         integLen = maxTau;                       // samples compared per lag
         bufLen   = integLen + maxTau + 2;        // samples needed in total
 
+        reset();
+    }
+
+    // Explicit history invalidation is also needed after bypass and mode changes
+    // when the range is unchanged. setMinFrequency intentionally short-circuits.
+    void reset() noexcept
+    {
         writePos = 0;
         freshSamples = 0;
         samplesSinceDetect = 0;
@@ -94,7 +101,7 @@ public:
 
     float getMinFrequency() const { return minHz; }
 
-    // Detection runs once every hopSize samples (about 4 ms).
+    // Detection runs once every hopSize samples (about 2 ms).
     int getHopSize() const { return hopSize * dec; }
 
     // Approximate age of the current YIN estimate. The estimate correlates two

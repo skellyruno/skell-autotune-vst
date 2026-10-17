@@ -19,68 +19,26 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
 
-# Focused low-latency engine regressions, independent of JUCE and the legacy suite.
-option(SKELLYTUNE_LOW_LATENCY_TESTS_ONLY "Build focused offline low-latency regressions" OFF)
-if(SKELLYTUNE_LOW_LATENCY_TESTS_ONLY)
+# Offline regressions use the real DSP headers with a minimal JUCE shim. Keep
+# the original DSP-only option as an alias; its former test sources are absent.
+option(SKELLYTUNE_LOW_LATENCY_TESTS_ONLY "Build focused offline tuning regressions" OFF)
+option(SKELLYTUNE_DSP_TESTS_ONLY "Build offline tuning regressions (compatibility alias)" OFF)
+option(SKELLYTUNE_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan for offline tests" OFF)
+
+if(SKELLYTUNE_LOW_LATENCY_TESTS_ONLY OR SKELLYTUNE_DSP_TESTS_ONLY)
     enable_testing()
     add_executable(low_latency_regression tests/low_latency_regression.cpp)
     target_include_directories(low_latency_regression PRIVATE tests/support Source)
-    add_test(NAME low_latency_regression COMMAND low_latency_regression)
-    return()
-endif()
-
-# ---------------------------------------------------------------------------
-# Offline DSP-only build (no JUCE download required)
-# ---------------------------------------------------------------------------
-# This option builds the real DSP engine and its regression executables using
-# the minimal JUCE test shim in tests/JuceHeader.h. It is useful in CI and in
-# restricted/headless environments where fetching JUCE or loading a GUI plugin
-# is not possible. It does NOT build a VST3 or Standalone application.
-option(SKELLYTUNE_DSP_TESTS_ONLY "Build offline DSP regression executables without JUCE" OFF)
-option(SKELLYTUNE_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan for DSP-only tests" OFF)
-
-if(SKELLYTUNE_DSP_TESTS_ONLY)
     if(SKELLYTUNE_ENABLE_SANITIZERS)
         if(MSVC OR NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             message(FATAL_ERROR "SKELLYTUNE_ENABLE_SANITIZERS requires GCC or Clang")
         endif()
+        target_compile_options(low_latency_regression PRIVATE
+            -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(low_latency_regression PRIVATE -fsanitize=address,undefined)
     endif()
-
-    enable_testing()
-    find_package(Threads REQUIRED)
-    set(SKELLYTUNE_DSP_TESTS
-        stereo_detector_smoke
-        pitch_shifter_quality
-        autotune_regression
-        realtime_allocation_smoke
-        scale_quantizer_regression
-        key_glide_regression
-        key_estimator_regression
-        latency_sweep_regression
-        engine_safety_regression
-    )
-
-    foreach(test_name IN LISTS SKELLYTUNE_DSP_TESTS)
-        add_executable(${test_name} "tests/${test_name}.cpp")
-        target_include_directories(${test_name} PRIVATE tests Source)
-        target_compile_features(${test_name} PRIVATE cxx_std_20)
-        target_link_libraries(${test_name} PRIVATE Threads::Threads)
-        if(SKELLYTUNE_ENABLE_SANITIZERS)
-            target_compile_options(${test_name} PRIVATE
-                -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
-            target_link_options(${test_name} PRIVATE -fsanitize=address,undefined)
-        endif()
-        add_test(NAME ${test_name} COMMAND ${test_name})
-    endforeach()
-
-    # Offline audio renderer used for real-vocal A/B diagnostics. This is a tool,
-    # not a test case: it accepts an input.raw file and writes a float WAV + CSV.
-    add_executable(vocal_render_harness tests/vocal_render_harness.cpp)
-    target_include_directories(vocal_render_harness PRIVATE tests Source)
-    target_compile_features(vocal_render_harness PRIVATE cxx_std_20)
-
-    message(STATUS "SkellyTune DSP-only mode enabled: JUCE fetch and plugin targets are skipped")
-    message(STATUS "These targets validate the DSP core; they do not build a VST3/Standalone plugin")
+    add_test(NAME low_latency_regression COMMAND low_latency_regression)
+    message(STATUS "Offline tuning regressions enabled; JUCE and plugin builds are skipped")
     return()
 endif()
 

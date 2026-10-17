@@ -104,9 +104,17 @@ private:
     } parameterRefs;
 
     // Tells the host about a latency change (must happen on the message thread)
-    void handleAsyncUpdate() override { setLatencySamples(pendingLatency.load()); }
+    void handleAsyncUpdate() override;
     std::atomic<int> pendingLatency { 0 };
     int reportedLatency = 0;
+
+    // Parameter callbacks only set flags; piano updates/host notifications run on
+    // the message thread. State restoration keeps explicit custom masks intact.
+    std::atomic<bool> pendingNamedScale { false };
+    std::atomic<bool> applyingNamedScale { false };
+    std::atomic<bool> restoringState { false };
+    std::atomic<unsigned> namedScaleRevision { 0 };
+    juce::CriticalSection namedScaleLock; // never acquired by processBlock
 
     juce::AudioProcessorValueTreeState apvts;
     humtune::AutoTuneEngine engine;

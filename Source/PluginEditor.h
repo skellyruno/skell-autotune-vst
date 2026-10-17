@@ -4,9 +4,12 @@
 #include "PluginProcessor.h"
 #include <JuceHeader.h>
 
-// Resizable studio interface with live pitch monitoring and a shared parameter state.
+// SkellyTune interface: left Retune Speed dial, central skull/radar and live pitch
+// monitor, right Humanize dial, then key/scale controls and a full-width pitch keyboard.
+// Note Stabilizer defaults off; its legacy parameter remains available for saved-session
+// compatibility. Input/output gain controls are omitted from this focused interface.
+
 class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor,
-                                public juce::AudioProcessorParameter::Listener,
                                 private juce::Timer
 {
 public:
@@ -17,20 +20,59 @@ public:
     void paintOverChildren (juce::Graphics&) override;
     void resized() override;
 
-    // Implement listener interface
-    void parameterValueChanged (int parameterIndex, float newValue) override;
-    void parameterGestureChanged (int parameterIndex, bool gestureIsStarting) override;
-
 private:
     void timerCallback() override;
+    void paintBackground(juce::Graphics&);
+    juce::Image backgroundCache;
+    bool popupWasVisible = false;
 
-    static constexpr int kDesignW = 900;
-    static constexpr int kDesignH = 680;
+    static constexpr int kDesignW = 780;
+    static constexpr int kDesignH = 620;
     float scaleFactor() const { return static_cast<float>(getWidth()) / static_cast<float>(kDesignW); }
 
     HumHouseVocalTuneProcessor& proc;
     humtune::HumHouseLookAndFeel lnf;
     juce::TooltipWindow tooltipWindow { this, 500 };
+
+    // Artwork shown as small child components so they are drawn crisply at any size
+    struct ArtView : public juce::Component
+    {
+        ArtView() { setInterceptsMouseClicks(false, false); }
+        void paint (juce::Graphics& g) override
+        {
+            if (image.isValid())
+            {
+                g.setOpacity(opacity);
+                g.drawImageAt(image, 0, 0);
+            }
+        }
+        juce::Image image;
+        float opacity = 1.0f;
+    };
+
+    struct SkullView : public juce::Component
+    {
+        SkullView() { setInterceptsMouseClicks(false, false); }
+        void paint (juce::Graphics& g) override
+        {
+            if (solid.isValid())
+            {
+                g.setOpacity(0.9f);
+                g.drawImageAt(solid, 0, 0);
+            }
+            if (holo.isValid() && glow > 0.02f)
+            {
+                g.setOpacity(0.75f * glow);
+                g.drawImageAt(holo, 0, 0);
+            }
+        }
+        juce::Image solid, holo;
+        float glow = 0.0f;
+    };
+
+    ArtView armLeftView, armRightView;
+    SkullView skullView;
+    juce::Image skullSolidImg, skullHoloImg, armImg;
 
     // Knobs
     juce::Slider speedKnob, humanizeKnob, flexTuneKnob, glideKnob;
@@ -70,8 +112,6 @@ private:
     std::unique_ptr<SliderAttach> humanizeAtt, flexTuneAtt, glideAtt, referenceFreqAtt, formantShiftAtt;
     std::unique_ptr<ButtonAttach> formantAtt, lowLatencyAtt, enableAtt;
     std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt;
-    int lastAppliedScale = -1;
-    int lastAppliedRoot  = -1;
     std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
 
     // Pitch display state
@@ -94,7 +134,7 @@ private:
     int heatmapWriteIdx = 0;
 
     void setupKnob (juce::Slider&, juce::Label&, const juce::String& text, const juce::String& tooltip);
-    void applyScaleFromControls();
+    void rebuildScaledArt();
     int  currentScaleType() const;
     int  currentRoot() const;
 
