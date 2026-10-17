@@ -18,6 +18,10 @@ public:
     {
         if (!std::isfinite(targetMidi))
             return current;
+        // Reject implausible MIDI values before any interpolation. They can arise
+        // from transient detector failures or corrupted automation and should
+        // never drag the glide state far outside the musical note range.
+        targetMidi = std::clamp(targetMidi, 0.0f, 127.0f);
         if (!initialized)
         {
             initialized = true;
@@ -36,7 +40,11 @@ public:
 
         // 95% of the target distance is covered in about the chosen Glide time.
         const double timeConstant = static_cast<double>(glideMs) / 3000.0;
-        const double coefficient = 1.0 - std::exp(-deltaSeconds / timeConstant);
+        // Bound the step duration after a transport pause or a host stall.
+        // Without this, a single unusually large delta bypasses the audible
+        // glide and produces an unexpected jump at the next note boundary.
+        const double boundedDelta = std::min(deltaSeconds, 0.050);
+        const double coefficient = 1.0 - std::exp(-boundedDelta / timeConstant);
         current += static_cast<float>(coefficient) * (targetMidi - current);
         if (std::abs(current - targetMidi) < 0.001f)
             current = targetMidi;
