@@ -48,6 +48,7 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
         key_estimator_regression
         latency_sweep_regression
         engine_safety_regression
+        voicing_formant_regression
     )
 
     foreach(test_name IN LISTS SKELLYTUNE_DSP_TESTS)
