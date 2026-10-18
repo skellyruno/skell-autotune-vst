@@ -30,6 +30,8 @@ public:
     void prepare (double sampleRate, int /*blockSize*/)
     {
         sr = sampleRate;
+        dryReleaseCoeff = static_cast<float>(std::exp(-1.0 / (std::max(1.0, sr) * 0.0025)));
+        dryAttackCoeff = static_cast<float>(std::exp(-1.0 / (std::max(1.0, sr) * 0.004)));
 
         const int maxPeriodAlloc = std::max(32, static_cast<int>(std::ceil(sr / kMinHz)));
         const int latencyAlloc   = static_cast<int>(std::ceil(kLatencyPeriods * maxPeriodAlloc)) + 8;
@@ -56,7 +58,19 @@ public:
         reset();
     }
 
-    void setFormantPreserve (bool on) { formantPreserve = on; }
+    void setFormantPreserve (bool on) noexcept { formantPreserve = on; }
+
+    // A voiced vowel uses pitch-synchronous resynthesis. On consonants, breaths and
+    // silence, blend toward an exactly latency-aligned dry signal instead of
+    // imposing a guessed voiced cycle on aperiodic audio. This path adds no delay,
+    // makes no allocation, and keeps processing the wet timeline continuously.
+    void setVoiced (bool voiced) noexcept { setDryPassthrough(!voiced); }
+    void setDryPassthrough (bool bypassWet) noexcept
+    {
+        dryMixTarget = bypassWet ? 1.0f : 0.0f;
+    }
+    float getDryMixForDiagnostics() const noexcept { return dryMix; }
+
 
     // Independent vocal-tract/formant colour shift. Zero keeps the current
     // behaviour exactly; non-zero values move the spectral envelope without
@@ -123,6 +137,9 @@ public:
         transitionBlendAge = -1;
         transitionBlendTotal = 0;
         smoothedFormantShiftRatio = formantShiftRatioTarget;
+        smoothedFormantPreserve = formantPreserve ? 1.0 : 0.0;
+        dryMix = 0.0f;
+        dryMixTarget = 0.0f;
     }
 
     int getLatencySamples() const { return latency; }
@@ -184,11 +201,12 @@ public:
                     smoothedFormantShiftRatio = formantShiftRatioTarget
                         + (smoothedFormantShiftRatio - formantShiftRatioTarget) * formantCoeff;
                     snapNeutralFormantShiftIfSettled();
+                    smoothFormantPreserve(kLowLatencyChunk);
                 }
                 processChunk(data + i, 1, lowLatencySlicePeriod, ratio, smoothedFormantShiftRatio);
             }
         }
-        else if (formantShiftIsActive())
+        else if (formantShiftIsActive() || formantPreserveIsTransitioning())
         {
             // Use a persistent 32-sample timeline for the new control. Automation
             // and host block boundaries therefore cannot change its smoothing rate.
@@ -206,6 +224,7 @@ public:
                     smoothedFormantShiftRatio = formantShiftRatioTarget
                         + (smoothedFormantShiftRatio - formantShiftRatioTarget) * formantCoeff;
                     snapNeutralFormantShiftIfSettled();
+                    smoothFormantPreserve(kFormantUpdateChunk);
                 }
                 processChunk(data + pos, n, targetPeriod, ratio, smoothedFormantShiftRatio);
                 pos += n;
@@ -243,6 +262,23 @@ private:
         if (std::abs(formantShiftRatioTarget - 1.0) < 1.0e-7
             && std::abs(smoothedFormantShiftRatio - 1.0) < 1.0e-6)
             smoothedFormantShiftRatio = 1.0;
+    }
+
+    bool formantPreserveIsTransitioning() const noexcept
+    {
+        return std::abs(smoothedFormantPreserve - (formantPreserve ? 1.0 : 0.0)) > 1.0e-7;
+    }
+
+    void smoothFormantPreserve(int samples) noexcept
+    {
+        const double target = formantPreserve ? 1.0 : 0.0;
+        if (smoothedFormantPreserve == target)
+            return;
+        const double coeff = std::exp(-static_cast<double>(samples)
+                                      / (std::max(1.0, sr) * kFormantShiftSmoothingSeconds));
+        smoothedFormantPreserve = target + (smoothedFormantPreserve - target) * coeff;
+        if (std::abs(smoothedFormantPreserve - target) < 1.0e-6)
+            smoothedFormantPreserve = target;
     }
 
     static int nextPow2 (int v)
@@ -326,7 +362,13 @@ private:
         // The output grain spacing controls corrected pitch; source read rate controls
         // vocal colour. Keeping these rates independent preserves formants during tuning
         // while allowing a separate, modest timbre shift when requested.
-        const double formantRate = (formantPreserve ? 1.0 : ratio) * formantShiftRatio;
+        // Avoid transcendental work in the common fully-preserved case and the
+        // familiar preserve-off case; only automation's in-between frames need
+        // the continuous log-frequency interpolation.
+        const double preserveFactor = smoothedFormantPreserve == 1.0 ? 1.0
+            : (smoothedFormantPreserve == 0.0 ? ratio
+               : std::exp((1.0 - smoothedFormantPreserve) * std::log(ratio)));
+        const double formantRate = preserveFactor * formantShiftRatio;
         double wo = periodF / formantRate;
 
         // Longest half-window the delay budget allows, keeping a little real audio ahead.
@@ -418,8 +460,16 @@ private:
             nextTs += hop;
         }
 
+        // Continuous equal-latency voicing handoff. Causal one-pole smoothing is
+        // sample-based, not host-block-based. A 2.5 ms release exposes consonants
+        // quickly; a 4 ms return to the wet path avoids clipping vowel attacks.
+        const float dryCoefficient = dryMixTarget > dryMix
+            ? dryReleaseCoeff : dryAttackCoeff;
         for (int i = 0; i < m; ++i)
         {
+            dryMix = dryMixTarget + (dryMix - dryMixTarget) * dryCoefficient;
+            if (std::abs(dryMix - dryMixTarget) < 1.0e-6f)
+                dryMix = dryMixTarget;
             const int64_t outputTime = outRead + i;
             const size_t idx = static_cast<size_t>(outputTime & outMask);
             const float shifted = outRingEpoch[idx] == ringEpoch ? outRing[idx] : 0.0f;
@@ -443,6 +493,13 @@ private:
                 ++transitionBlendAge;
                 if (transitionBlendAge >= transitionBlendTotal)
                     transitionBlendAge = -1;
+            }
+            if (dryMix > 0.0f)
+            {
+                const int64_t dryTime = outputTime - latency;
+                const float dry = dryTime >= 0 && dryTime < inCount
+                    ? inRing[static_cast<size_t>(dryTime & inMask)] : 0.0f;
+                result = result * (1.0f - dryMix) + dry * dryMix;
             }
             data[i] = result;
         }
@@ -469,6 +526,11 @@ private:
     int     transitionBlendAge = -1;
     int     transitionBlendTotal = 0;
     bool    formantPreserve = true;
+    double  smoothedFormantPreserve = 1.0;
+    float   dryMix = 0.0f;
+    float   dryMixTarget = 0.0f;
+    float   dryReleaseCoeff = 0.99f;
+    float   dryAttackCoeff = 0.995f;
     bool    lowLatencyExperiment = false;
     double  lowLatencyBudgetMs = 3.5;
     double  formantShiftRatioTarget = 1.0;

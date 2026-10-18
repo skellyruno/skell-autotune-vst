@@ -110,6 +110,8 @@ public:
         smoothedFlexTune = static_cast<double>(std::clamp(flexTune, 0.0f, 1.0f));
         lockedMidiNote = -1;
         holdCounter = 0;
+        pendingTargetMidi = -1;
+        pendingTargetSeconds = 0.0;
         resetPitchMotionTracker();
         samplesSinceHop = 0;
         unvoicedHopCount = 0;
@@ -331,6 +333,12 @@ public:
                 auto& s = shifters[static_cast<size_t>(ch)];
                 s.setFormantPreserve(formantPreserve);
                 s.setFormantShiftSemitones(formantShiftSemitones);
+                // Preserve the original audio when pitch is not reliably voiced
+                // or correction is exactly unity. Independent formant colouring
+                // must still run even at unity pitch.
+                const bool bypassWet = unvoicedHopCount != 0 || curPeriod <= 0.0f
+                    || (curRatio == 1.0f && std::abs(formantShiftSemitones) < 1.0e-5f);
+                s.setDryPassthrough(bypassWet);
                 s.process(buffer.getWritePointer(ch) + pos, seg, curPeriod, curRatio);
             }
 
@@ -490,6 +498,8 @@ private:
             {
                 lockedMidiNote = -1;
                 holdCounter = 0;
+                pendingTargetMidi = -1;
+                pendingTargetSeconds = 0.0;
             }
             // Preserve target glide across brief consonants and detector dropouts, but
             // reset it after a genuine pause so the next phrase starts on its first note.
@@ -529,20 +539,51 @@ private:
             const float lockedHz = referenceFreq * std::pow(2.0f, (lockedMidiNote - 69.0f) / 12.0f);
             const float centsDiff = std::abs(1200.0f * std::log2(observedHz / lockedHz));
 
-            if (centsDiff < sustainCents)
+            // Require persistent evidence before changing the stabilized note.
+            // A single 4 ms octave error or consonant onset must not change the
+            // scale target. This adds decision persistence, NOT audio lookahead.
+            // Confident new notes still cross after 12 ms; low-confidence hops
+            // cannot promote a new target. The regular live mode is untouched.
+            if (targetMidi == lockedMidiNote || centsDiff < sustainCents)
             {
-                targetMidi = lockedMidiNote;
-                holdCounter++;
+                targetMidi = static_cast<float>(lockedMidiNote);
+                pendingTargetMidi = -1;
+                pendingTargetSeconds = 0.0;
+                ++holdCounter;
             }
             else
             {
-                holdCounter = 0;
-                lockedMidiNote = targetMidi;
+                const int proposed = static_cast<int>(std::lround(targetMidi));
+                if (detector.getConfidence() >= 0.65f)
+                {
+                    if (pendingTargetMidi != proposed)
+                    {
+                        pendingTargetMidi = proposed;
+                        pendingTargetSeconds = 0.0;
+                    }
+                    pendingTargetSeconds += hopSeconds;
+                }
+                else
+                {
+                    pendingTargetMidi = -1;
+                    pendingTargetSeconds = 0.0;
+                }
+                if (pendingTargetSeconds >= 0.012)
+                {
+                    lockedMidiNote = proposed;
+                    pendingTargetMidi = -1;
+                    pendingTargetSeconds = 0.0;
+                    holdCounter = 0;
+                }
+                else
+                    targetMidi = static_cast<float>(lockedMidiNote);
             }
         }
         else
         {
-            lockedMidiNote = targetMidi;
+            lockedMidiNote = static_cast<int>(std::lround(targetMidi));
+            pendingTargetMidi = -1;
+            pendingTargetSeconds = 0.0;
         }
 
         const float appliedTargetMidi = targetGlide.process(targetMidi, glideMilliseconds, hopSeconds);
@@ -606,6 +647,8 @@ private:
         targetGlide.reset();
         lockedMidiNote = -1;
         holdCounter = 0;
+        pendingTargetMidi = -1;
+        pendingTargetSeconds = 0.0;
         resetPitchMotionTracker();
         samplesSinceHop = 0;
         unvoicedHopCount = 0;
@@ -688,6 +731,8 @@ private:
     int    holdCounter    = 0;
     int    latencySamples = 0;
     int    samplesSinceHop = 0;     // samples fed to the detector since its last measurement
+    int    pendingTargetMidi = -1;
+    double pendingTargetSeconds = 0.0;
     int    unvoicedHopCount = 0;    // short dropout hysteresis before releasing note lock
     double lastVoicedPeriodSamples = 0.0;
     float  curRatio  = 1.0f;        // correction being applied right now
