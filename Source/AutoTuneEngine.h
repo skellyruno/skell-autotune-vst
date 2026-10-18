@@ -5,6 +5,7 @@
 #include "ScaleQuantizer.h"
 #include "KeyEstimator.h"
 #include "TargetGlide.h"
+#include "NoteTransition.h"
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
@@ -113,6 +114,7 @@ public:
         pendingTargetMidi = -1;
         pendingTargetSeconds = 0.0;
         resetPitchMotionTracker();
+        noteTransition.reset();
         samplesSinceHop = 0;
         unvoicedHopCount = 0;
         lastVoicedPeriodSamples = 0.0;
@@ -496,6 +498,7 @@ private:
 
             if (unvoicedHopCount >= 3)
             {
+                noteTransition.reset();
                 lockedMidiNote = -1;
                 holdCounter = 0;
                 pendingTargetMidi = -1;
@@ -528,10 +531,18 @@ private:
         lastDetectedHz = detectedHz;
         lastDetectedMidi = static_cast<int>(std::round(predictedMidiNote));
 
-        // Keep scale quantization on the measured pitch rather than the prediction.
-        // That way anticipation improves the applied ratio without making the target
-        // note change early as a singer approaches a note boundary.
-        float targetMidi = quantizeToScale(midiNote);
+        // The detector's measured pitch is a historical window; the correction
+        // ratio instead uses a bounded motion forecast. Ordinarily keep the
+        // measured scale target. When consecutive confident hops move through
+        // a boundary and prediction has *already crossed* it, allow the new
+        // scale note one hop sooner. This avoids correcting toward the old note
+        // while the shifter is following the new pitch. A short confidence hold
+        // rejects spurious target jumps. No extra audio lookahead is used.
+        const float measuredTarget = quantizeToScale(midiNote);
+        const float forecastTarget = quantizeToScale(predictedMidiNote);
+        float targetMidi = noteTransition.choose(midiNote, predictedMidiNote,
+            measuredTarget, forecastTarget, detector.getConfidence(), hopSeconds,
+            noteStabilizer);
 
         // Note stabilizer: stay on the locked note while the voice is within sustainCents of it
         if (noteStabilizer && lockedMidiNote >= 0)
@@ -650,6 +661,7 @@ private:
         pendingTargetMidi = -1;
         pendingTargetSeconds = 0.0;
         resetPitchMotionTracker();
+        noteTransition.reset();
         samplesSinceHop = 0;
         unvoicedHopCount = 0;
         lastVoicedPeriodSamples = 0.0;
@@ -717,6 +729,7 @@ private:
     double smoothedHumanize = 0.0;
     double smoothedFlexTune = 0.0;
     TargetGlide targetGlide;
+    NoteTransition noteTransition;
     KeyEstimator keyEstimator;
     int keyEstimateSampleCounter = 0;
     std::atomic<int> estimatedKeyRoot { 0 };

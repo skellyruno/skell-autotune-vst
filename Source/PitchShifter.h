@@ -43,6 +43,7 @@ public:
 
         inRing.assign(static_cast<size_t>(inSize), 0.0f);
         outRing.assign(static_cast<size_t>(outSize), 0.0f);
+        outWeight.assign(static_cast<size_t>(outSize), 0.0f);
         outRingEpoch.assign(static_cast<size_t>(outSize), 0);
         ringEpoch = 0;
 
@@ -129,6 +130,7 @@ public:
         outRead  = 0;
         nextTs   = 0.0;
         markPos  = -static_cast<double>(latency);
+        lastRefinedMark = -1.0e12;
         lastPeriod = juce::jlimit(static_cast<double>(minPeriod),
                                   static_cast<double>(maxPeriod), sr / 200.0);
         smoothedPeriod = lastPeriod;
@@ -294,7 +296,14 @@ private:
         // Align those predicted cycles to a real waveform peak instead of assuming
         // that a period-only mark is phase-aligned. Restrict the search to available
         // history and a small fraction of a cycle so marks cannot jump octaves.
-        const double radius = std::min(0.12 * periodF, 0.0015 * sr);
+        // Limit phase correction relative to the last accepted mark. Even if a
+        // vowel's strongest harmonic switches polarity/crest, adjacent grains
+        // should not snap to different waveform lobes.
+        if (lastRefinedMark > -1.0e11)
+            predicted = std::clamp(predicted,
+                                   lastRefinedMark + 0.88 * periodF,
+                                   lastRefinedMark + 1.12 * periodF);
+        const double radius = std::min(0.07 * periodF, 0.0010 * sr);
         const int64_t first = std::max<int64_t>(2, static_cast<int64_t>(std::ceil(predicted - radius)));
         const int64_t last = std::min<int64_t>(inCount - 3, static_cast<int64_t>(std::floor(predicted + radius)));
         if (first > last || predicted < 2.0 || predicted >= static_cast<double>(inCount - 3))
@@ -305,7 +314,8 @@ private:
         // Prefer the same-polarity crest as the preceding predicted cycle. Searching
         // absolute magnitude alone can snap a mark onto a nearby opposite-polarity
         // harmonic peak, especially just after a falling pitch transition.
-        const int64_t previous = static_cast<int64_t>(std::llround(predicted - periodF));
+        const int64_t previous = static_cast<int64_t>(std::llround(
+            lastRefinedMark > 1.0 ? lastRefinedMark : predicted - periodF));
         const float reference = (previous >= 1 && previous < inCount)
             ? inRing[static_cast<size_t>(previous & inMask)] : 0.0f;
         const bool positiveReference = reference >= 0.0f;
@@ -397,7 +407,10 @@ private:
             {
                 markPos += periodF;
                 if (lowLatencyExperiment)
+                {
                     markPos = refinePitchMark(markPos, periodF);
+                    lastRefinedMark = markPos;
+                }
             }
 
             if (static_cast<int64_t>(std::floor(markPos + xNeed)) + 3 >= inCount)
@@ -452,9 +465,12 @@ private:
                 if (outRingEpoch[outputIndex] != ringEpoch)
                 {
                     outRing[outputIndex] = 0.0f;
+                    outWeight[outputIndex] = 0.0f;
                     outRingEpoch[outputIndex] = ringEpoch;
                 }
                 outRing[outputIndex] += smp * w * gain;
+                if (lowLatencyExperiment)
+                    outWeight[outputIndex] += w * gain;
             }
 
             nextTs += hop;
@@ -472,9 +488,23 @@ private:
                 dryMix = dryMixTarget;
             const int64_t outputTime = outRead + i;
             const size_t idx = static_cast<size_t>(outputTime & outMask);
-            const float shifted = outRingEpoch[idx] == ringEpoch ? outRing[idx] : 0.0f;
-            if (outRingEpoch[idx] == ringEpoch)
+            const bool valid = outRingEpoch[idx] == ringEpoch;
+            float shifted = valid ? outRing[idx] : 0.0f;
+            if (valid)
+            {
+                if (lowLatencyExperiment)
+                {
+                    // Hann gain assumes perfect grain spacing. When predictive
+                    // grains arrive late, their accumulated window sum can be
+                    // far below one. Divide by measured coverage, NOT a fixed
+                    // output boost. Limit compensation to avoid explosive gain
+                    // on a nearly empty / transient window.
+                    const float coverage = outWeight[idx];
+                    shifted /= std::clamp(coverage, 0.38f, 1.50f);
+                    outWeight[idx] = 0.0f;
+                }
                 outRing[idx] = 0.0f;
+            }
             float result = shifted;
             if (lowLatencyExperiment && transitionBlendAge >= 0)
             {
@@ -511,7 +541,7 @@ private:
     int inSize = 0, outSize = 0;
     int64_t inMask = 0, outMask = 0;
 
-    std::vector<float> inRing, outRing;
+    std::vector<float> inRing, outRing, outWeight;
     std::vector<uint64_t> outRingEpoch;
     uint64_t ringEpoch = 0;
 
@@ -519,6 +549,7 @@ private:
     int64_t outRead = 0;
     double  nextTs  = 0.0;
     double  markPos = 0.0;
+    double  lastRefinedMark = -1.0e12;
     double  lastPeriod = 220.0;
     double  smoothedPeriod = 220.0;
     double  lowLatencySlicePeriod = 220.0;
