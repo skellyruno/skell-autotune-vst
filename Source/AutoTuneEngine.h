@@ -2,6 +2,7 @@
 
 #include "PitchDetector.h"
 #include "PitchShifter.h"
+#include "NeutralBypassGate.h"
 #include "ScaleQuantizer.h"
 #include "KeyEstimator.h"
 #include "TargetGlide.h"
@@ -45,9 +46,14 @@ public:
         for (auto& s : shifters)
             s.prepare(sampleRate, blockSize);
 
-        const int maxLatency = static_cast<int>(std::ceil(2.5 * std::ceil(sr / PitchDetector::kMinHz))) + 16;
+        // One fixed-capacity history ring for every supported voice range and
+        // latency mode. A host automation change must never resize OR clear a
+        // large delay buffer on the audio callback.
+        dryCapacity = static_cast<int>(std::ceil(2.5 * std::ceil(sr / PitchDetector::kMinHz))) + 16;
         for (auto& line : dryLine)
-            line.reserve(static_cast<size_t>(maxLatency));
+            line.assign(static_cast<size_t>(dryCapacity), 0.0f);
+        dryPos = 0;
+        dryHistoryCount = 0;
 
         prepared = true;
         keyEstimator.reset();
@@ -113,11 +119,18 @@ public:
         holdCounter = 0;
         pendingTargetMidi = -1;
         pendingTargetSeconds = 0.0;
+        onsetCandidateHops = 0;
         resetPitchMotionTracker();
         noteTransition.reset();
         samplesSinceHop = 0;
+        hopSquaredSum = 0.0;
+        previousHopRms = 0.0;
+        recentOnsetSeconds = 0.0;
+        traceSample = 0;
+        hadPreviousReliablePitch = false;
         unvoicedHopCount = 0;
         lastVoicedPeriodSamples = 0.0;
+        neutralBypassGate.reset();
         curRatio = 1.0f;
         curPeriod = 0.0f;
         lastDetectedHz = 0.0f;
@@ -184,6 +197,31 @@ public:
     int   getTargetMidiNote()   const { return lastTargetMidi.load(std::memory_order_relaxed); } // nearest piano-key label
     float getTargetMidiFloat()  const { return lastTargetMidiFloat.load(std::memory_order_relaxed); } // exact applied target, including fractional/microtonal glide
 
+    // Opt-in offline diagnostics. Never attach file IO to this callback inside a DAW:
+    // hooks run on the audio thread. The normal plugin has no hook, allocation or lock.
+    struct HopTrace {
+        uint64_t sample = 0;
+        float observedHz = 0, predictedHz = 0;
+        float observedMidi = -1, predictedMidi = -1, measuredTargetMidi = -1;
+        float selectedTargetMidi = -1, confidence = 0, onsetStrength = 0;
+        float correctionCents = 0, ratio = 1;
+        float grainCoverage = 0, grainGain = 1, grainPhaseMarkDelta = 0, maxOutputStep = 0, grainPhaseScore = 0;
+        int grainContributors = 0;
+        bool voiced = false, onset = false;
+        float dryMix = 0.0f;
+        bool neutralDrySelected = false;
+        float overlapMatchScore = 0.0f, overlapShiftSamples = 0.0f;
+        float overlapCancellation = 0.0f;
+    };
+    using TraceCallback = void (*)(void*, const HopTrace&) noexcept;
+    void setOfflineTraceCallback(TraceCallback cb, void* context) noexcept
+    {
+        traceCallback = cb;
+        traceContext = context;
+        for (auto& shifter : shifters)
+            shifter.setDetailedDiagnosticsEnabled(cb != nullptr);
+    }
+
     KeyEstimator::Estimate getAutoKeyEstimate() const noexcept
     {
         KeyEstimator::Estimate e;
@@ -198,31 +236,34 @@ public:
         return e;
     }
 
-    void delayDry (juce::AudioBuffer<float>& buffer)
+    // Causal dry delay. The allocation is performed in prepare(), so neither
+    // bypass nor automated latency/range changes resize the storage. A reset
+    // invalidates old samples using a counter instead of clearing the array.
+    void delayDry (juce::AudioBuffer<float>& buffer) noexcept
     {
-        const int n   = buffer.getNumSamples();
+        const int n = buffer.getNumSamples();
         const int nch = std::min(buffer.getNumChannels(), kMaxChannels);
-        const int len = latencySamples;
-        if (n <= 0 || nch <= 0 || len <= 0)
+        if (n <= 0 || nch <= 0 || latencySamples <= 0 || dryCapacity < latencySamples)
             return;
-
-        int endPos = dryPos;
         for (int ch = 0; ch < nch; ++ch)
         {
-            float* d = buffer.getWritePointer(ch);
-            auto& line = dryLine[static_cast<size_t>(ch)];
-            int p = dryPos;
+            float* data = buffer.getWritePointer(ch);
+            auto& ring = dryLine[static_cast<size_t>(ch)];
+            int write = dryPos;
             for (int i = 0; i < n; ++i)
             {
-                const float x = d[i];
-                d[i] = line[static_cast<size_t>(p)];
-                line[static_cast<size_t>(p)] = x;
-                if (++p >= len)
-                    p = 0;
+                const int read = write >= latencySamples ? write - latencySamples
+                    : write + dryCapacity - latencySamples;
+                const float original = data[i];
+                data[i] = dryHistoryCount + static_cast<int64_t>(i) >= latencySamples
+                    ? ring[static_cast<size_t>(read)] : 0.0f;
+                ring[static_cast<size_t>(write)] = original;
+                if (++write == dryCapacity) write = 0;
             }
-            endPos = p;
         }
-        dryPos = endPos;
+        dryPos = (dryPos + n % dryCapacity) % dryCapacity;
+        dryHistoryCount = std::min<int64_t>(dryCapacity,
+            dryHistoryCount + static_cast<int64_t>(n));
     }
 
     void process (juce::AudioBuffer<float>& buffer)
@@ -319,6 +360,11 @@ public:
             else
                 std::copy(left + pos, left + pos + seg, detectorMono.begin());
 
+            for (int i=0; i<seg; ++i)
+            {
+                const double x = detectorMono[static_cast<size_t>(i)];
+                hopSquaredSum += x * x;
+            }
             detector.feedSamples(detectorMono.data(), seg);
             samplesSinceHop += seg;
             const bool correctionHopComplete = samplesSinceHop >= hop;
@@ -333,13 +379,16 @@ public:
             for (int ch = 0; ch < nch; ++ch)
             {
                 auto& s = shifters[static_cast<size_t>(ch)];
+                // Bounded recorded-history source-phase matching now applies in
+                // both modes; Low Latency's phase path remains unchanged.
+                s.setPhaseLockedSource(true);
                 s.setFormantPreserve(formantPreserve);
                 s.setFormantShiftSemitones(formantShiftSemitones);
                 // Preserve the original audio when pitch is not reliably voiced
                 // or correction is exactly unity. Independent formant colouring
                 // must still run even at unity pitch.
                 const bool bypassWet = unvoicedHopCount != 0 || curPeriod <= 0.0f
-                    || (curRatio == 1.0f && std::abs(formantShiftSemitones) < 1.0e-5f);
+                    || neutralBypassGate.isLatched();
                 s.setDryPassthrough(bypassWet);
                 s.process(buffer.getWritePointer(ch) + pos, seg, curPeriod, curRatio);
             }
@@ -409,29 +458,26 @@ private:
         return observedMidi + static_cast<float>(predictionCents / 100.0);
     }
 
-    void storeDryInput (const juce::AudioBuffer<float>& buffer)
+    void storeDryInput (const juce::AudioBuffer<float>& buffer) noexcept
     {
         const int n = buffer.getNumSamples();
         const int nch = std::min(buffer.getNumChannels(), kMaxChannels);
-        const int len = latencySamples;
-        if (n <= 0 || nch <= 0 || len <= 0)
+        if (n <= 0 || nch <= 0 || latencySamples <= 0 || dryCapacity < latencySamples)
             return;
-
-        int endPos = dryPos;
         for (int ch = 0; ch < nch; ++ch)
         {
             const float* input = buffer.getReadPointer(ch);
-            auto& line = dryLine[static_cast<size_t>(ch)];
-            int p = dryPos;
+            auto& ring = dryLine[static_cast<size_t>(ch)];
+            int write = dryPos;
             for (int i = 0; i < n; ++i)
             {
-                line[static_cast<size_t>(p)] = input[i];
-                if (++p >= len)
-                    p = 0;
+                ring[static_cast<size_t>(write)] = input[i];
+                if (++write == dryCapacity) write = 0;
             }
-            endPos = p;
         }
-        dryPos = endPos;
+        dryPos = (dryPos + n % dryCapacity) % dryCapacity;
+        dryHistoryCount = std::min<int64_t>(dryCapacity,
+            dryHistoryCount + static_cast<int64_t>(n));
     }
 
     // Looks at the newest pitch measurement and works out the correction to apply.
@@ -461,6 +507,21 @@ private:
 
         const float observedHz = detector.detectPitch();
         publishedConfidence.store(detector.getConfidence(), std::memory_order_relaxed);
+        traceSample += static_cast<uint64_t>(hop);
+        // A short-time attack proxy measured independently of the YIN estimator.
+        // Suppress false onsets in silence and never let an isolated flux peak
+        // override weak pitch confidence.
+        const double hopRms = std::sqrt(hopSquaredSum / static_cast<double>(std::max(1, hop)));
+        hopSquaredSum = 0.0;
+        const double energyRise = hopRms / std::max(0.0002, previousHopRms);
+        onsetStrength = static_cast<float>(std::clamp(energyRise, 0.0, 8.0));
+        const bool onset = hopRms > 0.003 && previousHopRms > 0.0015 && energyRise > 1.55;
+        // The YIN window sees the attack later than the amplitude envelope.
+        // Hold attack evidence for one detector-window-sized interval so the
+        // genuine pitch step can use it, without postponing audio itself.
+        recentOnsetSeconds = onset ? 0.045 : std::max(0.0, recentOnsetSeconds - hopSeconds);
+        previousHopRms = 0.65 * previousHopRms + 0.35 * hopRms;
+        const auto grains = shifters[0].getGrainDiagnostics();
 
         const bool voiced = observedHz >= detector.getMinFrequency()
                          && observedHz <= PitchDetector::kMaxHz
@@ -482,6 +543,7 @@ private:
             // milliseconds. If the gap persists, let the ratio reach unity and discard
             // the note lock instead of carrying correction through extended silence.
             ++unvoicedHopCount;
+            neutralBypassGate.reset();
             constexpr double releaseSeconds = 0.0045;
             const double releaseCoeff = std::exp(-static_cast<double>(hop)
                                                   / (std::max(1.0, sr) * releaseSeconds));
@@ -499,6 +561,7 @@ private:
             if (unvoicedHopCount >= 3)
             {
                 noteTransition.reset();
+                hadPreviousReliablePitch = false;
                 lockedMidiNote = -1;
                 holdCounter = 0;
                 pendingTargetMidi = -1;
@@ -509,6 +572,12 @@ private:
             const int glideResetHops = std::max(3, static_cast<int>(0.12 * sr / std::max(1, hop)));
             if (unvoicedHopCount == glideResetHops)
                 targetGlide.reset();
+            if (traceCallback)
+                traceCallback(traceContext, HopTrace{traceSample, observedHz, 0.0f,
+                    -1.0f, -1.0f, -1.0f, -1.0f, detector.getConfidence(), onsetStrength,
+                    0.0f, curRatio, grains.coverage, grains.appliedGain,
+                    grains.markDelta, grains.maxOutputStep, grains.phaseMatchScore, grains.contributors, false, onset,
+                    shifters[0].getDryMixForDiagnostics(), false, grains.overlapMatchScore, grains.overlapShiftSamples, grains.cancellationFraction});
             return;
         }
 
@@ -524,6 +593,18 @@ private:
         // preventing the forecast from shooting across octaves or scale targets.
         const float midiNote = 69.0f + 12.0f * std::log2(observedHz / referenceFreq);
         keyEstimator.observePitch(midiNote, detector.getConfidence(), hopSeconds);
+        // Pitch can rise over multiple YIN hops even at a sharp attack. Evaluate
+        // movement away from the *locked note* as well as the previous raw hop.
+        // The note stabilizer below still requires two matching candidates.
+        const bool strongOnset = recentOnsetSeconds > 0.0 && detector.getConfidence() >= 0.94f
+            && hadPreviousReliablePitch && lockedMidiNote >= 0
+            && std::abs(midiNote - static_cast<float>(lockedMidiNote)) > 0.95f
+            && std::abs(midiNote - previousReliableMidi) < 5.0f;
+        if (detector.getConfidence() >= 0.92f)
+        {
+            previousReliableMidi = midiNote;
+            hadPreviousReliablePitch = true;
+        }
         const float predictedMidiNote = predictPitchMotion(midiNote, observedHz,
                                                            detector.getConfidence(), hop);
         const float detectedHz = referenceFreq
@@ -542,7 +623,7 @@ private:
         const float forecastTarget = quantizeToScale(predictedMidiNote);
         float targetMidi = noteTransition.choose(midiNote, predictedMidiNote,
             measuredTarget, forecastTarget, detector.getConfidence(), hopSeconds,
-            noteStabilizer);
+            noteStabilizer, recentOnsetSeconds > 0.0);
 
         // Note stabilizer: stay on the locked note while the voice is within sustainCents of it
         if (noteStabilizer && lockedMidiNote >= 0)
@@ -571,15 +652,22 @@ private:
                     {
                         pendingTargetMidi = proposed;
                         pendingTargetSeconds = 0.0;
+                        onsetCandidateHops = 0;
                     }
                     pendingTargetSeconds += hopSeconds;
+                    onsetCandidateHops = strongOnset ? onsetCandidateHops + 1 : 0;
                 }
                 else
                 {
                     pendingTargetMidi = -1;
                     pendingTargetSeconds = 0.0;
+                    onsetCandidateHops = 0;
                 }
-                if (pendingTargetSeconds >= 0.012)
+                // Strong energy attack + credible pitch step provides causal onset
+                // evidence for a fast intentional note. Do not force an arbitrary
+                // 12-ms pause in this case. Unconfident or giant jumps still wait.
+                if (pendingTargetSeconds >= 0.012 ||
+                    (strongOnset && onsetCandidateHops >= 2))
                 {
                     lockedMidiNote = proposed;
                     pendingTargetMidi = -1;
@@ -635,7 +723,19 @@ private:
             ratio = 1.0f;                        // too small to matter
 
         curRatio  = ratio;
+        // Avoid repeated wet/dry crossfades when correction oscillates around
+        // exactly zero cents. This is control hysteresis, not added audio delay.
+        neutralBypassGate.update(curRatio, hopSeconds,
+                                 std::abs(formantShiftSemitones) >= 1.0e-5f);
         curPeriod = static_cast<float>(sr) / detectedHz;
+        if (traceCallback)
+            traceCallback(traceContext, HopTrace{traceSample, observedHz, detectedHz,
+                midiNote, predictedMidiNote, measuredTarget, appliedTargetMidi,
+                detector.getConfidence(), onsetStrength, correctionCents, ratio,
+                grains.coverage, grains.appliedGain, grains.markDelta, grains.maxOutputStep,
+                grains.phaseMatchScore, grains.contributors, true, onset,
+                shifters[0].getDryMixForDiagnostics(), neutralBypassGate.isLatched(), grains.overlapMatchScore, grains.overlapShiftSamples,
+                grains.cancellationFraction});
     }
 
     void applyLatencyMode()
@@ -648,9 +748,11 @@ private:
 
         latencySamples = shifters[0].getLatencySamples();
 
-        for (auto& line : dryLine)
-            line.assign(static_cast<size_t>(latencySamples), 0.0f);
+        // No writes to the allocated delay rings on this real-time control path.
+        // Resetting the validity horizon prevents stale history from surfacing
+        // if a user changes latency or voice range during playback.
         dryPos = 0;
+        dryHistoryCount = 0;
 
         smoothedCorrectionCents = 0.0;
         smoothedHumanize = static_cast<double>(std::clamp(humanize, 0.0f, 1.0f));
@@ -660,11 +762,18 @@ private:
         holdCounter = 0;
         pendingTargetMidi = -1;
         pendingTargetSeconds = 0.0;
+        onsetCandidateHops = 0;
         resetPitchMotionTracker();
         noteTransition.reset();
         samplesSinceHop = 0;
+        hopSquaredSum = 0.0;
+        previousHopRms = 0.0;
+        recentOnsetSeconds = 0.0;
+        traceSample = 0;
+        hadPreviousReliablePitch = false;
         unvoicedHopCount = 0;
         lastVoicedPeriodSamples = 0.0;
+        neutralBypassGate.reset();
         curRatio = 1.0f;
         curPeriod = 0.0f;
 
@@ -698,6 +807,15 @@ private:
                          : ScaleQuantizer::quantizeMidi(midiNote, rootNote, scaleType);
     }
 
+    TraceCallback traceCallback = nullptr;
+    void* traceContext = nullptr;
+    uint64_t traceSample = 0;
+    double hopSquaredSum = 0.0;
+    double previousHopRms = 0.0;
+    double recentOnsetSeconds = 0.0;
+    float onsetStrength = 0.0f;
+    bool hadPreviousReliablePitch = false;
+    float previousReliableMidi = 0.0f;
     double sr = 44100.0;
     PitchDetector detector;
     std::array<PitchShifter, kMaxChannels> shifters;
@@ -746,13 +864,17 @@ private:
     int    samplesSinceHop = 0;     // samples fed to the detector since its last measurement
     int    pendingTargetMidi = -1;
     double pendingTargetSeconds = 0.0;
+    int    onsetCandidateHops = 0;
     int    unvoicedHopCount = 0;    // short dropout hysteresis before releasing note lock
     double lastVoicedPeriodSamples = 0.0;
+    NeutralBypassGate neutralBypassGate;
     float  curRatio  = 1.0f;        // correction being applied right now
     float  curPeriod = 0.0f;
 
     std::array<std::vector<float>, kMaxChannels> dryLine;
     int dryPos = 0;
+    int dryCapacity = 0;
+    int64_t dryHistoryCount = 0;
 
     // Written by the audio callback, read by the editor's timer. Atomic mirrors avoid
     // a C++ data race without locks or heap work in the real-time path. Individual

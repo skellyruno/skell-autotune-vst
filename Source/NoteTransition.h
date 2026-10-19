@@ -22,7 +22,7 @@ public:
 
     float choose(float observed, float predicted, float measuredTarget,
                  float predictedTarget, float confidence, double hopSeconds,
-                 bool noteStabilizerActive) noexcept
+                 bool noteStabilizerActive, bool recentTrustedOnset = false) noexcept
     {
         if (!std::isfinite(observed) || !std::isfinite(predicted)
             || !std::isfinite(measuredTarget) || !std::isfinite(predictedTarget)
@@ -57,8 +57,17 @@ public:
                  && predicted > boundary + 0.10f && predictedMotion > 0.05f)
                 || (predictedTarget < measuredTarget
                  && predicted < boundary - 0.10f && predictedMotion < -0.05f);
-            if (consistentMotion && confidence >= 0.93f && nearBoundary
-                && definitelyCrossing && std::abs(predictedMotion) <= 0.45f
+            // A credible attack can substitute for the second consistent motion
+            // observation, but cannot override weak confidence, a large leap,
+            // or an uncertain predicted crossing. Unlike a fixed delay this
+            // decision uses evidence already seen by the causal onset monitor.
+            const bool onsetConfirms = recentTrustedOnset && hasPrevious
+                && direction != 0 && confidence >= 0.975f
+                && std::abs(delta) >= 0.06f
+                && std::abs(observed - boundary) < 0.22f;
+            if ((consistentMotion || onsetConfirms) && confidence >= 0.93f
+                && (nearBoundary || onsetConfirms) && definitelyCrossing
+                && std::abs(predictedMotion) <= 0.45f
                 && std::abs(predictedTarget - measuredTarget) <= 2.1f)
                 result = predictedTarget;
         }

@@ -49,6 +49,19 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
         latency_sweep_regression
         engine_safety_regression
         voicing_formant_regression
+        note_transition_regression
+        low_latency_coverage_regression
+        onset_trace_regression
+        predictive_grain_regression
+        phase_locked_cycle_regression
+        standard_causal_consistency_regression
+        phase_window_artifact_regression
+        phase_history_bounds_regression
+        neutral_bypass_gate_regression
+        overlap_phase_coherence_regression
+        dry_delay_automation_regression
+        handoff_energy_regression
+        cancellation_diagnostic_regression
     )
 
     foreach(test_name IN LISTS SKELLYTUNE_DSP_TESTS)
@@ -56,6 +69,14 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
         target_include_directories(${test_name} PRIVATE tests Source)
         target_compile_features(${test_name} PRIVATE cxx_std_20)
         target_link_libraries(${test_name} PRIVATE Threads::Threads)
+        # Regression tests use assert(): CMake Release normally adds -DNDEBUG,
+        # which would silently disable most of their actual quality gates.
+        # Explicitly undo that definition for test executables only.
+        if(MSVC)
+            target_compile_options(${test_name} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${test_name} PRIVATE -UNDEBUG)
+        endif()
         if(SKELLYTUNE_ENABLE_SANITIZERS)
             target_compile_options(${test_name} PRIVATE
                 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)

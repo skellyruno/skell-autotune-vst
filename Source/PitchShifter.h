@@ -32,6 +32,8 @@ public:
         sr = sampleRate;
         dryReleaseCoeff = static_cast<float>(std::exp(-1.0 / (std::max(1.0, sr) * 0.0025)));
         dryAttackCoeff = static_cast<float>(std::exp(-1.0 / (std::max(1.0, sr) * 0.004)));
+        crossfadeEnergyCoeff = static_cast<float>(std::exp(-1.0 / (std::max(1.0, sr) * 0.0015)));
+        crossfadeGainCoeff = static_cast<float>(std::exp(-1.0 / (std::max(1.0, sr) * 0.0012)));
 
         const int maxPeriodAlloc = std::max(32, static_cast<int>(std::ceil(sr / kMinHz)));
         const int latencyAlloc   = static_cast<int>(std::ceil(kLatencyPeriods * maxPeriodAlloc)) + 8;
@@ -44,6 +46,8 @@ public:
         inRing.assign(static_cast<size_t>(inSize), 0.0f);
         outRing.assign(static_cast<size_t>(outSize), 0.0f);
         outWeight.assign(static_cast<size_t>(outSize), 0.0f);
+        outAbsContribution.assign(static_cast<size_t>(outSize), 0.0f);
+        outContributors.assign(static_cast<size_t>(outSize), 0);
         outRingEpoch.assign(static_cast<size_t>(outSize), 0);
         ringEpoch = 0;
 
@@ -66,11 +70,26 @@ public:
     // imposing a guessed voiced cycle on aperiodic audio. This path adds no delay,
     // makes no allocation, and keeps processing the wet timeline continuously.
     void setVoiced (bool voiced) noexcept { setDryPassthrough(!voiced); }
+    void setPhaseLockedSource(bool on) noexcept { phaseLockEnabled=on; }
+    // Opt-in expensive trace instrumentation. Disabled in native DAW processing.
+    void setDetailedDiagnosticsEnabled(bool enabled) noexcept { detailedDiagnostics = enabled; }
+    // Internal A/B gate for deterministic regression testing. Production defaults
+    // to the bounded, level-aware handoff in experimental Low Latency mode.
+    void setEnergyMatchedHandoffEnabled(bool enabled) noexcept { energyMatchedHandoff = enabled; }
     void setDryPassthrough (bool bypassWet) noexcept
     {
         dryMixTarget = bypassWet ? 1.0f : 0.0f;
     }
     float getDryMixForDiagnostics() const noexcept { return dryMix; }
+    struct GrainDiagnostics {
+        float coverage = 0, appliedGain = 1, markDelta = 0, maxOutputStep = 0, phaseMatchScore = 0;
+        float overlapMatchScore = 0, overlapShiftSamples = 0;
+        float cancellationFraction = 0; // offline-only: destructive grain overlap
+        int contributors = 0;
+    };
+    // Valid on the DSP thread only: the offline trace samples this per analysis hop.
+    GrainDiagnostics getGrainDiagnostics() const noexcept { return grainDiagnostics; }
+
 
 
     // Independent vocal-tract/formant colour shift. Zero keeps the current
@@ -130,18 +149,22 @@ public:
         outRead  = 0;
         nextTs   = 0.0;
         markPos  = -static_cast<double>(latency);
+        previousPhaseAnchor = -1.0e12;
+        previousPhaseOffset = 0.0;
+        phaseScore = 0.0f;
         lastRefinedMark = -1.0e12;
         lastPeriod = juce::jlimit(static_cast<double>(minPeriod),
                                   static_cast<double>(maxPeriod), sr / 200.0);
         smoothedPeriod = lastPeriod;
         lowLatencySlicePeriod = lastPeriod;
-        lastInputPeriod = lastPeriod;
-        transitionBlendAge = -1;
-        transitionBlendTotal = 0;
         smoothedFormantShiftRatio = formantShiftRatioTarget;
         smoothedFormantPreserve = formantPreserve ? 1.0 : 0.0;
         dryMix = 0.0f;
         dryMixTarget = 0.0f;
+        crossfadeWetPower = crossfadeDryPower = crossfadeCov = 0.0f;
+        crossfadeGain = 1.0f;
+        grainDiagnostics = {};
+        lastOutput = 0.0f;
     }
 
     int getLatencySamples() const { return latency; }
@@ -151,6 +174,13 @@ public:
         if (numSamples <= 0 || inRing.empty())
             return;
 
+        diagnosticCoverageSum = diagnosticGainSum = 0.0f;
+        diagnosticCancellationSum = 0.0f;
+        diagnosticCancellationCount = 0;
+        grainDiagnostics.cancellationFraction = 0.0f;
+        diagnosticContributorsSum = 0;
+        diagnosticCount = 0;
+        grainDiagnostics.maxOutputStep = 0.0f;
         double targetPeriod;
         if (std::isfinite(periodSamples) && periodSamples >= static_cast<float>(minPeriod))
         {
@@ -162,19 +192,6 @@ public:
         {
             targetPeriod = juce::jlimit(static_cast<double>(minPeriod), static_cast<double>(maxPeriod),
                                         std::min(lastPeriod, 0.006 * sr));
-        }
-        if (lowLatencyExperiment)
-        {
-            // Detect a real note transition, then crossfade smoothly toward latency-aligned
-            // input for transient preservation before returning to resynthesis. The short
-            // attack avoids introducing a new discontinuity at the blend boundary.
-            if (lastInputPeriod > 0.0
-                && std::abs(targetPeriod - lastInputPeriod) / lastInputPeriod > 0.05)
-            {
-                transitionBlendTotal = std::max(1, static_cast<int>(std::ceil(sr * 0.016)));
-                transitionBlendAge = 0;
-            }
-            lastInputPeriod = targetPeriod;
         }
 
         const double ratio = std::isfinite(shiftRatio)
@@ -228,16 +245,29 @@ public:
                     snapNeutralFormantShiftIfSettled();
                     smoothFormantPreserve(kFormantUpdateChunk);
                 }
-                processChunk(data + pos, n, targetPeriod, ratio, smoothedFormantShiftRatio);
+                for (int k = 0; k < n; ++k)
+                    processChunk(data + pos + k, 1, targetPeriod, ratio, smoothedFormantShiftRatio);
                 pos += n;
             }
         }
         else
         {
             smoothedPeriod = targetPeriod;
-            for (int pos = 0; pos < numSamples; pos += kChunk)
-                processChunk(data + pos, std::min(kChunk, numSamples - pos), targetPeriod, ratio,
-                             smoothedFormantShiftRatio);
+            // Causal one-sample Standard scheduling: grains must never depend
+            // on how much future input a host callback delivered in a batch.
+            for (int pos = 0; pos < numSamples; ++pos)
+                processChunk(data + pos, 1, targetPeriod, ratio, smoothedFormantShiftRatio);
+        }
+        if (detailedDiagnostics && diagnosticCancellationCount > 0)
+            grainDiagnostics.cancellationFraction = diagnosticCancellationSum
+                / static_cast<float>(diagnosticCancellationCount);
+        if (lowLatencyExperiment && diagnosticCount > 0)
+        {
+            const float inverse = 1.0f / static_cast<float>(diagnosticCount);
+            grainDiagnostics.coverage = diagnosticCoverageSum * inverse;
+            grainDiagnostics.appliedGain = diagnosticGainSum * inverse;
+            grainDiagnostics.contributors = static_cast<int>(std::lround(
+                diagnosticContributorsSum * inverse));
         }
 
     }
@@ -250,6 +280,7 @@ public:
 private:
     static constexpr int kChunk = 256;
     static constexpr int kLowLatencyChunk = 32;
+    static constexpr double kPredictivePhaseOffsetSeconds = 0.00075;
     static constexpr int kFormantUpdateChunk = 32;
     static constexpr double kFormantShiftSmoothingSeconds = 0.012;
 
@@ -359,6 +390,154 @@ private:
         return static_cast<double>(best);
     }
 
+    // Phase-lock the read anchor to the previous, *recorded* pitch cycle.
+    // No future input is accessed. Keep the output grain clock unchanged and
+    // adjust only the grain's source phase by a small continuous displacement.
+    double phaseMatchOffset (double predicted, double period) noexcept
+    {
+        if (!phaseLockEnabled || inCount < static_cast<int64_t>(3.0 * period) + 32)
+            return 0.0;
+        // The 1.9 ms predictor needs a longer recorded-history correlation
+        // than Standard. 36 samples proved more resistant to wrong harmonic
+        // lobe picks on the difficult-note regions of the supplied test vocal.
+        // Standard remains at its v31 window and phase slew rate.
+        const int window = lowLatencyExperiment ? 36 : 24;
+        const double newest = static_cast<double>(inCount - 4 - window);
+        double anchor = predicted;
+        if (anchor > newest)
+            anchor -= std::ceil((anchor-newest)/period)*period;
+        if (anchor < period + window + 4.0)
+            return 0.0;
+        if (previousPhaseAnchor < 0.0)
+        {
+            previousPhaseAnchor = anchor;
+            return 0.0;
+        }
+        // Move the reference into the recorded history and choose the cycle
+        // equivalent nearest to this grain's historical analysis mark.
+        double reference = previousPhaseAnchor;
+        if (reference > newest)
+            reference -= std::ceil((reference-newest)/period)*period;
+        while (reference + period < anchor - 0.48*period)
+            reference += period;
+        while (reference - period > anchor + 0.48*period)
+            reference -= period;
+        if (reference < window + 4.0 || reference >= newest)
+        {
+            previousPhaseAnchor = anchor;
+            return 0.0;
+        }
+        const int base = static_cast<int>(std::lround(anchor));
+        const int ref = static_cast<int>(std::lround(reference));
+        const int maxOffset = std::clamp(static_cast<int>(std::lround(0.045*period)), 2, 14);
+        double bestScore = -2.0;
+        int bestShift = 0;
+        // Every correlation sample must be from recorded history. The left-edge
+        // scheduler can request an anchor close to inCount: a positive search
+        // displacement would otherwise read unwritten ring slots. Those slots
+        // may contain stale samples from an earlier wrap or reset.
+        const int64_t newestValid = inCount - 3; // same safety margin as cubic reads
+        const int64_t oldestValid = std::max<int64_t>(0, inCount - inSize);
+        if (static_cast<int64_t>(ref) - window < oldestValid ||
+            static_cast<int64_t>(ref) + window > newestValid)
+            return 0.0;
+        for(int shift=-maxOffset;shift<=maxOffset;++shift)
+        {
+            const int64_t lo = static_cast<int64_t>(base) + shift - window;
+            const int64_t hi = static_cast<int64_t>(base) + shift + window;
+            if (lo < oldestValid || hi > newestValid)
+                continue;
+            double xy=0, xx=0, yy=0;
+            for(int j=-window;j<=window;j+=2)
+            {
+                const double a=inRing[static_cast<size_t>((base+shift+j)&inMask)];
+                const double b=inRing[static_cast<size_t>((ref+j)&inMask)];
+                xy+=a*b;xx+=a*a;yy+=b*b;
+            }
+            const double score=(xx>1e-8&&yy>1e-8)?xy/std::sqrt(xx*yy):-1;
+            if(score>bestScore){bestScore=score;bestShift=shift;}
+        }
+        phaseScore=static_cast<float>(std::max(0.0, bestScore));
+        grainDiagnostics.phaseMatchScore=phaseScore;
+        // A wrong or weak match must not jump the phase of a grain.
+        if(bestScore < 0.87 || std::abs(bestShift) > 0.045*period)
+        {
+            previousPhaseAnchor=anchor;
+            previousPhaseOffset=0;
+            return 0.0;
+        }
+        // Small, persistent adjustments; do not steal the hop's musical pitch.
+        const double maxPhaseStep = (lowLatencyExperiment ? 0.020 : 0.015) * period;
+        const double correction=std::clamp(static_cast<double>(bestShift),
+                                            previousPhaseOffset-maxPhaseStep,
+                                            previousPhaseOffset+maxPhaseStep);
+        previousPhaseOffset=correction;
+        previousPhaseAnchor=anchor+correction;
+        return correction;
+    }
+
+    double overlapPhaseOffset (double ts, double mark, double period, double rate,
+                               double wo, int64_t oFirst, int64_t oLast,
+                               double latest) noexcept
+    {
+        // Compare each new predictive grain to audio already scheduled in the output
+        // overlap. An 8%-of-cycle bound handles mild pitch-period drift without
+        // searching unrelated half-cycles. This is used ONLY for Low Latency ON.
+        const int shiftRadius = std::clamp(static_cast<int>(0.080 * period), 1, 36);
+        const int64_t start = std::max<int64_t>(oFirst, outRead);
+        const int64_t stop = std::min<int64_t>(oLast, start + static_cast<int64_t>(period));
+        if (stop - start < 24) return 0.0;
+        double bestScore = -2.0, centerScore = -2.0;
+        int bestShift = 0;
+        for (int offset = -shiftRadius; offset <= shiftRadius; ++offset)
+        {
+            double cross = 0, aa = 0, bb = 0;
+            int taps = 0;
+            for (int64_t o = start; o <= stop; o += 4)
+            {
+                const size_t idx = static_cast<size_t>(o & outMask);
+                if (outRingEpoch[idx] != ringEpoch || outWeight[idx] < 0.25f)
+                    continue;
+                double pos = mark + offset + (static_cast<double>(o) - ts)*rate
+                             - kPredictivePhaseOffsetSeconds*sr;
+                if (pos > latest) pos -= std::ceil((pos-latest)/period)*period;
+                const int64_t i = static_cast<int64_t>(std::floor(pos));
+                if (i < 1 || i + 2 >= inCount || i <= inCount - inSize)
+                    continue;
+                const double f = pos - i;
+                const float x0 = inRing[static_cast<size_t>((i - 1) & inMask)];
+                const float x1 = inRing[static_cast<size_t>(i & inMask)];
+                const float x2 = inRing[static_cast<size_t>((i + 1) & inMask)];
+                const float x3 = inRing[static_cast<size_t>((i + 2) & inMask)];
+                const double sample = x1 + 0.5*f*(x2-x0+f*(2*x0-5*x1+4*x2-x3
+                                             + f*(3*(x1-x2)+x3-x0)));
+                const double other = outRing[idx]/outWeight[idx];
+                cross += sample*other;
+                aa += sample*sample;
+                bb += other*other;
+                ++taps;
+            }
+            if (taps < 5 || aa < 1e-7 || bb < 1e-7) continue;
+            const double correlation = cross/std::sqrt(aa*bb);
+            if (offset == 0) centerScore = correlation;
+            if (correlation > bestScore) { bestScore = correlation; bestShift = offset; }
+        }
+        // Only shift a grain if an independently observed overlap is clearly
+        // better and strongly phase-compatible. Avoid chasing unvoiced noise.
+        grainDiagnostics.overlapMatchScore = static_cast<float>(std::max(-1.0, bestScore));
+        // Never apply an uncorrelated offset: it can create more roughness than
+        // the phase drift we intended to repair. The gain/output clocks are
+        // untouched. A new overlap candidate is considered only when it has
+        // reliable phase evidence and is materially better than zero shift.
+        if (centerScore > -1.5 && bestScore > 0.83 && bestScore > centerScore + 0.03)
+        {
+            grainDiagnostics.overlapShiftSamples = static_cast<float>(bestShift);
+            return static_cast<double>(bestShift);
+        }
+        grainDiagnostics.overlapShiftSamples = 0.0f;
+        return 0.0;
+    }
+
     void processChunk (float* data, int m, double periodF, double ratio, double formantShiftRatio)
     {
         for (int i = 0; i < m; ++i)
@@ -393,10 +572,9 @@ private:
         const float  gain = static_cast<float>(hop / wo);      // keeps the loudness constant
         const float  piOverW = juce::MathConstants<float>::pi / static_cast<float>(wo);
 
-        // How much REAL audio must exist beyond the mark before a grain is built. Whatever
-        // is still missing at the far end of the grain is guessed (see below).
-        const double xCap  = static_cast<double>(latency) - margin - 0.5 * periodF - wo;
-        const double xNeed = std::min(periodF, std::max(0.0, xCap));
+        // Both modes schedule grains at a causal left edge; unavailable right
+        // source samples come from previously recorded, pitch-matched cycles.
+        // The prior Standard rule depended on callback-sized read-ahead.
 
         for (;;)
         {
@@ -408,26 +586,63 @@ private:
                 markPos += periodF;
                 if (lowLatencyExperiment)
                 {
-                    markPos = refinePitchMark(markPos, periodF);
+                    const double expectedMark = markPos;
+                    const double desiredMark = refinePitchMark(markPos, periodF);
+                    // Bound single-grain peak hops: offset peaks can otherwise
+                    // flip the waveform phase even when the pitch period is stable.
+                    markPos = expectedMark + std::clamp(desiredMark - expectedMark,
+                                                          -0.055 * periodF, 0.055 * periodF);
+                    grainDiagnostics.markDelta = static_cast<float>(markPos - expectedMark);
                     lastRefinedMark = markPos;
                 }
             }
 
-            if (static_cast<int64_t>(std::floor(markPos + xNeed)) + 3 >= inCount)
+            if (lowLatencyExperiment)
+            {
+                // Schedule a grain at its causal left edge rather than waiting
+                // for an unobserved centre mark. Reuse the most recent voiced
+                // cycle for source samples that have not arrived. A minimum of
+                // three recorded cycles avoids reading stale ring contents.
+                if (nextTs - wo > static_cast<double>(inCount - 1)
+                    || inCount < static_cast<int64_t>(3.0 * periodF) + 8)
+                    break;
+            }
+            else if (nextTs - wo > static_cast<double>(inCount - 1)
+                || inCount < static_cast<int64_t>(1.5 * periodF) + 8)
                 break;                                          // wait for more audio
 
+            const double phaseShift = phaseLockEnabled ? phaseMatchOffset(markPos, periodF) : 0.0;
+            if (phaseLockEnabled)
+                grainDiagnostics.markDelta = static_cast<float>(phaseShift);
             const double  limit  = static_cast<double>(inCount) - 3.0;   // newest position the cubic can use
             const int64_t grainStart = static_cast<int64_t>(std::ceil(nextTs - wo));
             const int64_t oFirst = std::max(grainStart, outRead);
             const int64_t oLast  = static_cast<int64_t>(std::floor(nextTs + wo));
+            // Compare candidate source phase with ALREADY SCHEDULED overlap.
+            // This can identify destructive phase mismatch that recorded-history
+            // correlation cannot see, without advancing either transport clock.
+            grainDiagnostics.overlapMatchScore = 0.0f;
+            grainDiagnostics.overlapShiftSamples = 0.0f;
+            const double overlapShift = lowLatencyExperiment
+                ? overlapPhaseOffset(nextTs, markPos + phaseShift, periodF,
+                                     rate, wo, oFirst, oLast, limit)
+                : 0.0;
             const bool startsLate = grainStart < outRead;
 
+            // A two-dimensional Hann oscillator avoids the expensive cosine
+            // call for *every* overlap sample. Reset phase once per grain so
+            // numerical drift cannot accumulate between notes/host blocks.
+            const double windowStep = static_cast<double>(piOverW);
+            const double initialAngle = windowStep *
+                static_cast<double>(static_cast<float>(static_cast<double>(oFirst) - nextTs + wo));
+            const double rotC = std::cos(windowStep), rotS = std::sin(windowStep);
+            double windowC = std::cos(initialAngle), windowS = std::sin(initialAngle);
             for (int64_t o = oFirst; o <= oLast; ++o)
             {
-                const float x = static_cast<float>(static_cast<double>(o) - nextTs + wo);
-                if (x <= 0.0f)
-                    continue;
-                float w = 0.5f * (1.0f - std::cos(piOverW * x));      // Hann window
+                float w = 0.5f * (1.0f - static_cast<float>(windowC));
+                const double nextC = windowC * rotC - windowS * rotS;
+                windowS = windowS * rotC + windowC * rotS;
+                windowC = nextC;
                 if (startsLate)
                 {
                     // Fixed-delay mode may discover a grain after its natural left edge
@@ -440,7 +655,13 @@ private:
                     w *= ramp;
                 }
 
-                double pos = markPos + (static_cast<double>(o) - nextTs) * rate;
+                double pos = markPos + phaseShift + overlapShift + (static_cast<double>(o) - nextTs) * rate;
+                // Calibrated phase anchor for proactive grain construction. This
+                // compensates the 220 Hz neutral-tone phase advance introduced
+                // by early scheduling. It is NOT a guarantee of constant
+                // psychoacoustic delay at every pitch or correction ratio.
+                if (lowLatencyExperiment)
+                    pos -= kPredictivePhaseOffsetSeconds * sr;
                 if (pos > limit)        // not arrived yet: repeat the previous cycle of the voice
                     pos -= std::ceil((pos - limit) / periodF) * periodF;
 
@@ -456,21 +677,63 @@ private:
                 const float c2 = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
                 const float c3 =  0.5f * t3 - 0.5f * t2;
 
-                const float smp = c0 * inRing[static_cast<size_t>((a - 1) & inMask)]
-                                + c1 * inRing[static_cast<size_t>( a      & inMask)]
-                                + c2 * inRing[static_cast<size_t>((a + 1) & inMask)]
-                                + c3 * inRing[static_cast<size_t>((a + 2) & inMask)];
+                float smp = c0 * inRing[static_cast<size_t>((a - 1) & inMask)]
+                          + c1 * inRing[static_cast<size_t>( a      & inMask)]
+                          + c2 * inRing[static_cast<size_t>((a + 1) & inMask)]
+                          + c3 * inRing[static_cast<size_t>((a + 2) & inMask)];
+
+                if (lowLatencyExperiment)
+                {
+                    // The final available cycle must repeat when the right half
+                    // of a predictive grain extends into unobserved audio. A
+                    // hard splice between the end and start of that cycle can
+                    // click when the detected period is a few samples imperfect.
+                    // Approach the wrap with a short, source-domain crossfade.
+                    const double fadeLength = std::min(0.08 * periodF, 0.00045 * sr);
+                    if (fadeLength > 2.0 && pos > limit - fadeLength)
+                    {
+                        double older = pos - periodF;
+                        if (older >= 2.0)
+                        {
+                            const double oldFloor = std::floor(older);
+                            const int64_t oldIndex = static_cast<int64_t>(oldFloor);
+                            const float f = static_cast<float>(older - oldFloor);
+                            const float f2 = f*f, f3 = f2*f;
+                            const float p0 = -0.5f*f3 + f2 - 0.5f*f;
+                            const float p1 = 1.5f*f3 - 2.5f*f2 + 1.0f;
+                            const float p2 = -1.5f*f3 + 2.0f*f2 + 0.5f*f;
+                            const float p3 = 0.5f*f3 - 0.5f*f2;
+                            const float sampleOld =
+                                  p0*inRing[static_cast<size_t>((oldIndex-1)&inMask)]
+                                + p1*inRing[static_cast<size_t>(oldIndex&inMask)]
+                                + p2*inRing[static_cast<size_t>((oldIndex+1)&inMask)]
+                                + p3*inRing[static_cast<size_t>((oldIndex+2)&inMask)];
+                            const float u = static_cast<float>(std::clamp(
+                                (pos - (limit - fadeLength))/fadeLength, 0.0, 1.0));
+                            const float blend = u*u*(3.0f - 2.0f*u);
+                            smp += (sampleOld - smp)*blend;
+                        }
+                    }
+                }
 
                 const size_t outputIndex = static_cast<size_t>(o & outMask);
                 if (outRingEpoch[outputIndex] != ringEpoch)
                 {
                     outRing[outputIndex] = 0.0f;
                     outWeight[outputIndex] = 0.0f;
+                    outAbsContribution[outputIndex] = 0.0f;
+                    outContributors[outputIndex] = 0;
                     outRingEpoch[outputIndex] = ringEpoch;
                 }
-                outRing[outputIndex] += smp * w * gain;
+                const float grain = smp * w * gain;
+                outRing[outputIndex] += grain;
+                if (detailedDiagnostics)
+                    outAbsContribution[outputIndex] += std::abs(grain);
                 if (lowLatencyExperiment)
+                {
                     outWeight[outputIndex] += w * gain;
+                    if (outContributors[outputIndex] < 255) ++outContributors[outputIndex];
+                }
             }
 
             nextTs += hop;
@@ -499,38 +762,77 @@ private:
                     // far below one. Divide by measured coverage, NOT a fixed
                     // output boost. Limit compensation to avoid explosive gain
                     // on a nearly empty / transient window.
+                    if (detailedDiagnostics && outAbsContribution[idx] > 1.0e-7f)
+                    {
+                        diagnosticCancellationSum += std::clamp(
+                            1.0f - std::abs(shifted) / outAbsContribution[idx], 0.0f, 1.0f);
+                        ++diagnosticCancellationCount;
+                    }
                     const float coverage = outWeight[idx];
-                    shifted /= std::clamp(coverage, 0.38f, 1.50f);
+                    const float gainCorrection = 1.0f / std::clamp(coverage, 0.25f, 1.50f);
+                    shifted *= gainCorrection;
+                    grainDiagnostics.coverage = coverage;
+                    grainDiagnostics.appliedGain = gainCorrection;
+                    grainDiagnostics.contributors = outContributors[idx];
+                    diagnosticCoverageSum += coverage;
+                    diagnosticGainSum += gainCorrection;
+                    diagnosticContributorsSum += outContributors[idx];
+                    ++diagnosticCount;
                     outWeight[idx] = 0.0f;
+                    outContributors[idx] = 0;
                 }
                 outRing[idx] = 0.0f;
+                if (detailedDiagnostics) outAbsContribution[idx] = 0.0f;
             }
+            // Do not blend a shifted voiced cycle with a phase-unrelated dry
+            // cycle during pitch jumps. Such blends caused destructive level
+            // interference on measured real-vocal transitions. The existing
+            // voiced/unvoiced dryMix still preserves consonants and breaths.
             float result = shifted;
-            if (lowLatencyExperiment && transitionBlendAge >= 0)
-            {
-                const int64_t dryTime = outputTime - latency;
-                if (dryTime >= 0 && dryTime < inCount)
-                {
-                    const float dry = inRing[static_cast<size_t>(dryTime & inMask)];
-                    const int attackSamples = std::max(1, static_cast<int>(std::ceil(sr * 0.0005)));
-                    const float attack = juce::jlimit(0.0f, 1.0f,
-                        static_cast<float>(transitionBlendAge) / static_cast<float>(attackSamples));
-                    const float decay = juce::jlimit(0.0f, 1.0f,
-                        1.0f - static_cast<float>(transitionBlendAge) / static_cast<float>(std::max(1, transitionBlendTotal)));
-                    const float dryWeight = attack * decay;
-                    result = shifted * (1.0f - dryWeight) + dry * dryWeight;
-                }
-                ++transitionBlendAge;
-                if (transitionBlendAge >= transitionBlendTotal)
-                    transitionBlendAge = -1;
-            }
             if (dryMix > 0.0f)
             {
                 const int64_t dryTime = outputTime - latency;
                 const float dry = dryTime >= 0 && dryTime < inCount
                     ? inRing[static_cast<size_t>(dryTime & inMask)] : 0.0f;
                 result = result * (1.0f - dryMix) + dry * dryMix;
+                // During a wet/dry handoff the two vocal waveforms can be out
+                // of phase. A linear crossfade loses up to 3 dB when they are
+                // uncorrelated; use their causal short-time covariance to
+                // preserve interpolated energy. Never apply this to stable wet
+                // tuning, never apply a fixed output boost, and bound the gain.
+                if (lowLatencyExperiment && energyMatchedHandoff && dryMix > 0.005f && dryMix < 0.995f)
+                {
+                    const float coeff = crossfadeEnergyCoeff;
+                    crossfadeWetPower = coeff * crossfadeWetPower + (1.0f - coeff) * shifted * shifted;
+                    crossfadeDryPower = coeff * crossfadeDryPower + (1.0f - coeff) * dry * dry;
+                    crossfadeCov = coeff * crossfadeCov + (1.0f - coeff) * shifted * dry;
+                    const float a = 1.0f - dryMix, b = dryMix;
+                    const float desired = a*crossfadeWetPower + b*crossfadeDryPower;
+                    const float actual = a*a*crossfadeWetPower + b*b*crossfadeDryPower
+                        + 2.0f*a*b*crossfadeCov;
+                    const float gain = desired > 1.0e-7f && actual > 1.0e-7f
+                        ? std::clamp(std::sqrt(desired / actual), 1.0f, 1.35f) : 1.0f;
+                    // Taper correction to unity at either endpoint, avoiding a
+                    // sudden gain step when the handoff reaches fully dry/wet.
+                    const float shapedGain = 1.0f + 4.0f*a*b*(gain - 1.0f);
+                    crossfadeGain = shapedGain + crossfadeGainCoeff
+                        * (crossfadeGain - shapedGain);
+                    result *= crossfadeGain;
+                }
+                else
+                {
+                    crossfadeGain = 1.0f;
+                    crossfadeWetPower = crossfadeDryPower = crossfadeCov = 0.0f;
+                }
             }
+            else if (lowLatencyExperiment)
+            {
+                crossfadeGain = 1.0f;
+                crossfadeWetPower = crossfadeDryPower = crossfadeCov = 0.0f;
+            }
+            grainDiagnostics.maxOutputStep = std::max(grainDiagnostics.maxOutputStep,
+                                                        std::abs(result - lastOutput));
+            lastOutput = result;
             data[i] = result;
         }
         outRead += m;
@@ -541,7 +843,15 @@ private:
     int inSize = 0, outSize = 0;
     int64_t inMask = 0, outMask = 0;
 
-    std::vector<float> inRing, outRing, outWeight;
+    std::vector<float> inRing, outRing, outWeight, outAbsContribution;
+    std::vector<uint8_t> outContributors;
+    GrainDiagnostics grainDiagnostics;
+    float lastOutput = 0.0f;
+    float diagnosticCoverageSum = 0.0f, diagnosticGainSum = 0.0f;
+    int diagnosticContributorsSum = 0, diagnosticCount = 0;
+    float diagnosticCancellationSum = 0.0f;
+    int diagnosticCancellationCount = 0;
+    bool detailedDiagnostics = false;
     std::vector<uint64_t> outRingEpoch;
     uint64_t ringEpoch = 0;
 
@@ -549,20 +859,25 @@ private:
     int64_t outRead = 0;
     double  nextTs  = 0.0;
     double  markPos = 0.0;
+    double previousPhaseAnchor = -1.0e12;
+    double previousPhaseOffset = 0.0;
+    float phaseScore = 0.0f;
     double  lastRefinedMark = -1.0e12;
     double  lastPeriod = 220.0;
     double  smoothedPeriod = 220.0;
     double  lowLatencySlicePeriod = 220.0;
-    double  lastInputPeriod = 220.0;
-    int     transitionBlendAge = -1;
-    int     transitionBlendTotal = 0;
     bool    formantPreserve = true;
     double  smoothedFormantPreserve = 1.0;
     float   dryMix = 0.0f;
     float   dryMixTarget = 0.0f;
     float   dryReleaseCoeff = 0.99f;
     float   dryAttackCoeff = 0.995f;
+    float crossfadeEnergyCoeff = 0.99f, crossfadeGainCoeff = 0.99f;
+    float crossfadeWetPower = 0.0f, crossfadeDryPower = 0.0f, crossfadeCov = 0.0f;
+    float crossfadeGain = 1.0f;
+    bool energyMatchedHandoff = true;
     bool    lowLatencyExperiment = false;
+    bool phaseLockEnabled = false;
     double  lowLatencyBudgetMs = 3.5;
     double  formantShiftRatioTarget = 1.0;
     double  smoothedFormantShiftRatio = 1.0;
