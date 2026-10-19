@@ -1,147 +1,117 @@
 #pragma once
-
-#include "HumHouseLookAndFeel.h"
-#include "PluginProcessor.h"
 #include <JuceHeader.h>
+#include "PluginProcessor.h"
+#include <memory>
+#include <array>
 
-// SkellyTune interface: left Retune Speed dial, central skull/radar and live pitch
-// monitor, right Humanize dial, then key/scale controls and a full-width pitch keyboard.
-// Note Stabilizer defaults off; its legacy parameter remains available for saved-session
-// compatibility. Input/output gain controls are omitted from this focused interface.
-
-class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor,
-                                public juce::AudioProcessorParameter::Listener,
-                                private juce::Timer
+class MetaTuneInspiredAudioProcessorEditor final : public juce::AudioProcessorEditor,
+                                                    private juce::Timer
 {
 public:
-    explicit HumHouseVocalTuneEditor (HumHouseVocalTuneProcessor&);
-    ~HumHouseVocalTuneEditor() override;
-
-    void paint (juce::Graphics&) override;
-    void paintOverChildren (juce::Graphics&) override;
+    explicit MetaTuneInspiredAudioProcessorEditor(MetaTuneInspiredAudioProcessor&);
+    ~MetaTuneInspiredAudioProcessorEditor() override;
+    void paint(juce::Graphics&) override;
     void resized() override;
-
-    // Implement listener interface
-    void parameterValueChanged (int parameterIndex, float newValue) override;
-    void parameterGestureChanged (int parameterIndex, bool gestureIsStarting) override;
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseDrag(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
 
 private:
     void timerCallback() override;
+    void styleKnob(juce::Slider&);
+    void drawKnob(juce::Graphics&, juce::Rectangle<float>, float, juce::String, juce::String, juce::Colour);
+    void drawPiano(juce::Graphics&, juce::Rectangle<int>);
+    void setRootNote(int noteIndex);
+    void setScaleMode(int modeIndex);
+    void openHeaderMenu();
+    void savePresetToFile();
+    void loadPresetFromFile();
 
-    static constexpr int kDesignW = 780;
-    static constexpr int kDesignH = 620;
-    float scaleFactor() const { return static_cast<float>(getWidth()) / static_cast<float>(kDesignW); }
+    MetaTuneInspiredAudioProcessor& processor;
+    juce::Slider speed, amount, sustain;
+    juce::ComboBox scale, root;
+    juce::ToggleButton stabilizer { "Note Stabilizer" }, lowLatency { "Low Latency" };
+    juce::Label speedLabel, amountLabel, noteReadout, status, presetLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach, amountAttach, sustainAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> scaleAttach, rootAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stabAttach, latencyAttach;
 
-    HumHouseVocalTuneProcessor& proc;
-    humtune::HumHouseLookAndFeel lnf;
-    juce::TooltipWindow tooltipWindow { this, 500 };
+    int selectedNoteIndex = 4;
+    int lastNonChromaticScaleMode = 1;
+    int orbDragMode = 0; // 0 none, 1 Speed from inner orb, 2 Amount from outer shell
+    float orbDragStartY = 0.0f;
+    float orbDragStartX = 0.0f;
+    float orbDragStartValue = 0.0f;
+    float doublerWidth = 0.46f;
+    float doublerMix = 0.49f;
+    float doublerDragStartWidth = 0.46f;
+    float doublerDragStartMix = 0.49f;
+    int activeNoteGroup = 0;
+    int selectedCorrectionTime = 1; // None, Short, Mid, Long
+    bool majorHold = false;
+    bool minorHold = false;
+    bool globalBypass = false;
+    bool showHeatMaps = true;
+    bool showDetectedNotes = true;
+    bool activeB = false;
+    float toneVolume = 0.65f;
+    float pitchReferenceHz = 440.0f;
+    float orbRotationRadians = 0.0f;
 
-    // Artwork shown as small child components so they are drawn crisply at any size
-    struct ArtView : public juce::Component
+    // Bracket custom-painted macro drags as proper host automation gestures.
+    // Slider-child drags are handled by JUCE's SliderAttachment callbacks.
+    juce::AudioProcessorParameter* activeGestureParamA = nullptr;
+    juce::AudioProcessorParameter* activeGestureParamB = nullptr;
+
+    // Orb motion model: organic core breathing, three gyro rings and a bounded
+    // equatorial particle emitter. All state is advanced on the editor timer.
+    struct OrbParticle
     {
-        ArtView() { setInterceptsMouseClicks(false, false); }
-        void paint (juce::Graphics& g) override
-        {
-            if (image.isValid())
-            {
-                g.setOpacity(opacity);
-                g.drawImageAt(image, 0, 0);
-            }
-        }
-        juce::Image image;
-        float opacity = 1.0f;
+        float age = 0.0f;
+        float lifetime = 1.4f;
+        float angle = 0.0f;
+        float radialSpeed = 54.0f;
+        float size = 1.0f;
+        float twist = 0.0f;
+        float seed = 0.0f;
+        int tint = 0;
     };
+    std::array<OrbParticle, 72> orbParticles {};
+    int orbParticleWriteIndex = 0;
+    juce::uint32 orbLastTickMs = 0;
+    juce::uint32 orbParticleRandomState = 0x9e3779b9u;
+    float orbElapsedSeconds = 0.0f;
+    float orbBreathPhase = 0.0f;
+    float orbBreathAmount = 0.5f;
+    float orbAudioDrive = 0.0f;
+    float orbRingPhaseA = 0.0f;
+    float orbRingPhaseB = 2.1f;
+    float orbRingPhaseC = 4.2f;
+    float orbParticleSpawnAccumulator = 0.0f;
 
-    struct SkullView : public juce::Component
-    {
-        SkullView() { setInterceptsMouseClicks(false, false); }
-        void paint (juce::Graphics& g) override
-        {
-            if (solid.isValid())
-            {
-                g.setOpacity(0.9f);
-                g.drawImageAt(solid, 0, 0);
-            }
-            if (holo.isValid() && glow > 0.02f)
-            {
-                g.setOpacity(0.75f * glow);
-                g.drawImageAt(holo, 0, 0);
-            }
-        }
-        juce::Image solid, holo;
-        float glow = 0.0f;
-    };
+    void updateOrbMotion(float deltaSeconds);
+    float nextOrbRandomUnit() noexcept;
 
-    ArtView armLeftView, armRightView;
-    SkullView skullView;
-    juce::Image skullSolidImg, skullHoloImg, armImg;
+    // UI-thread history for the rolling input/output note HeatMaps.
+    static constexpr int heatmapColumnCount = 100;
+    std::array<int, heatmapColumnCount> heatmapInputNotes {};
+    std::array<int, heatmapColumnCount> heatmapOutputNotes {};
+    std::array<float, heatmapColumnCount> heatmapConfidence {};
+    int heatmapWriteIndex = 0;
+    float visualizerActivity = 0.0f;
 
-    // Knobs
-    juce::Slider speedKnob, humanizeKnob, flexTuneKnob, glideKnob;
-    juce::Slider referenceFreqKnob, formantShiftKnob;
+    // One-shot Orb boot animation: fast spin, rising light, then settle into
+    // continuous Speed-driven motion. Timestamp uses JUCE's wrap-safe ms counter.
+    juce::uint32 orbStartupStartedAtMs = 0;
+    float orbStartupProgress = 0.0f;
+    float orbStartupGlow = 0.0f;
+    bool orbStartupComplete = false;
 
-    // Labels for knobs
-    juce::Label speedLabel, humanizeLabel, flexTuneLabel, glideLabel, referenceFreqLabel, formantShiftLabel;
+    juce::ValueTree slotA, slotB, undoState, redoState;
+    juce::String selectedPresetName { "No preset selected" };
+    bool hasUndoState = false;
+    bool hasRedoState = false;
+    std::shared_ptr<juce::FileChooser> saveChooser, loadChooser;
 
-    // Factory programs (keep a visible in-plugin route to the quality-first profile).
-    juce::ComboBox presetBox;
-    juce::TextButton autoKeyButton { "AUTO KEY" };
-    int autoKeyFeedbackTicks = 0;
-
-    // Scale selector (western scales plus optional 24-TET and Maqam modes)
-    juce::ComboBox scaleBox;
-
-    juce::ToggleButton formantBtn    {"Formant"};
-    juce::ToggleButton lowLatencyBtn {"Low Latency"};
-    juce::ToggleButton enableBtn     {"Enabled"};
-
-    // Voice range: the lowest note the tuner follows (lower notes need more delay)
-    juce::ComboBox rangeBox;
-
-    // Key (root note) selector
-    juce::ComboBox rootNoteBox;
-    juce::Label rootNoteLabel;
-
-    // Piano keyboard note buttons (C..B). Lit = the tuner may snap to this note.
-    std::array<juce::TextButton, 12> noteButtons;
-
-    // APVTS attachments
-    using SliderAttach = juce::AudioProcessorValueTreeState::SliderAttachment;
-    using ButtonAttach = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    using ComboAttach  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
-
-    std::unique_ptr<SliderAttach> speedAtt;
-    std::unique_ptr<SliderAttach> humanizeAtt, flexTuneAtt, glideAtt, referenceFreqAtt, formantShiftAtt;
-    std::unique_ptr<ButtonAttach> formantAtt, lowLatencyAtt, enableAtt;
-    std::unique_ptr<ComboAttach>  rootNoteAtt, rangeAtt;
-    int lastAppliedScale = -1;
-    int lastAppliedRoot  = -1;
-    std::array<std::unique_ptr<ButtonAttach>, 12> noteAtts;
-
-    // Pitch display state
-    float displayDetectedHz      = 0.0f;
-    float displayTargetHz        = 0.0f;
-    float displayCorrectionCents = 0.0f;
-    float displayConfidence      = 0.0f;
-    int   displayDetectedMidi    = -1;
-    int   displayTargetMidi      = -1;
-    float displayTargetMidiFloat = -1.0f;
-    float displayInputLevel      = 0.0f;
-    float displayOutputLevel     = 0.0f;
-    float meterIn                = 0.0f;   // smoothed 0..1 meter positions
-    float meterOut               = 0.0f;
-
-    // Pitch heatmap history (scrolling)
-    static constexpr int kHeatmapWidth = 200;
-    std::array<float, kHeatmapWidth> heatmapDetected {};
-    std::array<float, kHeatmapWidth> heatmapTarget {};
-    int heatmapWriteIdx = 0;
-
-    void setupKnob (juce::Slider&, juce::Label&, const juce::String& text, const juce::String& tooltip);
-    void rebuildScaledArt();
-    void applyScaleFromControls();
-    int  currentScaleType() const;
-    int  currentRoot() const;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HumHouseVocalTuneEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MetaTuneInspiredAudioProcessorEditor)
 };
