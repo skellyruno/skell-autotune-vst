@@ -1,38 +1,66 @@
-# MetaTuneInspired — V15 engine integration
+# SkellyTune
 
-This is the **original uploaded MetaTuneInspiredvst-main** project with its original JUCE GUI and **unchanged** `.github/workflows/build-windows.yml`. The plugin target name, bundle ID, and workflow output location are unchanged.
+Dedicated pitch correction (autotune) plugin built with
+[JUCE](https://juce.com). Thick vocal sustain, sharp note snapping,
+and formant-preserving TD-PSOLA pitch shifting.
 
-## DSP changes
+Inspired by Slate Digital MetaTune, Antares Auto-Tune, and
+Soundtoys Little AlterBoy.
 
-Integrated the SkellTune V15 pitch-preserving delay compensator, precision hard-tune engine, latency-aligned global bypass, audio-thread parameter snapshotting and safeguards for non-finite float audio/telemetry. Updated the original processor to match that engine; added V15 regression tests and offline diagnostics. Original editor `Source/PluginEditor.cpp/.h` is retained byte-for-byte.
+Ships as:
 
-**Preset compatibility:** existing parameter identifiers were preserved; extra `precisionHardTune` and `customDegree0` through `customDegree11` parameters were added. The original UI doesn't expose the new precision control, which defaults off. Doubler mix now defaults to zero for new instances, but existing saved settings should restore their values.
+- **VST3 plugin** — FL Studio, Ableton Live, Reaper, Cubase, Studio One, Bitwig
+- **AU plugin** (macOS only) — Logic Pro, GarageBand
+- **Standalone app** — runs without a DAW
 
-## GitHub Actions
+## Features
 
-No edits to `.github/workflows/build-windows.yml`. It still checks out JUCE 8.0.8, configures with `JUCE_PATH`, builds `MetaTuneInspired`, and uploads the Release VST3 artifact from the original path. **The Windows JUCE plugin build has not been run here.**
+| Feature | Description |
+|---------|-------------|
+| **YIN Pitch Detection** | High-accuracy monophonic pitch tracker with median filtering and confidence scoring |
+| **TD-PSOLA Pitch Shifting** | Period-synchronous overlap-add for pitch correction |
+| **Sub Bass Range** | Selectable 40 Hz floor (E1 range); existing range indices remain compatible |
+| **Formant Preservation** | Keeps natural vocal character even with aggressive pitch shifts |
+| **Scale Snap** | Major, Minor, Chromatic, or per-note custom scale with root key selection |
+| **Retune Speed** | 0 ms (hard T-Pain snap) to 150 ms (gentle natural correction) |
+| **Note Sustain** | Configurable cent threshold — once locked to a note, holds as long as vocal stays in range |
+| **Note Stabilizer** | Ignores micro-fluctuations to prevent jittery correction |
+| **Humanize** | Reduces correction amount for natural imperfection |
+| **Low Latency Mode (Experimental)** | Opt-in fixed-delay resynthesis targeting a 1.9 ms shifter budget; not yet validated on real vocals or measured DAW round-trip latency |
+| **Pitch Orb Display** | Real-time visual feedback showing detected note and correction direction |
+| **In/Out Heatmap** | Scrolling pitch history showing detected vs corrected pitch |
+| **12 Presets** | Hard Snap, Sharp Correct, Natural, R&B Smooth, Trap Vocal, Gospel, and more |
+| **Purple UI** | HumHouse signature dark purple aesthetic inspired by MetaTune |
 
-## Portable validation (no JUCE required)
 
-```sh
-cmake -S tests -B build-tests -DCMAKE_BUILD_TYPE=Release
-cmake --build build-tests --config Release -j
-ctest --test-dir build-tests --build-config Release --output-on-failure
-```
 
-All 30 portable DSP tests passed under GCC on Linux after providing the vocal test asset path via CTest. Use `-DSKELLTUNE_BUILD_TESTS=ON` to add them to the full JUCE project build (optional, default OFF).
+## Technical Design
 
-## Windows plugin build
+### Why TD-PSOLA?
 
-Run the existing GitHub Actions **Windows VST3 build** workflow, or locally:
+Previous implementations used fixed-size
+grains (256 samples) for pitch shifting, which caused:
+- Phase discontinuities at grain boundaries
+- Metallic / robotic artifacts
+- Formant shifting (chipmunk / barrel effect)
 
-```powershell
-cmake -S . -B build -DJUCE_PATH=C:/JUCE -A x64
-cmake --build build --config Release --parallel
-```
+TD-PSOLA (Time-Domain Pitch-Synchronous Overlap-Add) solves all three:
+1. **Grains are period-length** — aligned to the detected fundamental
+2. **Hann-windowed overlap-add** — seamless transitions, no clicks
+3. **Pitch changed via placement rate** — grain content (formants) stays intact
 
-This still needs Windows MSVC/JUCE compilation and an FL Studio smoke test. Build problems specific to JUCE 8's UI API may remain in the unmodified original editor; the engine regressions do not compile JUCE classes. See `V15_ENGINEERING_REPORT.md` for pitch accuracy and latency limitations. The pitch-preserving fixed compensation sacrifices exact dynamic transport alignment.
+### Note Sustain Logic
 
-## Licensing and privacy
+Once the engine locks onto a scale note, it holds that note as long as
+the incoming vocal stays within a configurable cent threshold (default
+50 cents). This prevents jittery switching between adjacent notes on
+sustained vocals and is key to getting that "painted" autotune sound.
 
-DSP includes AGPL-3.0-derived MicFX code. Review licensing obligations before distribution. `tests/assets/real_voice_octave_200hz.wav` is a short private vocal excerpt used for regression and should not be publicly redistributed without permission.
+## License
+
+See [installer/eula.txt](installer/eula.txt).
+
+
+## Low Latency Development Status
+
+The experimental low-latency mode is off by default. Repository tests measure nominal ~1.9 ms scheduling and below-2 ms integrated sweep lag at 44.1/48/88.2/96 kHz for unity-ratio synthetic sweeps across several block sizes. The selectable Sub Bass range now reaches 40 Hz, including E1 (41.20 Hz), without changing the existing five saved voice-range indices. Synthetic harmonic/noisy E1→F#1 and changing-bass E1→G1 / E2→G2 cases pass across host block sizes, and integrated E1→F1 active correction passes at 44.1/48/88.2/96 kHz. The detector's YIN analysis now runs at approximately 12 kHz at every host rate, with a 31-tap low-pass FIR before decimation to reject aliasing. Regression tests include a strong 10.3 kHz interferer while tracking a 220 Hz fundamental at 44.1/48/96 kHz, plus 1,000 Hz and 1,450 Hz tracking. A detector-only GCC steady-clock benchmark measures about 9–19x lower elapsed time than the previous detector at the legacy 70 Hz floor across noisy repeated runs; the updated Sub Bass floor is more computationally expensive but remains far below the old full-rate search. These are synthetic DSP tests and detector-only timings, not full audio-callback, real-vocal or DAW certification. Repeated low-latency/standard mode changes are tested for stale-grain leakage; generation-stamped output slots avoid bulk ring clears during ordinary resets. Detector range changes invalidate history and wait for a fresh analysis window, and a 44.1-to-48 kHz re-prepare regression checks the sample-rate transition. Vocal artifact quality, formant behavior, DAW plug-in delay compensation, full callback CPU load and end-to-end device/DAW loopback still require validation. The full JUCE plugin build could not be run in the current environment because GitHub DNS resolution failed during dependency fetch. See [`LOW-LATENCY-CHECKLIST.md`](LOW-LATENCY-CHECKLIST.md) before using the experimental switch in performance.

@@ -1,106 +1,136 @@
 #pragma once
+
+#include "AutoTuneEngine.h"
 #include <JuceHeader.h>
 #include <array>
-#include <cstdint>
-#include <vector>
-#include "RealtimeAutotune.h"
+#include <atomic>
 
-class MetaTuneInspiredAudioProcessor final : public juce::AudioProcessor
+class HumHouseVocalTuneProcessor : public juce::AudioProcessor,
+                                     private juce::AsyncUpdater,
+                                     private juce::AudioProcessorValueTreeState::Listener
 {
 public:
-    MetaTuneInspiredAudioProcessor();
-    ~MetaTuneInspiredAudioProcessor() override = default;
+    HumHouseVocalTuneProcessor();
+    ~HumHouseVocalTuneProcessor() override;
 
-    void prepareToPlay(double sampleRate, int samplesPerBlock) override;
-    void releaseResources() override;
-    bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
-    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    void releaseResources() override {}
+    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
-    const juce::String getName() const override { return JucePlugin_Name; }
-    bool acceptsMidi() const override { return false; }
-    bool producesMidi() const override { return false; }
-    bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.1; }
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram(int) override {}
-    const juce::String getProgramName(int) override { return {}; }
-    void changeProgramName(int, const juce::String&) override {}
-    void getStateInformation(juce::MemoryBlock&) override;
-    void setStateInformation(const void*, int) override;
 
-    juce::AudioProcessorValueTreeState parameters;
-    float getDetectedMidiNote() const noexcept { return detectedMidiNote.load(std::memory_order_relaxed); }
-    float getDetectedHz() const noexcept { return detectedHz.load(std::memory_order_relaxed); }
-    float getCorrectionCents() const noexcept { return correctionCents.load(std::memory_order_relaxed); }
-    float getPitchConfidence() const noexcept { return pitchConfidence.load(std::memory_order_relaxed); }
-    float getInputRms() const noexcept { return inputRms.load(std::memory_order_relaxed); }
-    float getTargetMidiNote() const noexcept { return targetMidiNote.load(std::memory_order_relaxed); }
-    float getSmoothedTargetMidiNote() const noexcept { return smoothedTargetMidiNote.load(std::memory_order_relaxed); }
-    float getEffectiveRetuneTimeMs() const noexcept { return effectiveRetuneTimeMs.load(std::memory_order_relaxed); }
-    float getPitchReferenceHz() const noexcept
+    const juce::String getName() const override { return JucePlugin_Name; }
+
+    bool   acceptsMidi()  const override { return false; }
+    bool   producesMidi() const override { return false; }
+    bool   isMidiEffect() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.0; }
+
+    int  getNumPrograms() override;
+    int  getCurrentProgram() override { return currentPreset.load(std::memory_order_relaxed); }
+    void setCurrentProgram (int index) override;
+    const juce::String getProgramName (int index) override;
+    void changeProgramName (int, const juce::String&) override {}
+
+    void getStateInformation (juce::MemoryBlock& destData) override;
+    void setStateInformation (const void* data, int sizeInBytes) override;
+
+    juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
+    humtune::KeyEstimator::Estimate getAutoKeyEstimate() const { return engine.getAutoKeyEstimate(); }
+    humtune::KeyEstimator::Estimate applyAutoKeyEstimate();
+
+    // The scale selector and piano-key mask share one source of truth. Microtonal
+    // scales highlight approximate semitone keys while the DSP follows exact intervals.
+    static bool isNoteInScale (int scaleType, int root, int note)
     {
-        if (pitchReferenceParameter != nullptr)
-            return pitchReferenceParameter->load(std::memory_order_relaxed);
-        return 440.0f;
+        const auto mask = humtune::ScaleQuantizer::approximateMask(scaleType, root);
+        const int pc = ((note % 12) + 12) % 12;
+        return mask[static_cast<size_t>(pc)];
     }
 
-    // Shared mapping for the UI readout and the active correction-time engine.
-    static float speedControlToMilliseconds(float controlValue) noexcept;
-    void startTonePreview(int midiNote) noexcept { tonePreviewMidiNote.store(juce::jlimit(0, 127, midiNote), std::memory_order_relaxed); }
-    void stopTonePreview() noexcept { tonePreviewMidiNote.store(-1, std::memory_order_relaxed); }
+    // Refresh the piano's 12-semitone projection of the chosen named scale + key.
+    void applyScaleToKeys (int scaleType, int root);
+
+    // Readbacks for editor
+    float getDetectedHz()       const { return engine.getDetectedHz(); }
+    float getTargetHz()         const { return engine.getTargetHz(); }
+    float getCorrectionCents()  const { return engine.getCorrectionCents(); }
+    float getConfidence()       const { return engine.getConfidence(); }
+    int   getDetectedMidiNote() const { return engine.getDetectedMidiNote(); }
+    int   getTargetMidiNote()   const { return engine.getTargetMidiNote(); }
+    float getTargetMidiFloat()  const { return engine.getTargetMidiFloat(); }
+
+    // Input/output levels for meters
+    float getInputLevel()  const { return inputLevel.load(); }
+    float getOutputLevel() const { return outputLevel.load(); }
+
+    // Note names for display
+    static juce::String midiNoteToName (int midiNote)
+    {
+        if (midiNote < 0) return "";
+        static const char* names[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+        int octave = (midiNote / 12) - 1;
+        return juce::String(names[midiNote % 12]) + juce::String(octave);
+    }
 
 private:
-    static juce::AudioProcessorValueTreeState::ParameterLayout createParameters();
-    void processDoubler(juce::AudioBuffer<float>& buffer, int startSample, int samples) noexcept;
-    void processReferenceTone(juce::AudioBuffer<float>& buffer, int startSample, int samples) noexcept;
+    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    void cacheParameterRefs();
+    void parameterChanged(const juce::String&, float) override;
+    void registerPresetTracking(bool add);
 
-    static constexpr int doublerDelayLineSize = 8192; // fixed delay-line capacity used by the Doubler
-    // Cache APVTS atomics once, avoiding repeated parameter lookup on the audio thread.
-    // Pulse-aligned TD-PSOLA engine supplied in RealtimeAutotune.h.
-    autotune::RealtimeAutotune realtimeAutotune;
-    std::atomic<float>* speedParameter = nullptr;
-    std::atomic<float>* amountParameter = nullptr;
-    std::atomic<float>* sustainParameter = nullptr;
-    std::atomic<float>* glideParameter = nullptr;
-    std::atomic<float>* correctionLimitParameter = nullptr;
-    std::atomic<float>* precisionHardTuneParameter = nullptr;
-    std::atomic<float>* noteConfirmParameter = nullptr;
-    std::atomic<float>* consonantReleaseParameter = nullptr;
-    std::atomic<float>* scaleParameter = nullptr;
-    std::array<std::atomic<float>*, 12> customDegreeParameters {};
-    std::atomic<float>* rootParameter = nullptr;
-    std::atomic<float>* lowLatencyParameter = nullptr;
-    std::atomic<float>* stabilizerParameter = nullptr;
-    std::atomic<float>* stabilizerTimeParameter = nullptr;
-    std::atomic<float>* pitchReferenceParameter = nullptr;
-    std::atomic<float>* doublerWidthParameter = nullptr;
-    std::atomic<float>* doublerMixParameter = nullptr;
-    std::atomic<float>* globalBypassParameter = nullptr;
-    std::atomic<float>* toneVolumeParameter = nullptr;
-    std::atomic<int> tonePreviewMidiNote { -1 };
+    // Resolve APVTS IDs off the audio thread. In particular, the note-key IDs are
+    // dynamic strings; constructing them in processBlock would create avoidable work.
+    struct ParameterRefs
+    {
+        std::atomic<float>* retune = nullptr;
+        std::atomic<float>* humanize = nullptr;
+        std::atomic<float>* flexTune = nullptr;
+        std::atomic<float>* glide = nullptr;
+        std::atomic<float>* rootNote = nullptr;
+        std::atomic<float>* scaleType = nullptr;
+        std::atomic<float>* scaleExtension = nullptr;
+        std::atomic<float>* referenceFreq = nullptr;
+        std::atomic<float>* noteStabilizer = nullptr;
+        std::atomic<float>* formantPreserve = nullptr;
+        std::atomic<float>* formantShift = nullptr;
+        std::atomic<float>* range = nullptr;
+        std::atomic<float>* enabled = nullptr;
+        std::atomic<float>* lowLatencyMode = nullptr;
+        std::atomic<float>* inputGain = nullptr;
+        std::atomic<float>* outputGain = nullptr;
+        std::array<std::atomic<float>*, 12> notes{};
+    } parameterRefs;
 
-    // All delay storage and per-sample latency telemetry are allocated before the
-    // audio callback; processBlock performs no heap allocation.
-    autotune::OutputLatencyCompensator outputLatencyCompensator;
-    autotune::FixedDirectDelay referenceToneDelay; // fixed host-PDC path for plugin-generated piano notes
-    autotune::LatencyAlignedBypass latencyAlignedBypass; // PDC-aligned dry/bypass branch
-    std::vector<float> dryLatencyScratch; // channel-major; allocated in prepareToPlay
-    std::vector<float> intrinsicLatencyScratch; // channel-major: two blocks of per-sample delay values
-    int fixedLatencySamples = 0;
-    std::array<std::array<float, doublerDelayLineSize>, 2> doublerDelayLine {};
-    int doublerWritePosition = 0;
-    float doublerLfoPhase = 0.0f;
-    float smoothedDoublerWidth = 0.46f;
-    float smoothedDoublerMix = 0.0f;
-    float referenceTonePhase = 0.0f;
-    float referenceToneAmplitude = 0.0f;
-    float referenceToneFrequencyHz = 440.0f;
-    std::atomic<float> detectedMidiNote { 64.0f }, detectedHz { 0.0f }, correctionCents { 0.0f };
-    std::atomic<float> pitchConfidence { 0.0f }, inputRms { 0.0f }, targetMidiNote { 69.0f };
-    std::atomic<float> smoothedTargetMidiNote { 69.0f }, effectiveRetuneTimeMs { 30.0f };
-    double currentSampleRate = 44100.0;
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MetaTuneInspiredAudioProcessor)
+    // Tells the host about a latency change (must happen on the message thread)
+    void handleAsyncUpdate() override { setLatencySamples(pendingLatency.load()); }
+    std::atomic<int> pendingLatency { 0 };
+    int reportedLatency = 0;
+
+    juce::AudioProcessorValueTreeState apvts;
+    humtune::AutoTuneEngine engine;
+
+    std::atomic<float> inputLevel  { 0.0f };
+    std::atomic<float> outputLevel { 0.0f };
+
+    // Default program index points at the verified quality-first program appended last.
+    static constexpr int kStudioMaxProgramIndex = 12;
+    std::atomic<int> currentPreset { kStudioMaxProgramIndex };
+
+    struct Preset
+    {
+        juce::String name;
+        float speed;
+        float humanize;
+        int   scaleType;
+        bool  stabilizer;
+        bool  formantPreserve;
+        int   range;        // voice range 0..5, or -1 to leave the user's choice alone
+        int   lowLatencyMode = -1; // -1 preserves existing behavior; 0 = Standard, 1 = experimental
+    };
+
+    static const std::vector<Preset>& getPresets();
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HumHouseVocalTuneProcessor)
 };

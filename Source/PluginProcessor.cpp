@@ -1,449 +1,432 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-MetaTuneInspiredAudioProcessor::MetaTuneInspiredAudioProcessor()
- : AudioProcessor(BusesProperties().withInput("Input", juce::AudioChannelSet::stereo(), true)
-                                   .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-   parameters(*this, nullptr, "PARAMETERS", createParameters())
+// Note names for combo-box choices
+static const juce::StringArray kNoteNames {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+
+// ---------------------------------------------------------------------------
+// Presets
+// ---------------------------------------------------------------------------
+const std::vector<HumHouseVocalTuneProcessor::Preset>&
+HumHouseVocalTuneProcessor::getPresets()
 {
-    speedParameter = parameters.getRawParameterValue("speed");
-    amountParameter = parameters.getRawParameterValue("amount");
-    sustainParameter = parameters.getRawParameterValue("sustain");
-    glideParameter = parameters.getRawParameterValue("glide");
-    correctionLimitParameter = parameters.getRawParameterValue("correctionLimit");
-    precisionHardTuneParameter = parameters.getRawParameterValue("precisionHardTune");
-    noteConfirmParameter = parameters.getRawParameterValue("noteConfirm");
-    consonantReleaseParameter = parameters.getRawParameterValue("consonantRelease");
-    scaleParameter = parameters.getRawParameterValue("scale");
+    static const std::vector<Preset> presets =
+    {
+        // name,                   speed, human, scale, stab,  formant, range
+        // (speed here: 0 = instant, 1 = slowest)
+        { "Hard Snap (T-Pain)",    0.00f, 0.00f, 2,    false, true,    -1 },
+        { "Sharp Correct",         0.05f, 0.00f, 0,    false, true,    -1 },
+        { "Natural Correct",       0.25f, 0.15f, 0,    false, true,    -1 },
+        { "Gentle Touch",          0.50f, 0.30f, 0,    false, true,    -1 },
+        { "Subtle Polish",         0.70f, 0.40f, 0,    false, true,    -1 },
+        { "Robotic",               0.00f, 0.00f, 2,    false, false,   -1 },
+        { "Live Performance",      0.15f, 0.10f, 0,    false, true,     2 },
+        { "R&B Smooth",            0.10f, 0.05f, 1,    false, true,    -1 },
+        { "Pop Vocal",             0.08f, 0.02f, 0,    false, true,    -1 },
+        { "Trap Vocal",            0.00f, 0.00f, 1,    false, true,    -1 },
+        { "Gospel Sustain",        0.20f, 0.10f, 0,    false, true,    -1 },
+        { "Lo-Fi Drift",           0.60f, 0.50f, 2,    false, true,    -1 },
+        // Default program: fastest retune, full correction, Note Stabilizer off, formant
+        // preservation enabled, and the established quality-first Standard shifter.
+        // Preserve the host's voice-range choice for other singers. Low Latency remains an
+        // explicit experimental opt-in rather than silently changing the default sound.
+        { "Studio Max (Standard)",   0.00f, 0.00f, 0,    false, true,    -1, 0 },
+    };
+    return presets;
+}
+
+// ---------------------------------------------------------------------------
+// Parameter layout
+// ---------------------------------------------------------------------------
+juce::AudioProcessorValueTreeState::ParameterLayout
+HumHouseVocalTuneProcessor::createParameterLayout()
+{
+    std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
+
+    // Retune Speed: the knob is turned clockwise for FASTER tuning (the number shown goes
+    // down to 0 at the far right). 1 = instant (hard tune), 0 = slowest.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"retune", 1}, "Retune Speed",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"humanize", 1}, "Humanize",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+
+    // Flex-Tune is additive and defaults to zero so existing sessions keep their sound.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"flexTune", 1}, "Flex-Tune",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+
+    // Independent target portamento; zero is deliberately neutral for legacy sessions.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"glide", 1}, "Target Glide",
+        juce::NormalisableRange<float>(0.0f, 500.0f, 1.0f), 0.0f, "ms"));
+
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"rootNote", 1}, "Root Note", 0, 11, 0));
+
+    // Keep the historical 0..2 Scale Type parameter untouched for saved sessions and
+    // host automation. New scale families are selected through a separate extension ID.
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"scaleType", 1}, "Scale Type", 0, 2, 0));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"scaleExtension", 1}, "Scale Extension", 0,
+        humtune::ScaleQuantizer::kNumScales - 3, 0));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"referenceFreq", 1}, "Reference Frequency",
+        juce::NormalisableRange<float>(400.0f, 480.0f, 0.1f), 440.0f));
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"noteStabilizer", 1}, "Note Stabilizer", false));
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"formantPreserve", 1}, "Formant Preserve", true));
+
+    // Independent vocal-tract colour shift. The zero default is intentionally
+    // neutral so prior sessions retain the existing sound until this is adjusted.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"formantShift", 1}, "Formant Shift",
+        juce::NormalisableRange<float>(-4.0f, 4.0f, 0.1f), 0.0f, "st"));
+
+    // Voice range: the lowest note the tuner follows. Lower notes need more delay.
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::AutoTuneEngine::kNumRanges - 1,
+        humtune::AutoTuneEngine::kDefaultRange));
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"enabled", 1}, "Enabled", true));
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"lowLatencyMode", 1}, "Low Latency (Experimental)", false));
+
+    // Hidden from the current editor but retained so older sessions/automation remain valid.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"inputGain", 1}, "Input Gain",
+        juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), 0.0f));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"outputGain", 1}, "Output Gain",
+        juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), 0.0f));
+
+    // Piano keys: which notes the tuner may snap to. They start as C major, which matches
+    // the default Scale (Major) and Key (C). The Scale and Key controls re-light them.
     for (int i = 0; i < 12; ++i)
-        customDegreeParameters[(size_t)i] = parameters.getRawParameterValue("customDegree" + juce::String(i));
-    rootParameter = parameters.getRawParameterValue("root");
-    lowLatencyParameter = parameters.getRawParameterValue("lowLatency");
-    stabilizerParameter = parameters.getRawParameterValue("stabilizer");
-    stabilizerTimeParameter = parameters.getRawParameterValue("stabilizerTime");
-    pitchReferenceParameter = parameters.getRawParameterValue("pitchReference");
-    doublerWidthParameter = parameters.getRawParameterValue("doublerWidth");
-    doublerMixParameter = parameters.getRawParameterValue("doublerMix");
-    globalBypassParameter = parameters.getRawParameterValue("globalBypass");
-    toneVolumeParameter = parameters.getRawParameterValue("toneVolume");
+    {
+        auto id = "note" + juce::String(i);
+        auto name = kNoteNames[i] + " On";
+        const bool inCMajor = isNoteInScale(0, 0, i);
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{id, 1}, name, inCMajor));
+    }
+
+    return { params.begin(), params.end() };
 }
 
-float MetaTuneInspiredAudioProcessor::speedControlToMilliseconds(float controlValue) noexcept
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
+HumHouseVocalTuneProcessor::HumHouseVocalTuneProcessor()
+    : AudioProcessor(BusesProperties()
+          .withInput ("Input",  juce::AudioChannelSet::stereo(), true)
+          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      apvts(*this, nullptr, "PARAMETERS", createParameterLayout())
 {
-    const float p = juce::jlimit(0.0f, 100.0f, controlValue);
-    // 0 -> 200 ms; 30 -> 30 ms; 100 -> -3 ms, matching the user-facing dial.
-    if (p <= 30.0f)
-        return 200.0f - (170.0f * p / 30.0f);
-    return 30.0f - (33.0f * (p - 30.0f) / 70.0f);
+    cacheParameterRefs();
+    registerPresetTracking(true);
 }
 
-juce::AudioProcessorValueTreeState::ParameterLayout MetaTuneInspiredAudioProcessor::createParameters()
+HumHouseVocalTuneProcessor::~HumHouseVocalTuneProcessor()
 {
-    using namespace juce;
-    AudioProcessorValueTreeState::ParameterLayout p;
-    p.add(std::make_unique<AudioParameterFloat>("speed", "Speed", NormalisableRange<float>(0.0f, 100.0f, 0.1f), 30.0f));
-    p.add(std::make_unique<AudioParameterFloat>("amount", "Amount", NormalisableRange<float>(0.0f, 100.0f, 0.1f), 100.0f));
-    p.add(std::make_unique<AudioParameterFloat>("pitchReference", "Pitch Reference",
-        NormalisableRange<float>(415.3047f, 466.1638f, 0.1f), 440.0f));
-    // Signed values: negative slows retuning on held notes, positive speeds it up.
-    p.add(std::make_unique<AudioParameterFloat>("sustain", "Sustain", NormalisableRange<float>(-100.0f, 100.0f, 1.0f), 0.0f));
-    p.add(std::make_unique<AudioParameterFloat>("glide", "Glide (ms)", NormalisableRange<float>(0.0f, 500.0f, 1.0f), 0.0f));
-    p.add(std::make_unique<AudioParameterFloat>("correctionLimit", "Max Correction (semitones)", NormalisableRange<float>(0.0f, 12.0f, 0.1f), 12.0f));
-    p.add(std::make_unique<AudioParameterBool>("precisionHardTune", "Precision Hard Tune", false));
-    p.add(std::make_unique<AudioParameterFloat>("noteConfirm", "Note Confirmation (ms)", NormalisableRange<float>(0.0f, 100.0f, 1.0f), 10.0f));
-    p.add(std::make_unique<AudioParameterFloat>("consonantRelease", "Consonant Release (ms)", NormalisableRange<float>(0.0f, 30.0f, 1.0f), 8.0f));
-    p.add(std::make_unique<AudioParameterBool>("stabilizer", "Note Stabilizer", true));
-    p.add(std::make_unique<AudioParameterChoice>("stabilizerTime", "Note Stabilizer Time",
-                                                  StringArray { "None", "Short", "Mid", "Long" }, 1));
-    p.add(std::make_unique<AudioParameterBool>("lowLatency", "Low Latency", true));
-    p.add(std::make_unique<AudioParameterChoice>("scale", "Scale",
-        StringArray{"Chromatic", "Major", "Minor", "Harmonic Minor", "Major Pentatonic",
-                    "Minor Pentatonic", "Blues", "Dorian", "Custom"}, 0));
-    // Degrees relative to the selected root, not absolute piano keys. These IDs
-    // are additive, preserving the existing automation and session format.
-    constexpr bool defaultDegrees[12] = {true, false, true, false, true, true,
-                                          false, true, false, true, false, true};
-    for (int i = 0; i < 12; ++i)
-        p.add(std::make_unique<AudioParameterBool>("customDegree" + String(i),
-            "Custom degree " + String(i), defaultDegrees[i]));
-    p.add(std::make_unique<AudioParameterInt>("root", "Root Note", 0, 11, 4));
-    p.add(std::make_unique<AudioParameterFloat>("doublerWidth", "Doubler Width",
-        NormalisableRange<float>(0.0f, 100.0f, 0.1f), 46.0f));
-    p.add(std::make_unique<AudioParameterFloat>("doublerMix", "Doubler Mix",
-        NormalisableRange<float>(0.0f, 100.0f, 0.1f), 0.0f));
-    p.add(std::make_unique<AudioParameterBool>("globalBypass", "Global Bypass", false));
-    p.add(std::make_unique<AudioParameterFloat>("toneVolume", "Tone Volume",
-        NormalisableRange<float>(0.0f, 100.0f, 0.1f), 65.0f));
-    return p;
+    cancelPendingUpdate();
+    registerPresetTracking(false);
 }
 
-void MetaTuneInspiredAudioProcessor::prepareToPlay(double sr, int maxBlock)
+void HumHouseVocalTuneProcessor::parameterChanged(const juce::String&, float)
 {
-    currentSampleRate = juce::jmax(8000.0, sr);
-
-    // Pulse-aligned TD-PSOLA tracks 70-1000 Hz. The same fixed budget is both
-    // reported to the host and enforced by the output compensation stage below.
-    realtimeAutotune.prepare(currentSampleRate, 70.0f, 1000.0f);
-    // Source-period repetition can push the measured normal-mode delay to about
-    // 2.35 periods at the 70 Hz lower tracking limit. Reserve 2.5 periods so the
-    // output compensation stage always has non-negative padding in that corner.
-#if defined(SKELLTUNE_LIVE_FIXED_LOW_LATENCY) && SKELLTUNE_LIVE_FIXED_LOW_LATENCY
-    // Standalone Live variant: fast grain scheduler cannot be disabled, so
-    // a smaller host-reported PDC budget is safe across automation changes.
-    fixedLatencySamples = autotune::RealtimeAutotune::recommendedHostLatencySamples(currentSampleRate, 70.0f, true);
-#else
-    fixedLatencySamples = autotune::RealtimeAutotune::recommendedHostLatencySamples(currentSampleRate, 70.0f);
-#endif
-    setLatencySamples(fixedLatencySamples);
-    outputLatencyCompensator.prepare(fixedLatencySamples, currentSampleRate);
-    outputLatencyCompensator.setPitchPreserving(true);
-    referenceToneDelay.prepare(fixedLatencySamples);
-    latencyAlignedBypass.prepare(fixedLatencySamples, currentSampleRate);
-    // Channel-major scratch storage is bounded, allocated only in prepareToPlay.
-    // processBlock divides arbitrary host blocks into slices that fit this buffer;
-    // it NEVER silently discards intrinsic-latency telemetry for oversize blocks.
-    intrinsicLatencyScratch.assign(2u * (size_t)juce::jmax(1, juce::jmin(maxBlock, 4096)), 0.0f);
-    dryLatencyScratch.assign(intrinsicLatencyScratch.size(), 0.0f);
-
-    // The Doubler delay lines are fixed-capacity and reset outside the audio callback.
-    doublerDelayLine = {};
-    doublerWritePosition = 0;
-    referenceTonePhase = 0.0f;
-    referenceToneAmplitude = 0.0f;
-    referenceToneFrequencyHz = pitchReferenceParameter != nullptr
-        ? pitchReferenceParameter->load(std::memory_order_relaxed) : 440.0f;
-    tonePreviewMidiNote.store(-1, std::memory_order_relaxed);
-    doublerLfoPhase = 0.0f;
-    smoothedDoublerWidth = doublerWidthParameter != nullptr
-        ? juce::jlimit(0.0f, 1.0f, doublerWidthParameter->load(std::memory_order_relaxed) / 100.0f) : 0.46f;
-    smoothedDoublerMix = doublerMixParameter != nullptr
-        ? juce::jlimit(0.0f, 1.0f, doublerMixParameter->load(std::memory_order_relaxed) / 100.0f) : 0.0f;
-    detectedHz.store(0.0f, std::memory_order_relaxed);
-    detectedMidiNote.store(69.0f, std::memory_order_relaxed);
-    correctionCents.store(0.0f, std::memory_order_relaxed);
-    pitchConfidence.store(0.0f, std::memory_order_relaxed);
-    inputRms.store(0.0f, std::memory_order_relaxed);
-    targetMidiNote.store(69.0f, std::memory_order_relaxed);
-    smoothedTargetMidiNote.store(69.0f, std::memory_order_relaxed);
-    effectiveRetuneTimeMs.store(30.0f, std::memory_order_relaxed);
+    // Called from either the host's automation thread or a UI thread.
+    // An atomic write is safe and does not allocate or block the audio callback.
+    currentPreset.store(-1, std::memory_order_relaxed);
 }
 
-void MetaTuneInspiredAudioProcessor::releaseResources() {}
-
-bool MetaTuneInspiredAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
+void HumHouseVocalTuneProcessor::registerPresetTracking(bool add)
 {
-    const auto in = layouts.getMainInputChannelSet();
-    const auto out = layouts.getMainOutputChannelSet();
-    return in == out && (out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo());
+    static constexpr const char* kParameters[] = {
+        "retune", "humanize", "flexTune", "glide", "rootNote", "scaleType",
+        "scaleExtension", "referenceFreq", "noteStabilizer", "formantPreserve",
+        "formantShift", "range", "enabled", "lowLatencyMode", "inputGain", "outputGain"
+    };
+    for (const auto* id : kParameters)
+    {
+        if (add) apvts.addParameterListener(id, this);
+        else apvts.removeParameterListener(id, this);
+    }
+    for (int note = 0; note < 12; ++note)
+    {
+        const auto id = "note" + juce::String(note);
+        if (add) apvts.addParameterListener(id, this);
+        else apvts.removeParameterListener(id, this);
+    }
 }
 
-void MetaTuneInspiredAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void HumHouseVocalTuneProcessor::cacheParameterRefs()
+{
+    parameterRefs.retune = apvts.getRawParameterValue("retune");
+    parameterRefs.humanize = apvts.getRawParameterValue("humanize");
+    parameterRefs.flexTune = apvts.getRawParameterValue("flexTune");
+    parameterRefs.glide = apvts.getRawParameterValue("glide");
+    parameterRefs.rootNote = apvts.getRawParameterValue("rootNote");
+    parameterRefs.scaleType = apvts.getRawParameterValue("scaleType");
+    parameterRefs.scaleExtension = apvts.getRawParameterValue("scaleExtension");
+    parameterRefs.referenceFreq = apvts.getRawParameterValue("referenceFreq");
+    parameterRefs.noteStabilizer = apvts.getRawParameterValue("noteStabilizer");
+    parameterRefs.formantPreserve = apvts.getRawParameterValue("formantPreserve");
+    parameterRefs.formantShift = apvts.getRawParameterValue("formantShift");
+    parameterRefs.range = apvts.getRawParameterValue("range");
+    parameterRefs.enabled = apvts.getRawParameterValue("enabled");
+    parameterRefs.lowLatencyMode = apvts.getRawParameterValue("lowLatencyMode");
+    parameterRefs.inputGain = apvts.getRawParameterValue("inputGain");
+    parameterRefs.outputGain = apvts.getRawParameterValue("outputGain");
+
+    for (int i = 0; i < static_cast<int>(parameterRefs.notes.size()); ++i)
+    {
+        const auto id = "note" + juce::String(i);
+        parameterRefs.notes[static_cast<size_t>(i)] = apvts.getRawParameterValue(id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prepare / Process
+// ---------------------------------------------------------------------------
+void HumHouseVocalTuneProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+{
+    engine.setVoiceRange(static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed)));
+    engine.setLowLatencyMode(parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f);
+    engine.prepare(sampleRate, samplesPerBlock);
+    reportedLatency = engine.getLatencySamples();
+    setLatencySamples(reportedLatency);
+
+}
+
+void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
+                                                juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
-    const int channels = juce::jmin(2, buffer.getNumChannels());
-    const int samples = buffer.getNumSamples();
-    if (channels <= 0 || samples <= 0)
-        return;
 
-    const bool bypassed = globalBypassParameter != nullptr
-        && globalBypassParameter->load(std::memory_order_relaxed) > 0.5f;
-    const float amount = amountParameter != nullptr
-        ? juce::jlimit(0.0f, 100.0f, amountParameter->load(std::memory_order_relaxed)) / 100.0f
-        : 1.0f;
-    const float speed = speedParameter != nullptr
-        ? speedParameter->load(std::memory_order_relaxed) : 30.0f;
-    const float sustain = sustainParameter != nullptr
-        ? sustainParameter->load(std::memory_order_relaxed) : 0.0f;
-    const int scaleChoice = scaleParameter != nullptr
-        ? (int)std::lround(scaleParameter->load(std::memory_order_relaxed)) : 0;
-    const int root = rootParameter != nullptr
-        ? (int)std::lround(rootParameter->load(std::memory_order_relaxed)) : 0;
-    const float referenceHz = pitchReferenceParameter != nullptr
-        ? pitchReferenceParameter->load(std::memory_order_relaxed) : 440.0f;
-    const bool stabilizer = stabilizerParameter != nullptr
-        && stabilizerParameter->load(std::memory_order_relaxed) > 0.5f;
+    // Read parameters
+    // Read cached atomics with relaxed ordering: values are independent scalar controls,
+    // and no pointer/map/string work is needed inside the audio callback.
+    const float retune     = parameterRefs.retune->load(std::memory_order_relaxed); // 1 = fastest
+    const float hum        = parameterRefs.humanize->load(std::memory_order_relaxed);
+    const float flexTune   = parameterRefs.flexTune->load(std::memory_order_relaxed);
+    const float glideMs    = parameterRefs.glide->load(std::memory_order_relaxed);
+    const int root         = static_cast<int>(parameterRefs.rootNote->load(std::memory_order_relaxed));
+    const int legacyScale  = static_cast<int>(parameterRefs.scaleType->load(std::memory_order_relaxed));
+    const int extension    = static_cast<int>(parameterRefs.scaleExtension->load(std::memory_order_relaxed));
+    const int scale        = extension > 0 ? extension + 2 : legacyScale;
+    const float refFreq    = parameterRefs.referenceFreq->load(std::memory_order_relaxed);
+    const bool stab        = parameterRefs.noteStabilizer->load(std::memory_order_relaxed) > 0.5f;
+    const bool formant     = parameterRefs.formantPreserve->load(std::memory_order_relaxed) > 0.5f;
+    const float formantShift = parameterRefs.formantShift->load(std::memory_order_relaxed);
+    const int range        = static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed));
+    const bool on          = parameterRefs.enabled->load(std::memory_order_relaxed) > 0.5f;
+    const bool lowLatency  = parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f;
+    const float inGainDb   = parameterRefs.inputGain->load(std::memory_order_relaxed);
+    const float outGainDb  = parameterRefs.outputGain->load(std::memory_order_relaxed);
 
-    autotune::Settings settings;
-    settings.key = juce::jlimit(0, 11, root);
-    settings.scale = static_cast<autotune::Scale>(juce::jlimit(0, (int)autotune::Scale::Custom, scaleChoice));
+    // The piano keys are the scale
+    std::array<bool, 12> keyMask;
+    bool anyKeyOn = false;
     for (int i = 0; i < 12; ++i)
-        settings.customScale[(size_t)i] = customDegreeParameters[(size_t)i] != nullptr
-            && customDegreeParameters[(size_t)i]->load(std::memory_order_relaxed) > 0.5f;
-    settings.referenceHz = juce::jlimit(415.3047f, 466.1638f, referenceHz);
-    const float mappedMs = speedControlToMilliseconds(speed);
-    settings.retuneMs = mappedMs <= 0.0f ? 0.0f : mappedMs;
-    // Sustain lengthens or shortens retuning in the same direction as the existing UI macro.
-    if (settings.retuneMs > 0.0f)
     {
-        const float sustainFactor = sustain >= 0.0f
-            ? (1.0f - 0.70f * juce::jlimit(0.0f, 100.0f, sustain) / 100.0f)
-            : (1.0f + 1.50f * juce::jlimit(0.0f, 100.0f, -sustain) / 100.0f);
-        settings.retuneMs *= juce::jmax(0.10f, sustainFactor);
-    }
-    settings.glideMs = glideParameter != nullptr
-        ? glideParameter->load(std::memory_order_relaxed) : 0.0f;
-    settings.maxCorrectionSemitones = correctionLimitParameter != nullptr
-        ? correctionLimitParameter->load(std::memory_order_relaxed) : 12.0f;
-    settings.noteConfirmMs = noteConfirmParameter != nullptr
-        ? noteConfirmParameter->load(std::memory_order_relaxed) : 10.0f;
-    settings.consonantReleaseMs = consonantReleaseParameter != nullptr
-        ? consonantReleaseParameter->load(std::memory_order_relaxed) : 8.0f;
-    settings.precisionHardTune = precisionHardTuneParameter != nullptr
-        && precisionHardTuneParameter->load(std::memory_order_relaxed) > 0.5f;
-    settings.strength = amount;
-    settings.humanize = 0.0f;
-    settings.vibratoPreserve = 0.70f;
-    settings.follow = 0.85f; // responsive for rap/spoken vocals while retaining some centre stability
-    settings.voicingThreshold = stabilizer ? 0.85f : 0.68f;
-#if defined(SKELLTUNE_LIVE_FIXED_LOW_LATENCY) && SKELLTUNE_LIVE_FIXED_LOW_LATENCY
-    // Do not let an automated normal-mode toggle exceed the smaller Live PDC.
-    settings.lowLatency = true;
-#else
-    settings.lowLatency = lowLatencyParameter != nullptr
-        && lowLatencyParameter->load(std::memory_order_relaxed) > 0.5f;
-#endif
-    // None disables the slow pitch centre; progressively longer settings reject
-    // vibrato-driven target changes. The default Short retains the prior 300 ms.
-    const int stabilizerTimeChoice = stabilizerTimeParameter != nullptr
-        ? (int) std::lround (stabilizerTimeParameter->load(std::memory_order_relaxed)) : 1;
-    constexpr std::array<float, 4> stabilizerTimesMs { 0.0f, 300.0f, 450.0f, 650.0f };
-    settings.noteStabilizerMs = stabilizer
-        ? stabilizerTimesMs[(size_t)juce::jlimit (0, 3, stabilizerTimeChoice)] : 0.0f;
-    // Keep the DSP history warm during host bypass. The final bypass crossfade
-    // happens after host PDC, between time-aligned paths, not with raw input.
-    settings.bypass = false;
-    realtimeAutotune.setSettings(settings); // already on the audio thread; no lock or cross-thread hand-off needed
-
-    // Input metering is pre-tune. The engine follows the stronger channel for pitch
-    // analysis and runs independent, pitch-linked PSOLA streams to preserve stereo.
-    double energy = 0.0;
-    for (int c = 0; c < channels; ++c)
-    {
-        const float* d = buffer.getReadPointer(c);
-        for (int i = 0; i < samples; ++i)
-            energy += (double)d[i] * (double)d[i];
-    }
-    inputRms.store((float)std::sqrt(energy / (double)(channels * samples)), std::memory_order_relaxed);
-
-    // Channel-major latency telemetry uses the length of EACH slice as its stride.
-    // Process the ENTIRE chain (tuning, doubler, reference tone and output pad)
-    // in order for each slice, so even hosts sending unexpectedly huge blocks
-    // retain the same fixed-PDC path. No allocations or resize on the audio thread.
-    const int sliceCapacity = (int) (intrinsicLatencyScratch.size() / 2u);
-    if (sliceCapacity <= 0)
-    {
-        // Defensive guard for an invalid/unprepared instance. JUCE normally
-        // guarantees prepareToPlay first. Do not run tuning without a matching
-        // delay timeline if that contract is violated.
-        buffer.clear();
-        return;
+        keyMask[static_cast<size_t>(i)] =
+            parameterRefs.notes[static_cast<size_t>(i)]->load(std::memory_order_relaxed) > 0.5f;
+        anyKeyOn = anyKeyOn || keyMask[static_cast<size_t>(i)];
     }
 
-    latencyAlignedBypass.setBypassed(bypassed);
-    // While bypassed, retain the established host-aligned dry timeline.
-    // The voiced path uses stable padding to avoid undoing pitch correction.
-    outputLatencyCompensator.setPitchPreserving(!bypassed);
-    for (int offset = 0; offset < samples; offset += sliceCapacity)
+    engine.setRootNote(root);
+    engine.setScaleType(scale);
+    engine.setRetuneSpeed(1.0f - retune);      // the engine works in "0 = instant"
+    engine.setHumanize(hum);
+    engine.setFlexTune(flexTune);
+    engine.setGlideMilliseconds(glideMs);
+    engine.setReferenceFreq(refFreq);
+    engine.setNoteStabilizer(stab);
+    engine.setFormantPreserve(formant);
+    engine.setFormantShiftSemitones(formantShift);
+    engine.setVoiceRange(range);
+    engine.setLowLatencyMode(lowLatency);
+    engine.setEnabled(on);
+
+    // The delay depends on the Voice Range: tell the host when it changes
+    if (engine.getLatencySamples() != reportedLatency)
     {
-        const int n = juce::jmin(sliceCapacity, samples - offset);
-        std::array<float*, 2> slice { buffer.getWritePointer(0, offset), nullptr };
-        if (channels > 1)
-            slice[1] = buffer.getWritePointer(1, offset);
-
-        // Capture original dry audio before any pitch shifting, and align it
-        // with the advertised host latency. Delay state advances during both
-        // bypass and active processing, so automation never cold-starts it.
-        for (int i = 0; i < n; ++i)
-            for (int c = 0; c < channels; ++c)
-            {
-                // Sanitize before BOTH the delayed dry/bypass ring and the
-                // pitch tracker. Otherwise a single invalid DAW sample can
-                // persist in the PDC bypass line even after the DSP recovers.
-                if (! std::isfinite (slice[(size_t)c][i])) slice[(size_t)c][i] = 0.0f;
-                dryLatencyScratch[(size_t)c * (size_t)n + (size_t)i]
-                    = latencyAlignedBypass.delayDry(c, slice[(size_t)c][i]);
-            }
-
-        realtimeAutotune.processChannels(slice.data(), channels, n, intrinsicLatencyScratch.data());
-        processDoubler(buffer, offset, n);
-        outputLatencyCompensator.processChannels(slice.data(), channels, n, intrinsicLatencyScratch.data());
-        // Reference piano is generated locally, so it needs exactly the host
-        // budget, NOT the voice's pitch-dependent delay-tap compensation.
-        processReferenceTone(buffer, offset, n);
-
-        // Wet and dry now occupy the same host-aligned timeline. Do this after
-        // all effects so bypass also suppresses the doubler and preview tone.
-        for (int i = 0; i < n; ++i)
-        {
-            latencyAlignedBypass.advance();
-            for (int c = 0; c < channels; ++c)
-                slice[(size_t)c][i] = latencyAlignedBypass.mix(
-                    slice[(size_t)c][i],
-                    dryLatencyScratch[(size_t)c * (size_t)n + (size_t)i]);
-        }
+        reportedLatency = engine.getLatencySamples();
+        pendingLatency.store(reportedLatency);
+        triggerAsyncUpdate();
     }
 
-    const float detected = realtimeAutotune.getDetectedMidi();
-    const float target = (float)realtimeAutotune.getTargetMidi();
-    const float correction = realtimeAutotune.getCorrectionSemitones();
-    const float confidence = realtimeAutotune.getConfidence();
-    const float hz = detected >= 0.0f
-        ? settings.referenceHz * std::exp2((detected - 69.0f) / 12.0f) : 0.0f;
-    detectedMidiNote.store(detected >= 0.0f ? detected : 0.0f, std::memory_order_relaxed);
-    detectedHz.store(hz, std::memory_order_relaxed);
-    pitchConfidence.store(confidence, std::memory_order_relaxed);
-    targetMidiNote.store(target >= 0.0f ? target : (detected >= 0.0f ? detected : 69.0f), std::memory_order_relaxed);
-    smoothedTargetMidiNote.store(target >= 0.0f ? target : 69.0f, std::memory_order_relaxed);
-    correctionCents.store(correction * 100.0f, std::memory_order_relaxed);
-    effectiveRetuneTimeMs.store(settings.retuneMs, std::memory_order_relaxed);
+    // If the piano matches the selected named scale, use its full interval definition
+    // (including quarter tones). A changed piano mask is an explicit 12-TET custom scale.
+    const auto expectedMask = humtune::ScaleQuantizer::approximateMask(scale, root);
+    if (anyKeyOn && keyMask != expectedMask)
+        engine.setCustomScale(keyMask);
+    else
+        engine.clearCustomScale();
 
-}
+    // Input gain
+    float inGain = juce::Decibels::decibelsToGain(inGainDb);
+    buffer.applyGain(inGain);
 
-void MetaTuneInspiredAudioProcessor::processReferenceTone(juce::AudioBuffer<float>& buffer, int startSample, int samples) noexcept
-{
-    const int channels = juce::jmin(2, buffer.getNumChannels());
-    if (channels <= 0 || samples <= 0)
-        return;
-
-    const bool globallyBypassed = globalBypassParameter != nullptr
-        && globalBypassParameter->load(std::memory_order_relaxed) > 0.5f;
-    const int note = globallyBypassed ? -1 : tonePreviewMidiNote.load(std::memory_order_relaxed);
-    const float referenceHz = pitchReferenceParameter != nullptr
-        ? pitchReferenceParameter->load(std::memory_order_relaxed) : 440.0f;
-    const float targetFrequency = note >= 0
-        ? juce::jlimit(20.0f, 2000.0f, referenceHz * std::exp2(((float)note - 69.0f) / 12.0f))
-        : referenceToneFrequencyHz;
-    const float volume = toneVolumeParameter != nullptr
-        ? juce::jlimit(0.0f, 100.0f, toneVolumeParameter->load(std::memory_order_relaxed)) / 100.0f
-        : 0.65f;
-    // Key-up must actually release the tone. Keep phase moving during release and
-    // slew pitch when moving between piano keys to avoid a waveform discontinuity.
-    const float targetAmplitude = note >= 0 ? 0.16f * volume : 0.0f;
-    const float attackAlpha = 1.0f - std::exp(-1.0f / (float)(currentSampleRate * 0.004));
-    const float releaseAlpha = 1.0f - std::exp(-1.0f / (float)(currentSampleRate * 0.028));
-    const float frequencyAlpha = 1.0f - std::exp(-1.0f / (float)(currentSampleRate * 0.008));
-    std::array<float*, 2> outputPointers { buffer.getWritePointer(0, startSample), nullptr };
-    if (channels > 1)
-        outputPointers[1] = buffer.getWritePointer(1, startSample);
-    for (int i = 0; i < samples; ++i)
+    // Measure input level
     {
-        if (note >= 0)
-            referenceToneFrequencyHz += (targetFrequency - referenceToneFrequencyHz) * frequencyAlpha;
-        const float alpha = targetAmplitude > referenceToneAmplitude ? attackAlpha : releaseAlpha;
-        referenceToneAmplitude += (targetAmplitude - referenceToneAmplitude) * alpha;
-        if (referenceToneAmplitude < 1.0e-6f && targetAmplitude == 0.0f)
-            referenceToneAmplitude = 0.0f;
-        const float tone = referenceToneAmplitude > 1.0e-6f
-            ? std::sin(referenceTonePhase) * referenceToneAmplitude : 0.0f;
-        const float delayedTone = referenceToneDelay.processSample(tone);
-        for (int channel = 0; channel < channels; ++channel)
-            outputPointers[(size_t)channel][i] += delayedTone;
-        referenceTonePhase += juce::MathConstants<float>::twoPi * referenceToneFrequencyHz
-                            / (float)currentSampleRate;
-        if (referenceTonePhase >= juce::MathConstants<float>::twoPi)
-            referenceTonePhase -= juce::MathConstants<float>::twoPi;
+        float peak = 0.0f;
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            peak = std::max(peak, buffer.getMagnitude(ch, 0, buffer.getNumSamples()));
+        inputLevel.store(peak);
+    }
+
+    // Process autotune
+    engine.process(buffer);
+
+    // Output gain
+    float outGain = juce::Decibels::decibelsToGain(outGainDb);
+    buffer.applyGain(outGain);
+
+    // Measure output level
+    {
+        float peak = 0.0f;
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            peak = std::max(peak, buffer.getMagnitude(ch, 0, buffer.getNumSamples()));
+        outputLevel.store(peak);
     }
 }
 
-void MetaTuneInspiredAudioProcessor::processDoubler(juce::AudioBuffer<float>& buffer, int startSample, int samples) noexcept
+// ---------------------------------------------------------------------------
+// Presets
+// ---------------------------------------------------------------------------
+int HumHouseVocalTuneProcessor::getNumPrograms()
 {
-    const int channels = juce::jmin(2, buffer.getNumChannels());
-    if (channels <= 0 || samples <= 0)
+    return static_cast<int>(getPresets().size());
+}
+
+void HumHouseVocalTuneProcessor::setCurrentProgram (int index)
+{
+    const auto& presets = getPresets();
+    if (index < 0 || index >= static_cast<int>(presets.size()))
         return;
 
-    const bool globallyBypassed = globalBypassParameter != nullptr
-        && globalBypassParameter->load(std::memory_order_relaxed) > 0.5f;
-    const float targetWidth = !globallyBypassed && doublerWidthParameter != nullptr
-        ? juce::jlimit(0.0f, 1.0f, doublerWidthParameter->load(std::memory_order_relaxed) / 100.0f)
-        : (globallyBypassed ? 0.0f : 0.46f);
-    const float targetMix = !globallyBypassed && doublerMixParameter != nullptr
-        ? juce::jlimit(0.0f, 1.0f, doublerMixParameter->load(std::memory_order_relaxed) / 100.0f)
-        : (globallyBypassed ? 0.0f : 0.49f);
-    const float parameterSmoothing = 1.0f - std::exp(-1.0f / (float)(currentSampleRate * 0.008));
-    const float centreDelay = (float)currentSampleRate * 0.014f;
-    const float lfoIncrement = juce::MathConstants<float>::twoPi * 0.21f / (float)currentSampleRate;
-    auto* left = buffer.getWritePointer(0, startSample);
-    auto* right = channels > 1 ? buffer.getWritePointer(1, startSample) : nullptr;
-    auto readDelay = [this](int channel, float delaySamples) noexcept -> float
+    // Set after broadcasting preset controls so the selector reflects this profile.
+    currentPreset.store(-1, std::memory_order_relaxed);
+    const auto& p = presets[static_cast<size_t>(index)];
+
+    auto set = [&](const juce::String& id, float val)
     {
-        float readPosition = (float)doublerWritePosition - delaySamples;
-        if (readPosition < 0.0f) readPosition += (float)doublerDelayLineSize;
-        if (readPosition >= (float)doublerDelayLineSize) readPosition -= (float)doublerDelayLineSize;
-        const int i1 = (int)readPosition;
-        const int i0 = (i1 - 1 + doublerDelayLineSize) % doublerDelayLineSize;
-        const int i2 = (i1 + 1) % doublerDelayLineSize;
-        const int i3 = (i1 + 2) % doublerDelayLineSize;
-        const float t = readPosition - (float)i1;
-        const auto& line = doublerDelayLine[(size_t)channel];
-        const float p0 = line[(size_t)i0], p1 = line[(size_t)i1];
-        const float p2 = line[(size_t)i2], p3 = line[(size_t)i3];
-        const float a = -0.5f * p0 + 1.5f * p1 - 1.5f * p2 + 0.5f * p3;
-        const float b = p0 - 2.5f * p1 + 2.0f * p2 - 0.5f * p3;
-        const float c = -0.5f * p0 + 0.5f * p2;
-        return ((a * t + b) * t + c) * t + p1;
+        if (auto* param = apvts.getParameter(id))
+            param->setValueNotifyingHost(param->convertTo0to1(val));
     };
 
-    for (int i = 0; i < samples; ++i)
+    set("retune",          1.0f - p.speed);
+    set("humanize",        p.humanize);
+    set("scaleType",       static_cast<float>(p.scaleType));
+    set("scaleExtension",  0.0f);
+    applyScaleToKeys(p.scaleType, static_cast<int>(*apvts.getRawParameterValue("rootNote")));
+    set("noteStabilizer",  p.stabilizer ? 1.0f : 0.0f);
+    set("formantPreserve", p.formantPreserve ? 1.0f : 0.0f);
+    if (p.range >= 0)
+        set("range",       static_cast<float>(p.range));
+    // Most legacy programs intentionally leave Low Latency alone. Studio Max (Standard)
+    // explicitly selects the quality-first Standard path; Low Latency is opt-in.
+    if (p.lowLatencyMode >= 0)
+        set("lowLatencyMode", p.lowLatencyMode != 0 ? 1.0f : 0.0f);
+    // These controls were added after the original factory profiles. A preset
+    // must not unexpectedly inherit a prior preset's Glide or Flex-Tune state.
+    set("flexTune", 0.0f);
+    set("glide", 0.0f);
+    set("formantShift", 0.0f);
+    currentPreset.store(index, std::memory_order_relaxed);
+}
+
+humtune::KeyEstimator::Estimate HumHouseVocalTuneProcessor::applyAutoKeyEstimate()
+{
+    const auto estimate = engine.getAutoKeyEstimate();
+    if (!estimate.valid)
+        return estimate;
+
+    auto set = [this](const juce::String& id, float value)
     {
-        // Smooth macro movement and bypass transitions sample-by-sample to avoid
-        // zipper noise when dragging the Doubler dot during playback.
-        smoothedDoublerWidth += (targetWidth - smoothedDoublerWidth) * parameterSmoothing;
-        smoothedDoublerMix += (targetMix - smoothedDoublerMix) * parameterSmoothing;
-        const float width = smoothedDoublerWidth;
-        const float mix = smoothedDoublerMix;
-        const float depth = (float)currentSampleRate * (0.0005f + 0.0025f * width);
-        const float inL = left[i];
-        const float inR = channels > 1 ? right[i] : inL;
-        doublerDelayLine[0][(size_t)doublerWritePosition] = inL;
-        if (channels > 1)
-            doublerDelayLine[1][(size_t)doublerWritePosition] = inR;
+        if (auto* parameter = apvts.getParameter(id))
+            parameter->setValueNotifyingHost(parameter->convertTo0to1(value));
+    };
 
-        const float lfo = std::sin(doublerLfoPhase);
-        const float delayL = centreDelay + lfo * depth;
-        const float delayR = centreDelay - lfo * depth;
-        const float delayedL = readDelay(0, delayL);
-        const float delayedR = channels > 1 ? readDelay(1, delayR) : readDelay(0, delayR);
+    // Auto-key intentionally selects the familiar 12-TET Major/Minor modes only;
+    // microtonal or custom-scale choices remain user-controlled when this button is not used.
+    set("rootNote", static_cast<float>(estimate.root));
+    set("scaleType", estimate.minor ? 1.0f : 0.0f);
+    set("scaleExtension", 0.0f);
+    applyScaleToKeys(estimate.minor ? 1 : 0, estimate.root);
+    return estimate;
+}
 
-        // Width acts in the mid/side domain; wet mix blends in decorrelated, gently
-        // modulated voices rather than merely drawing the two Doubler rings.
-        const float mid = 0.5f * (inL + inR);
-        const float side = 0.5f * (inL - inR) * (1.0f + 0.75f * width * mix);
-        const float wideL = mid + side;
-        const float wideR = mid - side;
-        constexpr float doubledVoiceBlend = 0.45f;
-        const float wetL = wideL * (1.0f - doubledVoiceBlend) + delayedL * doubledVoiceBlend;
-        const float wetR = wideR * (1.0f - doubledVoiceBlend) + delayedR * doubledVoiceBlend;
-        left[i] = wideL * (1.0f - mix) + wetL * mix;
-        if (channels > 1)
-            right[i] = wideR * (1.0f - mix) + wetR * mix;
+void HumHouseVocalTuneProcessor::applyScaleToKeys (int scaleType, int root)
+{
+    const auto mask = humtune::ScaleQuantizer::approximateMask(scaleType, root);
+    for (int i = 0; i < 12; ++i)
+        if (auto* param = apvts.getParameter("note" + juce::String(i)))
+            param->setValueNotifyingHost(mask[static_cast<size_t>(i)] ? 1.0f : 0.0f);
+}
 
-        doublerLfoPhase += lfoIncrement;
-        if (doublerLfoPhase >= juce::MathConstants<float>::twoPi)
-            doublerLfoPhase -= juce::MathConstants<float>::twoPi;
-        doublerWritePosition = (doublerWritePosition + 1) % doublerDelayLineSize;
+const juce::String HumHouseVocalTuneProcessor::getProgramName (int index)
+{
+    const auto& presets = getPresets();
+    if (index < 0 || index >= static_cast<int>(presets.size()))
+        return {};
+    return presets[static_cast<size_t>(index)].name;
+}
+
+// ---------------------------------------------------------------------------
+// State save / restore
+// ---------------------------------------------------------------------------
+void HumHouseVocalTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    auto state = apvts.copyState();
+    // Parameter values are host-managed; program identity is editor metadata.
+    // Store it outside the parameter list to preserve existing automation IDs.
+    state.setProperty("factoryProgramIndex", currentPreset.load(std::memory_order_relaxed), nullptr);
+    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    copyXmlToBinary(*xml, destData);
+}
+
+void HumHouseVocalTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
+    if (xml && xml->hasTagName(apvts.state.getType()))
+    {
+        auto restored = juce::ValueTree::fromXml(*xml);
+        // Older projects did not save program identity. Avoid falsely showing
+        // Studio Max for an arbitrary restored collection of parameter values.
+        const int index = static_cast<int>(restored.getProperty("factoryProgramIndex", -1));
+        apvts.replaceState(restored);
+        // Restore identity last: parameter listeners may mark the replacement
+        // custom while the host applies its saved values.
+        currentPreset.store(index >= 0 && index < getNumPrograms() ? index : -1,
+                            std::memory_order_relaxed);
     }
 }
 
-void MetaTuneInspiredAudioProcessor::getStateInformation(juce::MemoryBlock& dest)
+// ---------------------------------------------------------------------------
+// Editor factory
+// ---------------------------------------------------------------------------
+juce::AudioProcessorEditor* HumHouseVocalTuneProcessor::createEditor()
 {
-    auto state = parameters.copyState();
-    std::unique_ptr<juce::XmlElement> xml(state.createXml());
-    copyXmlToBinary(*xml, dest);
+    return new HumHouseVocalTuneEditor(*this);
 }
 
-void MetaTuneInspiredAudioProcessor::setStateInformation(const void* data, int size)
-{
-    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, size));
-    if (xml && xml->hasTagName(parameters.state.getType()))
-        parameters.replaceState(juce::ValueTree::fromXml(*xml));
-}
-
-juce::AudioProcessorEditor* MetaTuneInspiredAudioProcessor::createEditor()
-{
-    return new MetaTuneInspiredAudioProcessorEditor(*this);
-}
-
+// ---------------------------------------------------------------------------
+// Plugin instantiation
+// ---------------------------------------------------------------------------
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
-    return new MetaTuneInspiredAudioProcessor();
+    return new HumHouseVocalTuneProcessor();
 }
