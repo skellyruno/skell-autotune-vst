@@ -114,7 +114,7 @@ FetchContent_MakeAvailable(JUCE)
 # SkellCore provides the hub-free, same-session Key/Scale/A4 receiver.
 # DSP-only builds above remain completely independent of this dependency.
 FetchContent_Declare(SkellCoreShared
-    GIT_REPOSITORY https://github.com/skellyruno/skell-vst-template.git
+    GIT_REPOSITORY https://github.com/skellyruno/skellcore-vst-template.git
     GIT_TAG 4c499c58cb3b2791eed2d5dcef6d8d543fcaea8d
     SOURCE_SUBDIR SkellCore)
 FetchContent_MakeAvailable(SkellCoreShared)
