@@ -111,6 +111,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(JUCE)
 
+# SkellCore provides the hub-free, same-session Key/Scale/A4 receiver.
+# DSP-only builds above remain completely independent of this dependency.
+FetchContent_Declare(SkellCoreShared
+    GIT_REPOSITORY https://github.com/skellyruno/skell-vst-template.git
+    GIT_TAG d3bbdd0248bd9e33d2b9f3aa1a8caf7443d02172
+    SOURCE_SUBDIR SkellCore)
+FetchContent_MakeAvailable(SkellCoreShared)
+
 # ---------------------------------------------------------------------------
 # Plugin target
 # ---------------------------------------------------------------------------
@@ -155,6 +163,7 @@ target_link_libraries(HumHouseVocalTune
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
+        SkellCore::UI
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
