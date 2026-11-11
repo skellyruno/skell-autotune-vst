@@ -135,12 +135,62 @@ HumHouseVocalTuneProcessor::HumHouseVocalTuneProcessor()
 {
     cacheParameterRefs();
     registerPresetTracking(true);
+    // No Python, Hub, extra application or new editor control.
+    skellKeyLink_.join();
+    startTimerHz(5);
 }
 
 HumHouseVocalTuneProcessor::~HumHouseVocalTuneProcessor()
 {
+    stopTimer();
+    skellKeyLink_.leave();
     cancelPendingUpdate();
     registerPresetTracking(false);
+}
+
+void HumHouseVocalTuneProcessor::timerCallback()
+{
+    if (!skellKeyLink_.requested())
+        skellKeyLink_.join();
+    skellcore::world::MusicalTuning tuning;
+    std::uint32_t version = 0;
+    if (!skellKeyLink_.latestMusicalTuning(tuning, version)) {
+        lastAppliedSkellKey_ = 0;
+        return;
+    }
+    const auto contents = skellcore::world::packMusicalTuning(tuning, 1);
+    if (contents == lastAppliedSkellKey_) return;
+
+    // The piano is itself automatable: respect a custom note selection.
+    // If the user left its keys matching the previous named scale, update
+    // them to the newly received named scale too.
+    const int oldRoot = int(parameterRefs.rootNote->load(std::memory_order_relaxed));
+    const int extension = int(parameterRefs.scaleExtension->load(std::memory_order_relaxed));
+    const int oldScale = extension > 0 ? extension + 2 :
+        int(parameterRefs.scaleType->load(std::memory_order_relaxed));
+    const auto expected = humtune::ScaleQuantizer::approximateMask(oldScale, oldRoot);
+    bool manualPiano = false;
+    for (int i=0; i<12; ++i)
+        manualPiano |= (parameterRefs.notes[size_t(i)]->load(std::memory_order_relaxed) > 0.5f)
+                     != expected[size_t(i)];
+
+    const auto setIfChanged = [this](const char* id, float value, float epsilon) {
+        auto* p = apvts.getParameter(id);
+        const auto* current = apvts.getRawParameterValue(id);
+        if (p && current && std::abs(current->load(std::memory_order_relaxed)-value)>epsilon) {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(value));
+            p->endChangeGesture();
+        }
+    };
+    setIfChanged("rootNote", float(tuning.root), 0.01f);
+    setIfChanged("scaleType", float(tuning.mode), 0.01f);
+    setIfChanged("scaleExtension", 0.0f, 0.01f);
+    setIfChanged("referenceFreq",
+                 float(std::round(tuning.a4Hz()*10.0)/10.0), 0.051f);
+    if (!manualPiano)
+        applyScaleToKeys(tuning.mode, tuning.root);
+    lastAppliedSkellKey_ = contents;
 }
 
 void HumHouseVocalTuneProcessor::parameterChanged(const juce::String&, float)

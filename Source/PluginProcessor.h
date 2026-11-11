@@ -2,12 +2,14 @@
 
 #include "AutoTuneEngine.h"
 #include <JuceHeader.h>
+#include <SkellCore/WorldLink.h>
 #include <array>
 #include <atomic>
 
 class HumHouseVocalTuneProcessor : public juce::AudioProcessor,
                                      private juce::AsyncUpdater,
-                                     private juce::AudioProcessorValueTreeState::Listener
+                                     private juce::AudioProcessorValueTreeState::Listener,
+                                     private juce::Timer
 {
 public:
     HumHouseVocalTuneProcessor();
@@ -75,6 +77,7 @@ public:
     }
 
 private:
+    void timerCallback() override; // message thread, never processBlock
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     void cacheParameterRefs();
     void parameterChanged(const juce::String&, float) override;
@@ -109,6 +112,9 @@ private:
     int reportedLatency = 0;
 
     juce::AudioProcessorValueTreeState apvts;
+    // Receiver is always available, but sender must click SEND TO TUNE.
+    skellcore::world::WorldLink skellKeyLink_{"skell.tune", "SkellyTune"};
+    std::uint64_t lastAppliedSkellKey_ = 0;
     humtune::AutoTuneEngine engine;
 
     std::atomic<float> inputLevel  { 0.0f };

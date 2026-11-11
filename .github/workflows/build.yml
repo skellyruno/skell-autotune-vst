@@ -17,7 +17,7 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Configure
         run: cmake -S . -B build -A x64
@@ -30,13 +30,15 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifacts
           $vst3 = "build\HumHouseVocalTune_artefacts\Release\VST3\SkellyTune.vst3"
-          Compress-Archive -Path $vst3 -DestinationPath "artifacts\SkellyTune-Windows-x64.zip"
+          if (-not (Test-Path $vst3)) { throw "SkellyTune VST3 bundle missing: $vst3" }
+          Compress-Archive -Path $vst3 -DestinationPath "artifacts\SkellyTune-Windows-x64.zip" -Force
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: SkellyTune-Windows-x64
           path: artifacts/*
+          retention-days: 7
 
       # ---------- Release assets ----------
       - name: Attach release assets
