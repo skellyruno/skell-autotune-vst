@@ -95,11 +95,22 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::AutoTuneEngine::kNumRanges - 1,
         humtune::AutoTuneEngine::kDefaultRange));
 
+    // Default ON: selected high-voice ranges must not silently discard the
+    // fundamental of a low/mid voice. Users can turn it OFF for the original
+    // shorter transport delay on truly high voices. Existing IDs are untouched.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"rangeProtection", 1}, "Catch Low Notes", true));
+
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"enabled", 1}, "Enabled", true));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"lowLatencyMode", 1}, "Low Latency (Experimental)", false));
+
+    // EXPERIMENTAL: Low Latency re-measures pitch every ~2 ms instead of ~4 ms. Only has an effect
+    // while Low Latency is on. Not shown in the editor; toggle it from the host's parameter list.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"lowLatencyFastHop", 1}, "Low Latency Fast Hop (Experimental)", false));
 
     // Hidden from the current editor but retained so older sessions/automation remain valid.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -135,7 +146,6 @@ HumHouseVocalTuneProcessor::HumHouseVocalTuneProcessor()
 {
     cacheParameterRefs();
     registerPresetTracking(true);
-    // No Python, Hub, extra application or new editor control.
     skellKeyLink_.join();
     startTimerHz(5);
 }
@@ -193,11 +203,17 @@ void HumHouseVocalTuneProcessor::timerCallback()
     lastAppliedSkellKey_ = contents;
 }
 
-void HumHouseVocalTuneProcessor::parameterChanged(const juce::String&, float)
+void HumHouseVocalTuneProcessor::parameterChanged(const juce::String& id, float)
 {
     // Called from either the host's automation thread or a UI thread.
     // An atomic write is safe and does not allocate or block the audio callback.
     currentPreset.store(-1, std::memory_order_relaxed);
+    if (id == "rootNote" || id == "scaleType" || id == "scaleExtension")
+        customScaleRequested.store(false, std::memory_order_release);
+    else if (id.length() >= 5 && id[0] == 'n' && id[1] == 'o'
+             && id[2] == 't' && id[3] == 'e' && id[4] >= '0' && id[4] <= '9'
+             && !syncingNamedScaleKeys.load(std::memory_order_acquire))
+        customScaleRequested.store(true, std::memory_order_release);
 }
 
 void HumHouseVocalTuneProcessor::registerPresetTracking(bool add)
@@ -205,7 +221,7 @@ void HumHouseVocalTuneProcessor::registerPresetTracking(bool add)
     static constexpr const char* kParameters[] = {
         "retune", "humanize", "flexTune", "glide", "rootNote", "scaleType",
         "scaleExtension", "referenceFreq", "noteStabilizer", "formantPreserve",
-        "formantShift", "range", "enabled", "lowLatencyMode", "inputGain", "outputGain"
+        "formantShift", "range", "rangeProtection", "enabled", "lowLatencyMode", "lowLatencyFastHop", "inputGain", "outputGain"
     };
     for (const auto* id : kParameters)
     {
@@ -234,8 +250,10 @@ void HumHouseVocalTuneProcessor::cacheParameterRefs()
     parameterRefs.formantPreserve = apvts.getRawParameterValue("formantPreserve");
     parameterRefs.formantShift = apvts.getRawParameterValue("formantShift");
     parameterRefs.range = apvts.getRawParameterValue("range");
+    parameterRefs.rangeProtection = apvts.getRawParameterValue("rangeProtection");
     parameterRefs.enabled = apvts.getRawParameterValue("enabled");
     parameterRefs.lowLatencyMode = apvts.getRawParameterValue("lowLatencyMode");
+    parameterRefs.lowLatencyFastHop = apvts.getRawParameterValue("lowLatencyFastHop");
     parameterRefs.inputGain = apvts.getRawParameterValue("inputGain");
     parameterRefs.outputGain = apvts.getRawParameterValue("outputGain");
 
@@ -251,9 +269,13 @@ void HumHouseVocalTuneProcessor::cacheParameterRefs()
 // ---------------------------------------------------------------------------
 void HumHouseVocalTuneProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+    engine.setRangeProtection(parameterRefs.rangeProtection->load(std::memory_order_relaxed) > 0.5f);
     engine.setVoiceRange(static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed)));
     engine.setLowLatencyMode(parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f);
+    engine.setLowLatencyFastHop(parameterRefs.lowLatencyFastHop->load(std::memory_order_relaxed) > 0.5f);
     engine.prepare(sampleRate, samplesPerBlock);
+    inputGainRamp.prepare(sampleRate,juce::Decibels::decibelsToGain(parameterRefs.inputGain->load(std::memory_order_relaxed)));
+    outputGainRamp.prepare(sampleRate,juce::Decibels::decibelsToGain(parameterRefs.outputGain->load(std::memory_order_relaxed)));
     reportedLatency = engine.getLatencySamples();
     setLatencySamples(reportedLatency);
 
@@ -280,8 +302,10 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const bool formant     = parameterRefs.formantPreserve->load(std::memory_order_relaxed) > 0.5f;
     const float formantShift = parameterRefs.formantShift->load(std::memory_order_relaxed);
     const int range        = static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed));
+    const bool rangeProtection = parameterRefs.rangeProtection->load(std::memory_order_relaxed) > 0.5f;
     const bool on          = parameterRefs.enabled->load(std::memory_order_relaxed) > 0.5f;
     const bool lowLatency  = parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f;
+    const bool fastHop     = parameterRefs.lowLatencyFastHop->load(std::memory_order_relaxed) > 0.5f;
     const float inGainDb   = parameterRefs.inputGain->load(std::memory_order_relaxed);
     const float outGainDb  = parameterRefs.outputGain->load(std::memory_order_relaxed);
 
@@ -305,8 +329,10 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     engine.setNoteStabilizer(stab);
     engine.setFormantPreserve(formant);
     engine.setFormantShiftSemitones(formantShift);
+    engine.setRangeProtection(rangeProtection);
     engine.setVoiceRange(range);
     engine.setLowLatencyMode(lowLatency);
+    engine.setLowLatencyFastHop(fastHop);
     engine.setEnabled(on);
 
     // The delay depends on the Voice Range: tell the host when it changes
@@ -317,17 +343,19 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         triggerAsyncUpdate();
     }
 
-    // If the piano matches the selected named scale, use its full interval definition
-    // (including quarter tones). A changed piano mask is an explicit 12-TET custom scale.
+    // Host key/scale automation must work even while the editor is closed. Only
+    // an explicit piano-key edit owns the custom mask. A stale keyboard projection
+    // from the previous named key cannot silently override the new target scale.
     const auto expectedMask = humtune::ScaleQuantizer::approximateMask(scale, root);
-    if (anyKeyOn && keyMask != expectedMask)
+    if (customScaleRequested.load(std::memory_order_acquire) && anyKeyOn && keyMask != expectedMask)
         engine.setCustomScale(keyMask);
     else
         engine.clearCustomScale();
 
     // Input gain
     float inGain = juce::Decibels::decibelsToGain(inGainDb);
-    buffer.applyGain(inGain);
+    inputGainRamp.setTarget(inGain);
+    inputGainRamp.process(buffer.getArrayOfWritePointers(),buffer.getNumChannels(),buffer.getNumSamples());
 
     // Measure input level
     {
@@ -342,7 +370,8 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     // Output gain
     float outGain = juce::Decibels::decibelsToGain(outGainDb);
-    buffer.applyGain(outGain);
+    outputGainRamp.setTarget(outGain);
+    outputGainRamp.process(buffer.getArrayOfWritePointers(),buffer.getNumChannels(),buffer.getNumSamples());
 
     // Measure output level
     {
@@ -421,10 +450,13 @@ humtune::KeyEstimator::Estimate HumHouseVocalTuneProcessor::applyAutoKeyEstimate
 
 void HumHouseVocalTuneProcessor::applyScaleToKeys (int scaleType, int root)
 {
+    syncingNamedScaleKeys.store(true, std::memory_order_release);
+    customScaleRequested.store(false, std::memory_order_release);
     const auto mask = humtune::ScaleQuantizer::approximateMask(scaleType, root);
     for (int i = 0; i < 12; ++i)
         if (auto* param = apvts.getParameter("note" + juce::String(i)))
             param->setValueNotifyingHost(mask[static_cast<size_t>(i)] ? 1.0f : 0.0f);
+    syncingNamedScaleKeys.store(false, std::memory_order_release);
 }
 
 const juce::String HumHouseVocalTuneProcessor::getProgramName (int index)
@@ -441,9 +473,12 @@ const juce::String HumHouseVocalTuneProcessor::getProgramName (int index)
 void HumHouseVocalTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
+    state.setProperty("appearanceTheme",getUiTheme(),nullptr);
+    state.setProperty("reducedMotion",getReducedMotion(),nullptr);
     // Parameter values are host-managed; program identity is editor metadata.
     // Store it outside the parameter list to preserve existing automation IDs.
     state.setProperty("factoryProgramIndex", currentPreset.load(std::memory_order_relaxed), nullptr);
+    state.setProperty("customScaleEnabled", customScaleRequested.load(std::memory_order_acquire), nullptr);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
 }
@@ -457,7 +492,22 @@ void HumHouseVocalTuneProcessor::setStateInformation (const void* data, int size
         // Older projects did not save program identity. Avoid falsely showing
         // Studio Max for an arbitrary restored collection of parameter values.
         const int index = static_cast<int>(restored.getProperty("factoryProgramIndex", -1));
+        setUiTheme(static_cast<int>(restored.getProperty("appearanceTheme",0)));
+        setReducedMotion(static_cast<bool>(restored.getProperty("reducedMotion",false)));
         apvts.replaceState(restored);
+        // Old sessions inferred a custom mask from any mismatch. Retain that
+        // playback behavior. New sessions explicitly distinguish a manual piano
+        // mask from a stale display projection after editor-closed automation.
+        const int extension = static_cast<int>(parameterRefs.scaleExtension->load());
+        const int scale = extension > 0 ? extension + 2
+            : static_cast<int>(parameterRefs.scaleType->load());
+        const int root = static_cast<int>(parameterRefs.rootNote->load());
+        std::array<bool, 12> mask;
+        for (size_t i = 0; i < mask.size(); ++i)
+            mask[i] = parameterRefs.notes[i]->load() > 0.5f;
+        const bool legacyCustom = mask != humtune::ScaleQuantizer::approximateMask(scale, root);
+        customScaleRequested.store(static_cast<bool>(restored.getProperty("customScaleEnabled", legacyCustom)),
+                                   std::memory_order_release);
         // Restore identity last: parameter listeners may mark the replacement
         // custom while the host applies its saved values.
         currentPreset.store(index >= 0 && index < getNumPrograms() ? index : -1,
@@ -470,6 +520,13 @@ void HumHouseVocalTuneProcessor::setStateInformation (const void* data, int size
 // ---------------------------------------------------------------------------
 juce::AudioProcessorEditor* HumHouseVocalTuneProcessor::createEditor()
 {
+    if (!customScaleRequested.load(std::memory_order_acquire))
+    {
+        const int extension = static_cast<int>(parameterRefs.scaleExtension->load());
+        applyScaleToKeys(extension > 0 ? extension + 2
+            : static_cast<int>(parameterRefs.scaleType->load()),
+            static_cast<int>(parameterRefs.rootNote->load()));
+    }
     return new HumHouseVocalTuneEditor(*this);
 }
 

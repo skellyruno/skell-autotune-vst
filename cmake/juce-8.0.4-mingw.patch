@@ -1,0 +1,107 @@
+--- a/modules/juce_audio_basics/buffers/juce_AudioSampleBuffer.h
++++ b/modules/juce_audio_basics/buffers/juce_AudioSampleBuffer.h
+@@ -1207,7 +1207,7 @@
+         jassert (size >= 0);
+ 
+         auto channelListSize = (size_t) (numChannels + 1) * sizeof (Type*);
+-        auto requiredSampleAlignment = std::alignment_of_v<Type>;
++        auto requiredSampleAlignment = alignof(Type);
+         size_t alignmentOverflow = channelListSize % requiredSampleAlignment;
+ 
+         if (alignmentOverflow != 0)
+--- a/modules/juce_audio_processors/processors/juce_AudioPluginInstance.h
++++ b/modules/juce_audio_processors/processors/juce_AudioPluginInstance.h
+@@ -170,7 +170,7 @@
+     AudioPluginInstance() = default;
+     AudioPluginInstance (const BusesProperties& ioLayouts) : AudioProcessor (ioLayouts) {}
+     template <size_t numLayouts>
+-    AudioPluginInstance (const short channelLayoutList[numLayouts][2]) : AudioProcessor (channelLayoutList) {}
++    AudioPluginInstance (const short (&channelLayoutList)[numLayouts][2]) : AudioProcessor (channelLayoutList) {}
+ 
+ private:
+     // It's not safe to add a plain AudioProcessorParameter to an AudioPluginInstance.
+--- a/modules/juce_audio_processors/processors/juce_AudioProcessor.h
++++ b/modules/juce_audio_processors/processors/juce_AudioProcessor.h
+@@ -71,7 +71,11 @@
+         If your AudioProcessor supports multiple buses than use this constructor
+         to initialise the bus layouts and bus names of your plug-in.
+     */
+-    AudioProcessor (const BusesProperties& ioLayouts);
++    AudioProcessor (const BusesProperties& ioLayouts);
++
++    template <size_t numLayouts>
++    AudioProcessor (const short (&channelLayoutList)[numLayouts][2])
++        : AudioProcessor (busesPropertiesFromLayoutArray (layoutListToArray (channelLayoutList))) {}
+ 
+     /** Constructor for AudioProcessors which use layout maps
+         If your AudioProcessor uses layout maps then use this constructor.
+--- a/modules/juce_graphics/native/juce_Direct2DResources_windows.cpp
++++ b/modules/juce_graphics/native/juce_Direct2DResources_windows.cpp
+@@ -267,7 +267,7 @@
+ 
+         ComSmartPtr<IDXGIDevice> device;
+         JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wlanguage-extension-token")
+-        surface->GetDevice (__uuidof (device), (void**) device.resetAndGetPointerAddress());
++        surface->GetDevice (__uuidof (IDXGIDevice), (void**) device.resetAndGetPointerAddress());
+         JUCE_END_IGNORE_WARNINGS_GCC_LIKE
+ 
+         return findAdapter (adapters, device);
+@@ -442,7 +442,7 @@
+ 
+         ComSmartPtr<IDXGIDevice> device;
+         JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wlanguage-extension-token")
+-        chain->GetDevice (__uuidof (device), (void**) device.resetAndGetPointerAddress());
++        chain->GetDevice (__uuidof (IDXGIDevice), (void**) device.resetAndGetPointerAddress());
+         JUCE_END_IGNORE_WARNINGS_GCC_LIKE
+ 
+         SharedResourcePointer<DirectX> directX;
+@@ -495,7 +495,7 @@
+ 
+         ComSmartPtr<IDXGISurface> surface;
+         JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wlanguage-extension-token")
+-        if (const auto hr = chain->GetBuffer (0, __uuidof (surface), reinterpret_cast<void**> (surface.resetAndGetPointerAddress())); FAILED (hr))
++        if (const auto hr = chain->GetBuffer (0, __uuidof (IDXGISurface), reinterpret_cast<void**> (surface.resetAndGetPointerAddress())); FAILED (hr))
+             return nullptr;
+         JUCE_END_IGNORE_WARNINGS_GCC_LIKE
+ 
+--- a/modules/juce_gui_basics/native/accessibility/juce_UIATextProvider_windows.h
++++ b/modules/juce_gui_basics/native/accessibility/juce_UIATextProvider_windows.h
+@@ -327,12 +327,12 @@
+                         auto caretPos = [&]
+                         {
+                             if (cursorPos == 0)
+-                                return CaretPosition_BeginningOfLine;
++                                return 2;
+ 
+                             if (cursorPos == textInterface.getTotalNumCharacters())
+-                                return CaretPosition_EndOfLine;
+-
+-                            return CaretPosition_Unknown;
++                                return 1;
++
++                            return 0;
+                         }();
+ 
+                         VariantHelpers::setInt (caretPos, pRetVal);
+--- a/modules/juce_audio_formats/codecs/juce_WindowsMediaAudioFormat.cpp
++++ b/modules/juce_audio_formats/codecs/juce_WindowsMediaAudioFormat.cpp
+@@ -32,6 +32,8 @@
+   ==============================================================================
+ */
+ 
++#include <nserror.h>
++
+ namespace juce
+ {
+ 
+--- a/extras/Build/juceaide/CMakeLists.txt
++++ b/extras/Build/juceaide/CMakeLists.txt
+@@ -174,3 +174,8 @@
+ 
+     message(STATUS "Finished setting up juceaide")
+ endif()
++
++if(JUCE_BUILD_HELPER_TOOLS AND MINGW)
++    include("${CMAKE_CURRENT_LIST_DIR}/SkellyTuneMinGW.cmake")
++    skellytune_configure_mingw_target(juceaide)
++endif()

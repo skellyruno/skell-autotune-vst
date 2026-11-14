@@ -7,6 +7,8 @@
 #include "KeyEstimator.h"
 #include "TargetGlide.h"
 #include "NoteTransition.h"
+#include "OnsetReentryGuard.h"
+#include "SteadyNoteForecast.h"
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
@@ -45,6 +47,8 @@ public:
         detectorMono.assign(static_cast<size_t>(std::max(8192, blockSize)), 0.0f);
         for (auto& s : shifters)
             s.prepare(sampleRate, blockSize);
+        shifters[0].setPhaseMarkLink(&stereoPhaseMarks, true);
+        shifters[1].setPhaseMarkLink(&stereoPhaseMarks, false);
 
         // One fixed-capacity history ring for every supported voice range and
         // latency mode. A host automation change must never resize OR clear a
@@ -54,6 +58,7 @@ public:
             line.assign(static_cast<size_t>(dryCapacity), 0.0f);
         dryPos = 0;
         dryHistoryCount = 0;
+        resetStereoAnalysis();
 
         prepared = true;
         keyEstimator.reset();
@@ -121,11 +126,14 @@ public:
         pendingTargetSeconds = 0.0;
         onsetCandidateHops = 0;
         resetPitchMotionTracker();
+        resetStereoAnalysis();
         noteTransition.reset();
+        steadyNoteForecast.reset();
         samplesSinceHop = 0;
         hopSquaredSum = 0.0;
         previousHopRms = 0.0;
         recentOnsetSeconds = 0.0;
+        onsetReentryGuard.reset();
         traceSample = 0;
         hadPreviousReliablePitch = false;
         unvoicedHopCount = 0;
@@ -145,7 +153,8 @@ public:
         // detector history when re-enabling so it cannot resume with a time gap.
         if (prepared && on)
         {
-            detector.setMinFrequency(kRangeMinHz[rangeIndex]);
+            detector.setMinFrequency(getEffectiveMinFrequency());
+            detector.resetHistory();
             for (auto& s : shifters)
                 s.reset();
         }
@@ -154,12 +163,18 @@ public:
     // Experimental fixed-delay resynthesis. The existing period-bound path remains
     // the default; when enabled, the shifters use a fixed 1.9 ms processing budget.
     // This budget is not a claim about end-to-end DAW latency.
+    // EXPERIMENTAL: Low Latency re-measures pitch every ~2 ms instead of ~4 ms (default off, or build
+    // with -DSKELLYTUNE_LL_FAST_HOP=1). Takes effect only while Low Latency is on.
+    void setLowLatencyFastHop (bool on) noexcept { detector.setFastHop(on); }
+    bool getLowLatencyFastHop() const noexcept { return detector.getFastHop(); }
+
     void setLowLatencyMode (bool on)
     {
         if (lowLatencyMode == on)
             return;
 
         lowLatencyMode = on;
+        detector.setFastResponse(on);
         for (auto& s : shifters)
         {
             s.setLowLatencyExperiment(on);
@@ -175,6 +190,26 @@ public:
 
     // Chooses the voice range (index into kRangeMinHz). Safe to call from the audio thread
     // (no allocation). The latency changes, so the host must be told: see getLatencySamples().
+    // Quality-first guard for ranges whose lower bound is above the actual
+    // singer's fundamental. A 180 Hz Fastest floor cannot detect an E3 (165 Hz),
+    // and silently routes it to delayed dry audio. Catch Low Notes deliberately
+    // widens the analysis AND resynthesis period budget to 80 Hz. Standard mode
+    // therefore reports its true, longer delay; the 1.9-ms experimental transport
+    // budget is unchanged. Call from the real-time thread: no allocation/locks.
+    void setRangeProtection (bool on)
+    {
+        if (rangeProtection == on) return;
+        rangeProtection = on;
+        if (prepared && kRangeMinHz[rangeIndex] > 80.0f)
+            applyLatencyMode();
+    }
+    bool getRangeProtection() const noexcept { return rangeProtection; }
+    float getEffectiveMinFrequency() const noexcept
+    {
+        const float selected = kRangeMinHz[rangeIndex];
+        return rangeProtection ? std::min(selected, 80.0f) : selected;
+    }
+
     void setVoiceRange      (int index)
     {
         index = std::max(0, std::min(kNumRanges - 1, index));
@@ -212,6 +247,8 @@ public:
         bool neutralDrySelected = false;
         float overlapMatchScore = 0.0f, overlapShiftSamples = 0.0f;
         float overlapCancellation = 0.0f;
+        float trackedSourcePeriod=0.0f,trackedSourceConfidence=0.0f,trackedSourceAge=0.0f;
+        float rawObservedHz=0; bool rejectedUpperHarmonic=false;
     };
     using TraceCallback = void (*)(void*, const HopTrace&) noexcept;
     void setOfflineTraceCallback(TraceCallback cb, void* context) noexcept
@@ -317,6 +354,14 @@ public:
         // per DAW buffer, and each piece of audio is shifted straight after the pitch
         // of that piece was measured. That keeps the correction in step with the voice.
         const int hop = detector.getHopSize();
+        // The hop can change between blocks (the optional Low Latency fast hop, toggled from the
+        // host). If it shrank below the samples already accumulated, restart the accumulator rather
+        // than computing a negative segment. Never true at a constant hop.
+        if (samplesSinceHop >= hop)
+        {
+            samplesSinceHop = 0;
+            hopSquaredSum = 0.0;
+        }
         const float* left = buffer.getReadPointer(0);
         const float* right = (nch > 1) ? buffer.getReadPointer(1) : nullptr;
 
@@ -330,31 +375,39 @@ public:
                                        static_cast<int>(detectorMono.size()) });
             if (right != nullptr)
             {
-                // First measure the stereo block. Choosing the stronger sample
-                // independently for each sample creates a rectifier-like waveform
-                // when the channels are anti-phase. Instead, decide once per segment
-                // whether the normal mono sum is badly cancelled, then use one whole
-                // channel for the detector. The audible stereo paths remain untouched.
-                double leftEnergy = 0.0, rightEnergy = 0.0, sumEnergy = 0.0;
+                // Sample-continuous stereo cancellation monitor. Segment-local RMS
+                // decisions used to depend on host buffer boundaries and could
+                // toggle detector polarity while reading an anti-phase vocal.
+                // The running energies and hysteresis advance once per *sample*,
+                // irrespective of the host block size. Neither channel is modified.
+                constexpr double kMemory = 0.995;
+                constexpr double kNew = 1.0 - kMemory;
                 for (int i = 0; i < seg; ++i)
                 {
-                    const double l = left[pos + i];
-                    const double r = right[pos + i];
-                    const double sum = 0.5 * (l + r);
-                    leftEnergy += l * l;
-                    rightEnergy += r * r;
-                    sumEnergy += sum * sum;
-                }
-                const double channelEnergy = std::max(leftEnergy, rightEnergy);
-                const bool downmixCancels = channelEnergy > 1.0e-12
-                    && sumEnergy < 0.08 * channelEnergy;
-                const bool useRight = rightEnergy > leftEnergy;
-                for (int i = 0; i < seg; ++i)
-                {
-                    const float l = left[pos + i];
-                    const float r = right[pos + i];
-                    detectorMono[static_cast<size_t>(i)] = downmixCancels
-                        ? (useRight ? r : l) : 0.5f * (l + r);
+                    const float l = left[pos + i], r = right[pos + i];
+                    const double m = 0.5 * (static_cast<double>(l) + r);
+                    stereoLeftEnergy = kMemory * stereoLeftEnergy + kNew * double(l) * l;
+                    stereoRightEnergy = kMemory * stereoRightEnergy + kNew * double(r) * r;
+                    stereoSumEnergy = kMemory * stereoSumEnergy + kNew * m * m;
+                    const double strongest = std::max(stereoLeftEnergy, stereoRightEnergy);
+                    // Schmitt thresholds avoid analysis-source chatter at the boundary.
+                    if (strongest > 1.0e-12)
+                    {
+                        if (!stereoCancellationMode && stereoSumEnergy < 0.06 * strongest)
+                            stereoCancellationMode = true;
+                        else if (stereoCancellationMode && stereoSumEnergy > 0.12 * strongest)
+                            stereoCancellationMode = false;
+                    }
+                    else
+                        stereoCancellationMode = false;
+                    // Channel switching is also damped to avoid flipping the
+                    // detector waveform's phase on nearly equal-energy channels.
+                    if (stereoRightEnergy > 1.15 * stereoLeftEnergy)
+                        stereoUseRight = true;
+                    else if (stereoLeftEnergy > 1.15 * stereoRightEnergy)
+                        stereoUseRight = false;
+                    detectorMono[static_cast<size_t>(i)] = stereoCancellationMode
+                        ? (stereoUseRight ? r : l) : static_cast<float>(m);
                 }
             }
             else
@@ -379,8 +432,8 @@ public:
             for (int ch = 0; ch < nch; ++ch)
             {
                 auto& s = shifters[static_cast<size_t>(ch)];
-                // Bounded recorded-history source-phase matching now applies in
-                // both modes; Low Latency's phase path remains unchanged.
+                // Shared recorded-cycle geometry and one phase-continuous target clock
+                // retain each stereo channel's independently sampled waveform.
                 s.setPhaseLockedSource(true);
                 s.setFormantPreserve(formantPreserve);
                 s.setFormantShiftSemitones(formantShiftSemitones);
@@ -408,6 +461,8 @@ private:
     {
         pitchMotionHasPrevious = false;
         previousObservedMidi = 0.0f;
+        pitchMotionHistoryCount = 0;
+        hasDecisionSourceMidi = false;
     }
 
     float predictPitchMotion (float observedMidi, float observedHz, float confidence, int hop) noexcept
@@ -420,15 +475,25 @@ private:
             return observedMidi;
         }
 
+        // Velocity is measured over a 4 ms reference stride (one hop at the normal rate), so the
+        // jitter gate and the jump limit below keep their meaning when Low Latency re-measures faster.
+        const int stride = std::clamp(static_cast<int>(std::lround(0.004 * sr / hop)), 1, kPitchMotionHistory - 1);
+        pitchMotionHistory[static_cast<size_t>(pitchMotionHistoryCount % kPitchMotionHistory)] = observedMidi;
+        ++pitchMotionHistoryCount;
+
         if (!pitchMotionHasPrevious)
         {
             previousObservedMidi = observedMidi;
             pitchMotionHasPrevious = true;
             return observedMidi;
         }
+        if (pitchMotionHistoryCount <= stride)
+            return observedMidi;
 
+        const float strideStartMidi = pitchMotionHistory[static_cast<size_t>(
+            (pitchMotionHistoryCount - 1 - stride) % kPitchMotionHistory)];
         const double deltaCents = (static_cast<double>(observedMidi)
-                                   - static_cast<double>(previousObservedMidi)) * 100.0;
+                                   - static_cast<double>(strideStartMidi)) * 100.0;
         previousObservedMidi = observedMidi;
 
         // Do not extrapolate a discrete note jump or likely octave correction.
@@ -439,7 +504,7 @@ private:
             return observedMidi;
         }
 
-        const double dt = static_cast<double>(hop) / sr;
+        const double dt = static_cast<double>(hop) * stride / sr;
         if (dt <= 0.0)
             return observedMidi;
 
@@ -505,27 +570,134 @@ private:
                          + static_cast<double>(std::clamp(flexTune, 0.0f, 1.0f))
                            * (1.0 - humanizeCoeff);
 
-        const float observedHz = detector.detectPitch();
+        const float rawObservedHz = detector.detectPitch();
+        float observedHz=rawObservedHz;
+        bool rejectedUpperHarmonic=false;
         publishedConfidence.store(detector.getConfidence(), std::memory_order_relaxed);
         traceSample += static_cast<uint64_t>(hop);
         // A short-time attack proxy measured independently of the YIN estimator.
         // Suppress false onsets in silence and never let an isolated flux peak
         // override weak pitch confidence.
-        const double hopRms = std::sqrt(hopSquaredSum / static_cast<double>(std::max(1, hop)));
+        // Onset energy and its smoothing were tuned for 4 ms blocks. With a shorter hop, measure the
+        // energy over a sliding window of the last 4 ms every hop (so an onset is flagged no later than
+        // the first estimate that needs it) and keep the same smoothing time constant. At a 4 ms hop
+        // this is exactly the original computation.
+        const int refStride = std::max(1, std::min(kOnsetRing, static_cast<int>(std::lround(0.004 / hopSeconds))));
+        noteTransition.setReferenceStride(refStride);
+        onsetRingSq[static_cast<size_t>(onsetRingPos)] = hopSquaredSum;
+        onsetRingN[static_cast<size_t>(onsetRingPos)] = hop;
+        onsetRingPos = (onsetRingPos + 1) % kOnsetRing;
+        onsetRingCount = std::min(onsetRingCount + 1, kOnsetRing);
+        double windowSq = 0.0; int windowN = 0;
+        for (int k = 0; k < std::min(onsetRingCount, refStride); ++k)
+        {
+            const size_t idx = static_cast<size_t>((onsetRingPos - 1 - k + 2 * kOnsetRing) % kOnsetRing);
+            windowSq += onsetRingSq[idx]; windowN += onsetRingN[idx];
+        }
+        const double hopRms = std::sqrt(windowSq / static_cast<double>(std::max(1, windowN)));
         hopSquaredSum = 0.0;
         const double energyRise = hopRms / std::max(0.0002, previousHopRms);
         onsetStrength = static_cast<float>(std::clamp(energyRise, 0.0, 8.0));
         const bool onset = hopRms > 0.003 && previousHopRms > 0.0015 && energyRise > 1.55;
+        const bool hardTuneReentry = lowLatencyMode && !formantPreserve && retuneSpeed == 0.0f
+            && amount >= 0.995f && humanize <= 0.01f && flexTune <= 0.01f
+            && glideMilliseconds == 0.0f;
+        // A syllable attack can precede the first credible detector observation.
+        // Start this note-decision cue only during a dropout, so a sustained
+        // voiced amplitude pulse cannot become a new hard-tune attack.
+        onsetReentryGuard.advance(onset, unvoicedHopCount > 0, hopSeconds);
         // The YIN window sees the attack later than the amplitude envelope.
         // Hold attack evidence for one detector-window-sized interval so the
         // genuine pitch step can use it, without postponing audio itself.
         recentOnsetSeconds = onset ? 0.045 : std::max(0.0, recentOnsetSeconds - hopSeconds);
-        previousHopRms = 0.65 * previousHopRms + 0.35 * hopRms;
+        if (refStride == 1)
+            previousHopRms = 0.65 * previousHopRms + 0.35 * hopRms;
+        else
+        {
+            const double a = 1.0 - std::pow(0.65, 1.0 / refStride);
+            previousHopRms = (1.0 - a) * previousHopRms + a * hopRms;
+        }
         const auto grains = shifters[0].getGrainDiagnostics();
+        const auto cycle = shifters[0].getSourceCycleDiagnostics();
+        // A tentative upper harmonic must not outrank stronger current
+        // waveform evidence merely because the preceding source cycle was
+        // slightly less than 0.97-correlated. Confident register changes retain
+        // the original stricter source thresholds and the short-period test.
+        const bool tentativePitch = detector.getConfidence() < 0.94f;
+        if (observedHz > 0 && cycle.period > 0
+            && cycle.confidence > (tentativePitch ? 0.90f : 0.97f))
+        {
+            const double previousHz = sr / cycle.period, multiple = observedHz / previousHz;
+            const int harmonic = static_cast<int> (std::lround (multiple));
+            if (harmonic >= 2 && harmonic <= 4 && std::abs (multiple - harmonic) < 0.12)
+            {
+                const double span = std::clamp (cycle.period / sr, 0.003, 0.012);
+                float guardedHz = static_cast<float>(previousHz);
+                float oldMatch = detector.getRecentPeriodCorrelation (previousHz, span);
+                const float proposedMatch = detector.getRecentPeriodCorrelation (observedHz, span);
+                // A delayed source period can trail a falling contour. Current
+                // waveform evidence may qualify its lower register even when
+                // YIN's historical upper-harmonic confidence is high. Keep the
+                // original source/correlation gates, and search only +/-3% on
+                // the same already-recorded span. Stop when evidence suffices:
+                // the score qualifies a register, not a new pitch time stamp.
+                const float requiredMatch = tentativePitch ? 0.94f : 0.96f;
+                if (proposedMatch < 0.92f && oldMatch > 0.80f
+                    && (oldMatch <= requiredMatch || oldMatch - proposedMatch <= 0.06f))
+                {
+                    const float referenceMatch = oldMatch;
+                    for (double factor : {0.98, 0.99, 1.01, 1.02, 0.97, 1.03})
+                    {
+                        const float hz = static_cast<float>(previousHz * factor);
+                        const float match = detector.getRecentPeriodCorrelation (hz, span);
+                        if (match > requiredMatch && match - proposedMatch > 0.06f
+                            && match - referenceMatch > 0.015f)
+                        {
+                            oldMatch = match;
+                            // Preserve the historical YIN contour after removing
+                            // its qualified integer harmonic. A current-period
+                            // frequency here would create an early note bounce.
+                            guardedHz = observedHz / static_cast<float>(harmonic);
+                            break;
+                        }
+                    }
+                }
+                if (oldMatch > (tentativePitch ? 0.94f : 0.96f)
+                    && proposedMatch < 0.92f && oldMatch - proposedMatch > 0.06f)
+                {
+                    observedHz = guardedHz;
+                    rejectedUpperHarmonic = true;
+                }
+            }
+        }
 
+        for(auto& shifter:shifters)shifter.setSourcePitchObservation(observedHz,
+            detector.getTaggedPitchEstimateAgeSeconds(observedHz),rejectedUpperHarmonic ? 0.f : detector.getConfidence());
+        bool reentryConsistent = true;
+        if (hardTuneReentry && unvoicedHopCount * hopSeconds >= 0.0119 && lastVoicedPeriodSamples > 0
+            && observedHz >= detector.getMinFrequency() && detector.getConfidence() < 0.94f)
+        {
+            // The first weak post-dropout estimate must repeat across two
+            // periods in the already recorded waveform. Unavailable evidence
+            // and established/confident tracking retain their original path.
+            const float twoCycle = detector.getRecentPeriodCorrelation(
+                observedHz * 0.5, std::clamp(2.0 / observedHz, 0.003, 0.012));
+            // A rapidly moving but periodic attack can decorrelate over two
+            // cycles. A strong one-cycle fit rescues only moderate positive
+            // two-cycle evidence; negative/weak evidence remains rejected.
+            // At the fast hop a WEAK first estimate (confidence < 0.85) must clear a higher two-cycle
+            // fit; confident attacks keep the original rule.
+            const float twoCycleThreshold = (detector.getFastHop() && detector.getConfidence() < kFastHopWeakConfidence)
+                                          ? kFastHopTwoCycleThreshold : 0.50f;
+            const float oneCycle = twoCycle >= 0.30f && twoCycle < twoCycleThreshold
+                ? detector.getRecentPeriodCorrelation(observedHz, std::clamp(2.0 / observedHz, 0.003, 0.012))
+                : -1.0f;
+            reentryConsistent = OnsetReentryGuard::acceptsFirstPitch(detector.getConfidence(), twoCycle, oneCycle,
+                                                                     twoCycleThreshold);
+        }
         const bool voiced = observedHz >= detector.getMinFrequency()
                          && observedHz <= PitchDetector::kMaxHz
-                         && detector.getConfidence() >= 0.3f;
+                         && detector.getConfidence() >= 0.3f && reentryConsistent;
 
         if (!voiced)
         {
@@ -555,12 +727,13 @@ private:
             if (std::abs(ratio - 1.0f) < 0.0008f)
                 ratio = 1.0f;
             curRatio = ratio;
-            curPeriod = (unvoicedHopCount <= 2 && lastVoicedPeriodSamples > 0.0)
+            curPeriod = (unvoicedHopCount * hopSeconds <= 0.0081 && lastVoicedPeriodSamples > 0.0)
                       ? static_cast<float>(lastVoicedPeriodSamples) : 0.0f;
 
-            if (unvoicedHopCount >= 3)
+            if (unvoicedHopCount * hopSeconds >= 0.0119)
             {
                 noteTransition.reset();
+                steadyNoteForecast.reset();
                 hadPreviousReliablePitch = false;
                 lockedMidiNote = -1;
                 holdCounter = 0;
@@ -577,7 +750,7 @@ private:
                     -1.0f, -1.0f, -1.0f, -1.0f, detector.getConfidence(), onsetStrength,
                     0.0f, curRatio, grains.coverage, grains.appliedGain,
                     grains.markDelta, grains.maxOutputStep, grains.phaseMatchScore, grains.contributors, false, onset,
-                    shifters[0].getDryMixForDiagnostics(), false, grains.overlapMatchScore, grains.overlapShiftSamples, grains.cancellationFraction});
+                    shifters[0].getDryMixForDiagnostics(), false, grains.overlapMatchScore, grains.overlapShiftSamples, grains.cancellationFraction,cycle.period,cycle.confidence,cycle.ageSeconds,rawObservedHz,rejectedUpperHarmonic});
             return;
         }
 
@@ -607,9 +780,8 @@ private:
         }
         const float predictedMidiNote = predictPitchMotion(midiNote, observedHz,
                                                            detector.getConfidence(), hop);
-        const float detectedHz = referenceFreq
-            * std::pow(2.0f, (predictedMidiNote - 69.0f) / 12.0f);
-        lastDetectedHz = detectedHz;
+        // Preserve the undamped forecast for target-note decisions. Source-cycle
+        // prediction is refined independently below, after the note is committed.
         lastDetectedMidi = static_cast<int>(std::round(predictedMidiNote));
 
         // The detector's measured pitch is a historical window; the correction
@@ -619,11 +791,45 @@ private:
         // scale note one hop sooner. This avoids correcting toward the old note
         // while the shifter is following the new pitch. A short confidence hold
         // rejects spurious target jumps. No extra audio lookahead is used.
+        // Musical decisions follow the recorded source represented by the model.
+        // Standard uses its nominal delayed cycle centre. Low Latency uses the
+        // temporal centroid of the source-cycle banks currently being morphed.
+        // This is a source-time estimate, not an extra audio delay or a claim
+        // that every perceptual event has that same effective latency.
+        const double decisionAge = detector.getPitchEstimateAgeSeconds (observedHz);
+        const double decisionSourceLag = lowLatencyMode
+                                             ? std::max (0.0, static_cast<double> (cycle.ageSeconds))
+                                             : std::max (0.0, latencySamples / sr - 0.5 / observedHz);
+        const double decisionWeight =
+            decisionAge <= 0 ? 1.0 : std::clamp ((decisionAge - decisionSourceLag) / decisionAge, 0.0, 1.0);
+        const float decisionMidi =
+            midiNote + static_cast<float> (decisionWeight) * (predictedMidiNote - midiNote);
         const float measuredTarget = quantizeToScale(midiNote);
-        const float forecastTarget = quantizeToScale(predictedMidiNote);
-        float targetMidi = noteTransition.choose(midiNote, predictedMidiNote,
+        const float forecastTarget = quantizeToScale(decisionMidi);
+        // Keep the forecast decision and its confidence-hold history in the
+        // same NoteTransition update. A reliable recent source turn can veto
+        // historical velocity without leaving an unaccepted target latched.
+        bool allowForecast = true;
+        if (lowLatencyMode && cycle.period > 0 && cycle.confidence > 0.90f
+            && cycle.ageSeconds >= 0 && cycle.ageSeconds < 0.020f) {
+            const float sourceMidi = 69.0f + 12.0f * std::log2(
+                static_cast<float>(sr / cycle.period) / referenceFreq);
+            const float direction = forecastTarget - measuredTarget;
+            const float sourceStep = sourceMidi - previousDecisionSourceMidi;
+            if (hasDecisionSourceMidi && std::abs(sourceStep) < 1.0f
+                && direction * sourceStep < -0.02f * std::abs(direction))
+                allowForecast = false;
+            previousDecisionSourceMidi = sourceMidi;
+            hasDecisionSourceMidi = true;
+        } else {
+            hasDecisionSourceMidi = false;
+        }
+        const bool trustedDecisionOnset = hardTuneReentry
+            ? onsetReentryGuard.hasTrustedOnset(detector.getConfidence())
+            : recentOnsetSeconds > 0.0;
+        float targetMidi = noteTransition.choose(midiNote, decisionMidi,
             measuredTarget, forecastTarget, detector.getConfidence(), hopSeconds,
-            noteStabilizer, recentOnsetSeconds > 0.0);
+            noteStabilizer, trustedDecisionOnset, allowForecast);
 
         // Note stabilizer: stay on the locked note while the voice is within sustainCents of it
         if (noteStabilizer && lockedMidiNote >= 0)
@@ -667,7 +873,7 @@ private:
                 // evidence for a fast intentional note. Do not force an arbitrary
                 // 12-ms pause in this case. Unconfident or giant jumps still wait.
                 if (pendingTargetSeconds >= 0.012 ||
-                    (strongOnset && onsetCandidateHops >= 2))
+                    (strongOnset && onsetCandidateHops * hopSeconds >= 0.0079))
                 {
                     lockedMidiNote = proposed;
                     pendingTargetMidi = -1;
@@ -684,6 +890,26 @@ private:
             pendingTargetMidi = -1;
             pendingTargetSeconds = 0.0;
         }
+
+        // Preserve full motion prediction for selecting notes; only the source
+        // frequency used by the grain scheduler accounts for source timing.
+        // Standard reads an older source cycle. Forecasting all the way to the
+        // newest input over-corrects its velocity, especially on vibrato. Use the
+        // nominal output-cycle width to shorten that horizon. This is an
+        // approximate source-centre model; it adds no audio buffer or PDC delay.
+        const double estimateAge = detector.getPitchEstimateAgeSeconds(observedHz);
+        const double targetPeriod = sr / (referenceFreq * std::exp2((targetMidi - 69.0f) / 12.0f));
+        const double sourceLag = std::max(0.0, (latencySamples - targetPeriod) / sr);
+        const double forecastWeight = lowLatencyMode || estimateAge <= 0.0 ? 1.0
+            : std::clamp((estimateAge - sourceLag) / estimateAge, 0.0, 1.0);
+        const float timedPrediction = lowLatencyMode ? predictedMidiNote
+            : midiNote + static_cast<float>(forecastWeight) * (predictedMidiNote - midiNote);
+        const float synthesisMidiNote = steadyNoteForecast.process(
+            midiNote, timedPrediction, targetMidi, detector.getConfidence(),
+            hopSeconds, lowLatencyMode, recentOnsetSeconds > 0.0);
+        const float detectedHz = referenceFreq
+            * std::pow(2.0f, (synthesisMidiNote - 69.0f) / 12.0f);
+        lastDetectedHz = detectedHz;
 
         const float appliedTargetMidi = targetGlide.process(targetMidi, glideMilliseconds, hopSeconds);
         lastTargetMidiFloat = appliedTargetMidi;
@@ -735,12 +961,22 @@ private:
                 grains.coverage, grains.appliedGain, grains.markDelta, grains.maxOutputStep,
                 grains.phaseMatchScore, grains.contributors, true, onset,
                 shifters[0].getDryMixForDiagnostics(), neutralBypassGate.isLatched(), grains.overlapMatchScore, grains.overlapShiftSamples,
-                grains.cancellationFraction});
+                grains.cancellationFraction,cycle.period,cycle.confidence,cycle.ageSeconds,rawObservedHz,rejectedUpperHarmonic});
+    }
+
+    void resetStereoAnalysis() noexcept
+    {
+        stereoLeftEnergy = stereoRightEnergy = stereoSumEnergy = 0.0;
+        stereoCancellationMode = false;
+        stereoUseRight = false;
     }
 
     void applyLatencyMode()
     {
-        const float minHz = kRangeMinHz[rangeIndex];
+        // Keep detector and shifter period limits consistent. Merely widening
+        // the detector without the shifter would clamp low notes to the wrong
+        // synthesis period and cause octave/phase artifacts.
+        const float minHz = getEffectiveMinFrequency();
 
         detector.setMinFrequency(minHz);
         for (auto& s : shifters)
@@ -764,11 +1000,14 @@ private:
         pendingTargetSeconds = 0.0;
         onsetCandidateHops = 0;
         resetPitchMotionTracker();
+        resetStereoAnalysis();
         noteTransition.reset();
+        steadyNoteForecast.reset();
         samplesSinceHop = 0;
         hopSquaredSum = 0.0;
         previousHopRms = 0.0;
         recentOnsetSeconds = 0.0;
+        onsetReentryGuard.reset();
         traceSample = 0;
         hadPreviousReliablePitch = false;
         unvoicedHopCount = 0;
@@ -810,15 +1049,24 @@ private:
     TraceCallback traceCallback = nullptr;
     void* traceContext = nullptr;
     uint64_t traceSample = 0;
+    double stereoLeftEnergy = 0.0, stereoRightEnergy = 0.0, stereoSumEnergy = 0.0;
+    bool stereoCancellationMode = false, stereoUseRight = false;
     double hopSquaredSum = 0.0;
     double previousHopRms = 0.0;
     double recentOnsetSeconds = 0.0;
+    OnsetReentryGuard onsetReentryGuard;
+#ifndef FAST_HOP_TWO_CYCLE
+#define FAST_HOP_TWO_CYCLE 0.62f
+#endif
+    static constexpr float kFastHopTwoCycleThreshold = FAST_HOP_TWO_CYCLE;
+    static constexpr float kFastHopWeakConfidence = 0.85f;
     float onsetStrength = 0.0f;
     bool hadPreviousReliablePitch = false;
     float previousReliableMidi = 0.0f;
     double sr = 44100.0;
     PitchDetector detector;
     std::array<PitchShifter, kMaxChannels> shifters;
+    PitchShifter::PhaseMarkLink stereoPhaseMarks;
     std::vector<float> detectorMono;
 
     int   rootNote       = 0;
@@ -835,6 +1083,7 @@ private:
     float formantShiftSemitones = 0.0f;
     float referenceFreq  = 440.0f;
     bool  enabled        = true;
+    bool  rangeProtection = false; // DSP-only callers retain legacy settings until opted in
     bool  lowLatencyMode = false;
     int   rangeIndex     = kDefaultRange;
     bool  prepared       = false;
@@ -843,11 +1092,17 @@ private:
 
     double smoothedCorrectionCents = 0.0;
     bool   pitchMotionHasPrevious = false;
+    bool hasDecisionSourceMidi = false;
+    float previousDecisionSourceMidi = 0.0f;
     float  previousObservedMidi = 0.0f;
+    static constexpr int kPitchMotionHistory = 5;
+    float  pitchMotionHistory[kPitchMotionHistory] = {};
+    int    pitchMotionHistoryCount = 0;
     double smoothedHumanize = 0.0;
     double smoothedFlexTune = 0.0;
     TargetGlide targetGlide;
     NoteTransition noteTransition;
+    SteadyNoteForecast steadyNoteForecast;
     KeyEstimator keyEstimator;
     int keyEstimateSampleCounter = 0;
     std::atomic<int> estimatedKeyRoot { 0 };
@@ -865,6 +1120,10 @@ private:
     int    pendingTargetMidi = -1;
     double pendingTargetSeconds = 0.0;
     int    onsetCandidateHops = 0;
+    static constexpr int kOnsetRing = 4;
+    double onsetRingSq[kOnsetRing] = {};
+    int    onsetRingN[kOnsetRing] = {};
+    int    onsetRingPos = 0, onsetRingCount = 0;
     int    unvoicedHopCount = 0;    // short dropout hysteresis before releasing note lock
     double lastVoicedPeriodSamples = 0.0;
     NeutralBypassGate neutralBypassGate;

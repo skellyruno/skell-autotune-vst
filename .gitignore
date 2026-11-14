@@ -1,0 +1,6 @@
+/build*/
+/.vs/
+/artifacts/
+/tests/fixtures/*.f32
+/Benchmarks/Input/
+__pycache__/
