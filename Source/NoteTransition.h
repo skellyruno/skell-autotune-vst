@@ -11,30 +11,46 @@ namespace humtune
 class NoteTransition
 {
 public:
+    // Motion thresholds were tuned for one estimate per 4 ms. With faster estimates, deltas are
+    // still taken over that same 4 ms (stride = estimates per 4 ms); at stride 1 nothing changes.
+    void setReferenceStride (int stride) noexcept { refStride = std::clamp(stride, 1, kMaxStride); }
+
     void reset() noexcept
     {
         hasPrevious = false;
         previousObserved = 0.0f;
-        previousDirection = 0;
+        previousStep = 0.0f;
+        historyCount = 0;
         lastTarget = -1.0f;
         uncertainSeconds = 0.0;
     }
 
     float choose(float observed, float predicted, float measuredTarget,
                  float predictedTarget, float confidence, double hopSeconds,
-                 bool noteStabilizerActive, bool recentTrustedOnset = false) noexcept
+                 bool noteStabilizerActive, bool recentTrustedOnset = false,
+                 bool allowForecast = true) noexcept
     {
         if (!std::isfinite(observed) || !std::isfinite(predicted)
             || !std::isfinite(measuredTarget) || !std::isfinite(predictedTarget)
             || !std::isfinite(confidence) || hopSeconds <= 0.0)
             return measuredTarget;
 
-        const float delta = hasPrevious ? observed - previousObserved : 0.0f;
+        history[static_cast<size_t>(historyCount % kHistory)] = observed;
+        auto back = [&](int n) { return history[static_cast<size_t>(((historyCount - n) % kHistory + kHistory) % kHistory)]; };
+        const bool haveStride = historyCount >= refStride;
+        const float strideDelta = haveStride ? observed - back(refStride) : 0.0f;
+        const float strideStep = historyCount >= 2 * refStride ? back(refStride) - back(2 * refStride) : 0.0f;
+        ++historyCount;
+        const bool hasPrevious = haveStride;
+        const float delta = strideDelta;
+        const float previousStep = strideStep;
         const int direction = delta > 0.025f ? 1 : (delta < -0.025f ? -1 : 0);
-        const bool consistentMotion = hasPrevious && direction != 0 && direction == previousDirection;
-        previousDirection = direction;
-        previousObserved = observed;
-        hasPrevious = true;
+        const bool consistentMotion = hasPrevious && direction != 0 && direction == (previousStep > 0.025f ? 1 : (previousStep < -0.025f ? -1 : 0));
+        // The wider onset shortcut extrapolates a historical contour. When
+        // that contour is already braking, retain the ordinary narrow crossing
+        // rule instead of inserting an unsupported one-hop upper/lower target.
+        const bool brakingMotion = consistentMotion
+            && std::abs(delta) < 0.85f * std::abs(previousStep);
 
         float result = measuredTarget;
         if (!noteStabilizerActive)
@@ -61,11 +77,11 @@ public:
             // observation, but cannot override weak confidence, a large leap,
             // or an uncertain predicted crossing. Unlike a fixed delay this
             // decision uses evidence already seen by the causal onset monitor.
-            const bool onsetConfirms = recentTrustedOnset && hasPrevious
+            const bool onsetConfirms = recentTrustedOnset && hasPrevious && !brakingMotion
                 && direction != 0 && confidence >= 0.975f
                 && std::abs(delta) >= 0.06f
                 && std::abs(observed - boundary) < 0.22f;
-            if ((consistentMotion || onsetConfirms) && confidence >= 0.93f
+            if (allowForecast && (consistentMotion || onsetConfirms) && confidence >= 0.93f
                 && (nearBoundary || onsetConfirms) && definitelyCrossing
                 && std::abs(predictedMotion) <= 0.45f
                 && std::abs(predictedTarget - measuredTarget) <= 2.1f)
@@ -76,9 +92,12 @@ public:
     }
 
 private:
+    static constexpr int kMaxStride = 4, kHistory = 2 * kMaxStride + 1;
+    int refStride = 1, historyCount = 0;
+    float history[kHistory] = {};
     bool hasPrevious = false;
     float previousObserved = 0.0f;
-    int previousDirection = 0;
+    float previousStep = 0.0f;
     float lastTarget = -1.0f;
     double uncertainSeconds = 0.0;
 };

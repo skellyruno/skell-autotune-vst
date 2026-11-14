@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AutoTuneEngine.h"
+#include "GainRamp.h"
 #include <JuceHeader.h>
 #include <SkellCore/WorldLink.h>
 #include <array>
@@ -37,6 +38,17 @@ public:
 
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
+
+    int getUiTheme() const { return uiTheme.load(std::memory_order_relaxed); }
+    void setUiTheme(int value)
+    {
+        uiTheme.store(juce::jlimit(0, 3, value), std::memory_order_relaxed);
+    }
+    bool getReducedMotion() const { return reducedMotion.load(std::memory_order_relaxed); }
+    void setReducedMotion(bool value)
+    {
+        reducedMotion.store(value, std::memory_order_relaxed);
+    }
 
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
     humtune::KeyEstimator::Estimate getAutoKeyEstimate() const { return engine.getAutoKeyEstimate(); }
@@ -77,7 +89,9 @@ public:
     }
 
 private:
-    void timerCallback() override; // message thread, never processBlock
+    void timerCallback() override;
+    std::atomic<int> uiTheme {0};
+    std::atomic<bool> reducedMotion {false};
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     void cacheParameterRefs();
     void parameterChanged(const juce::String&, float) override;
@@ -99,8 +113,10 @@ private:
         std::atomic<float>* formantPreserve = nullptr;
         std::atomic<float>* formantShift = nullptr;
         std::atomic<float>* range = nullptr;
+        std::atomic<float>* rangeProtection = nullptr;
         std::atomic<float>* enabled = nullptr;
         std::atomic<float>* lowLatencyMode = nullptr;
+        std::atomic<float>* lowLatencyFastHop = nullptr;
         std::atomic<float>* inputGain = nullptr;
         std::atomic<float>* outputGain = nullptr;
         std::array<std::atomic<float>*, 12> notes{};
@@ -111,11 +127,18 @@ private:
     std::atomic<int> pendingLatency { 0 };
     int reportedLatency = 0;
 
+    // Ownership of the piano mask is independent of whether an editor exists.
+    // Parameter listeners only write atomics; named-scale key synchronization
+    // remains on the message thread. Persist ownership as optional state metadata.
+    std::atomic<bool> customScaleRequested { false };
+    std::atomic<bool> syncingNamedScaleKeys { false };
+
     juce::AudioProcessorValueTreeState apvts;
     // Receiver is always available, but sender must click SEND TO TUNE.
     skellcore::world::WorldLink skellKeyLink_{"skell.tune", "SkellyTune"};
     std::uint64_t lastAppliedSkellKey_ = 0;
     humtune::AutoTuneEngine engine;
+    humtune::GainRamp inputGainRamp,outputGainRamp;
 
     std::atomic<float> inputLevel  { 0.0f };
     std::atomic<float> outputLevel { 0.0f };
