@@ -30,13 +30,7 @@ class SkeletonOrb : public juce::Component {
             cachedHigh = metalHigh;
             cachedLow = metalLow;
         }
-        {
-            juce::Graphics::ScopedSaveState globe(g);
-            if (!reducedMotion && !bypassed)
-                g.addTransform(juce::AffineTransform::rotation(
-                    static_cast<float>(sweepPhase) + .055f * activity * std::sin(static_cast<float>(phase)), 140, 140));
-            g.drawImage(shell, juce::Rectangle<float>(0, 0, 280, 280));
-        }
+        g.drawImage(shell, juce::Rectangle<float>(0, 0, 280, 280));
         if (bypassed) {
             g.setColour(juce::Colour(0xff070a08));
             g.fillEllipse(17, 17, 246, 246);
@@ -47,6 +41,25 @@ class SkeletonOrb : public juce::Component {
             juce::Path clip;
             clip.addEllipse(18, 18, 244, 244);
             g.reduceClipRegion(clip);
+            // Rotate longitude on a tilted sphere, leaving the rim and reflection fixed.
+            const float rotation = reducedMotion ? 0.f : static_cast<float>(sweepPhase);
+            const float tilt = -.22f;
+            for (int meridian = 0; meridian < 10; ++meridian) {
+                const float longitude = rotation + meridian * juce::MathConstants<float>::twoPi / 10;
+                const float depth = std::cos(longitude);
+                if (depth <= 0) continue;
+                juce::Path line;
+                for (int step = 0; step <= 20; ++step) {
+                    const float latitude = (step / 20.f - .5f) * juce::MathConstants<float>::pi;
+                    const float x = std::cos(latitude) * std::sin(longitude);
+                    const float y = std::sin(latitude) * std::cos(tilt)
+                                    + std::cos(latitude) * depth * std::sin(tilt);
+                    if (step == 0) line.startNewSubPath(140 + 121 * x, 140 + 121 * y);
+                    else line.lineTo(140 + 121 * x, 140 + 121 * y);
+                }
+                g.setColour(accent.withAlpha(.06f + .14f * depth));
+                g.strokePath(line, juce::PathStrokeType(.8f));
+            }
             if (!reducedMotion) for (int light = 0; light < 2; ++light) {
                 const float travel = static_cast<float>(sweepPhase);
                 const float longitude = travel * (light == 0 ? 1.0f : -2.0f) + light * 2.3f;
@@ -57,11 +70,11 @@ class SkeletonOrb : public juce::Component {
                 const float sweepX = 140 + 116 * std::cos(latitude) * std::sin(longitude);
                 const float sweepY = 140 + 116 * std::sin(latitude);
                 const auto neon = juce::Colour(0xff64ff32);
-                juce::ColourGradient glow(neon.withAlpha(depth * (.20f + .34f * activity)), sweepX, sweepY,
+                juce::ColourGradient glow(neon.withAlpha(depth * (.11f + .20f * activity)), sweepX, sweepY,
                                           neon.withAlpha(0.0f), sweepX + 49, sweepY, true);
                 g.setGradientFill(glow);
                 g.fillEllipse(sweepX - 49, sweepY - 49, 98, 98);
-                g.setColour(neon.withAlpha(depth * (.45f + .45f * activity)));
+                g.setColour(neon.withAlpha(depth * (.27f + .28f * activity)));
                 g.fillEllipse(sweepX - 2, sweepY - 2, 4, 4);
             }
             juce::Graphics::ScopedSaveState skeleton(g);
@@ -208,20 +221,6 @@ class SkeletonOrb : public juce::Component {
                 const float y = std::sin(latitude);
                 return juce::Point<float>(140 + 120 * x, 140 + 116 * y + 18 * z);
             };
-            for (int meridian = 0; meridian < 10; ++meridian) {
-                juce::Path line;
-                for (int sample = 0; sample <= 48; ++sample) {
-                    auto point = project(-1.57f + sample * 3.14f / 48, meridian * 6.283185f / 10);
-                    if (sample == 0)
-                        line.startNewSubPath(point);
-                    else
-                        line.lineTo(point);
-                }
-                g.setColour(accent.withAlpha(
-                    .092f +
-                    .069f * std::max(0.0f, std::cos(0.35f + meridian * .6283f))));
-                g.strokePath(line, juce::PathStrokeType(.8f));
-            }
             for (int latitude = -2; latitude <= 2; ++latitude) {
                 juce::Path line;
                 for (int sample = 0; sample <= 64; ++sample) {

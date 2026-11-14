@@ -441,7 +441,7 @@ void HumHouseVocalTuneEditor::timerCallback() {
   if (!motion || orb.activity < .003f)
     orb.activity = 0;
   orb.motionLevel = orb.activity * (.6f + .4f * juce::jlimit(0.0f, 1.0f, displayConfidence));
-  orb.phase = std::fmod(orb.phase + .614125 * elapsed * (3.0 + 20.0 * orb.activity),
+  orb.phase = std::fmod(orb.phase + .49 * elapsed * (3.0 + 20.0 * orb.activity),
                         juce::MathConstants<double>::twoPi * 10.0);
   orb.intensity = .75f + .25f * static_cast<float>(speedKnob.getValue());
   if (motion)
@@ -606,10 +606,12 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
     } else
       targetOpen = false;
   }
+  // Draw the wider target first so both colours remain visible where notes agree.
+  g.setColour(p.heatWarm.withAlpha(.88f));
+  g.strokePath(target, juce::PathStrokeType(3.1f));
   g.setColour(p.heatCold);
-  g.strokePath(sung, juce::PathStrokeType(1.2f));
-  g.setColour(p.heatWarm);
-  g.strokePath(target, juce::PathStrokeType(1.8f));
+  g.strokePath(sung, juce::PathStrokeType(1.25f));
+
 }
 
 
@@ -617,9 +619,11 @@ void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
   g.addTransform(juce::AffineTransform::scale(scaleFactor()));
   if (g.getClipBounds().intersects(juce::Rectangle<int>(490, 449, 169, 37))) {
     const float travel = orb.reducedMotion ? 0.0f : static_cast<float>(orb.phase);
-    for (int i = 0; i < 3; ++i) {
+    constexpr std::array<juce::uint32, 6> colours{
+        0xff8effaa, 0xff71d7ff, 0xffb996ff, 0xfff4bf69, 0xffff8aae, 0xff83ebda};
+    for (int i = 0; i < static_cast<int>(colours.size()); ++i) {
       const float phase = travel * (i + 1) * .1f + i * 2.1f;
-      const float x = 518.0f + i * 49 + std::sin(phase) * 6;
+      const float x = 502.0f + i * 28 + std::sin(phase) * 6;
       const float y = 472.0f + std::cos(phase) * 4;
       juce::Path rune;
       rune.startNewSubPath(x, y - 6);
@@ -627,7 +631,7 @@ void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
       rune.startNewSubPath(x - 4, y + 2);
       rune.lineTo(x + 4, y - 3);
       rune.lineTo(x, y - (i == 1 ? 6 : 1));
-      g.setColour(lnf.palette.accentBright.withAlpha(.22f + .13f * std::cos(phase)));
+      g.setColour(juce::Colour(colours[static_cast<size_t>(i)]).withAlpha(.46f + .16f * std::cos(phase)));
       g.strokePath(rune, juce::PathStrokeType(1.4f));
     }
   }
