@@ -163,7 +163,7 @@ int main(int argc,char** argv)
     assert(processor->setProcessing(false)==kResultOk);assert(component->setActive(false)==kResultOk);assert(component->setActive(true)==kResultOk);assert(processor->setProcessing(true)==kResultOk);pump();
     const double floors[]={70,80,100,130,180,40};
     const double floor=protect ? std::min(80.,floors[voice]) : floors[voice];
-    const int expected=low ? static_cast<int>(std::ceil(rate*.0019)) : static_cast<int>(std::ceil(1.3*std::ceil(rate/floor)))+8;
+    const int expected=low ? static_cast<int>(std::ceil(rate*.0022)) : static_cast<int>(std::ceil(1.3*std::ceil(rate/floor)))+8;
     assert(processor->getLatencySamples()==static_cast<uint32>(expected));
     const int frames=static_cast<int>(rate*(seconds+.5)),automationHop=rate/40;
     const double source=vocal ? 0 : floors[voice]*(motion ? 1.5 : 1.027),tau=6.2831853071795864769;

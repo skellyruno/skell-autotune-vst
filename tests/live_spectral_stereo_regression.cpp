@@ -46,7 +46,7 @@ Signal process(const Signal& input, int hostBlock, bool lowLatency, bool automat
     e.setLowLatencyMode(lowLatency);
     e.setEnabled(true);
     e.prepare(kSampleRate, hostBlock);
-    assert(e.getLatencySamples() == (lowLatency ? 84 : 726));
+    assert(e.getLatencySamples() == (lowLatency ? 98 : 726));
 
     Signal output(input.size());
     for (int start = 0; start < kSamples; )

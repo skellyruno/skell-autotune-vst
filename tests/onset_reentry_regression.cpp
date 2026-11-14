@@ -30,7 +30,7 @@ Result render(int block, bool formants)
     engine.setAmount(1); engine.setHumanize(0); engine.setFlexTune(0);
     engine.setNoteStabilizer(false); engine.setFormantPreserve(formants);
     engine.setLowLatencyMode(true); engine.prepare(44100, block);
-    assert(engine.getLatencySamples() == 84);
+    assert(engine.getLatencySamples() == 98);
     Trace trace; trace.hops.resize(4096); // room for the optional 2 ms Low Latency hop
     engine.setOfflineTraceCallback([](void* context, const Engine::HopTrace& hop) noexcept {
         auto& t = *static_cast<Trace*>(context);
@@ -85,7 +85,7 @@ Result renderStrongCycleReentry(int block)
     engine.setAmount(1); engine.setHumanize(0); engine.setFlexTune(0);
     engine.setNoteStabilizer(false); engine.setFormantPreserve(false);
     engine.setLowLatencyMode(true); engine.prepare(44100, block);
-    assert(engine.getLatencySamples() == 84);
+    assert(engine.getLatencySamples() == 98);
     Trace trace; trace.hops.resize(4096);
     engine.setOfflineTraceCallback([](void* context, const Engine::HopTrace& hop) noexcept {
         auto& state = *static_cast<Trace*>(context);

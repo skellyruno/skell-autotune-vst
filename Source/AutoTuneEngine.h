@@ -36,7 +36,7 @@ public:
     static constexpr int   kNumRanges    = 6;
     static constexpr float kRangeMinHz[kNumRanges] = { 70.0f, 80.0f, 100.0f, 130.0f, 180.0f, 40.0f };
     static constexpr int   kDefaultRange = 1;
-    static constexpr double kExperimentalLowLatencyMs = 1.9;
+    static constexpr double kExperimentalLowLatencyMs = 2.2;
 
     void prepare (double sampleRate, int blockSize)
     {
@@ -161,7 +161,7 @@ public:
     }
 
     // Experimental fixed-delay resynthesis. The existing period-bound path remains
-    // the default; when enabled, the shifters use a fixed 1.9 ms processing budget.
+    // the default; when enabled, the shifters use a fixed 2.2 ms processing budget.
     // This budget is not a claim about end-to-end DAW latency.
     // EXPERIMENTAL: Low Latency re-measures pitch every ~2 ms instead of ~4 ms (default off, or build
     // with -DSKELLYTUNE_LL_FAST_HOP=1). Takes effect only while Low Latency is on.
@@ -194,7 +194,7 @@ public:
     // singer's fundamental. A 180 Hz Fastest floor cannot detect an E3 (165 Hz),
     // and silently routes it to delayed dry audio. Catch Low Notes deliberately
     // widens the analysis AND resynthesis period budget to 80 Hz. Standard mode
-    // therefore reports its true, longer delay; the 1.9-ms experimental transport
+    // therefore reports its true, longer delay; the 2.2-ms experimental transport
     // budget is unchanged. Call from the real-time thread: no allocation/locks.
     void setRangeProtection (bool on)
     {

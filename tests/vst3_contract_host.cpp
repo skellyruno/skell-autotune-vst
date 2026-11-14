@@ -173,7 +173,7 @@ int main(int argc, char** argv)
                                            : profileFloors[initialRange];
         const int standardDelay = static_cast<int>(std::ceil(1.3 * std::ceil(rate / initialFloor))) + 8;
         const bool initialLow = controller->getParamNormalized(ids.at("Low Latency (Experimental)")) > 0.5;
-        assert(processor->getLatencySamples() == static_cast<uint32>(initialLow ? std::ceil(rate * .0019) : standardDelay));
+        assert(processor->getLatencySamples() == static_cast<uint32>(initialLow ? std::ceil(rate * .0022) : standardDelay));
         std::vector<float> left(512), right(512), outLeft(512), outRight(512);
         float* inPointers[] = {left.data(), right.data()}, *outPointers[] = {outLeft.data(), outRight.data()};
         AudioBusBuffers input{}, output{}; input.numChannels = output.numChannels = 2;
@@ -238,7 +238,7 @@ int main(int argc, char** argv)
         for (int low : {0, 1})
         {
             set("Low Latency (Experimental)", low);
-            const int latency = low ? static_cast<int>(std::ceil(rate * .0019)) : standardDelay;
+            const int latency = low ? static_cast<int>(std::ceil(rate * .0022)) : standardDelay;
             assert(processor->getLatencySamples() == static_cast<uint32>(latency));
             for (int i = 0; i < 16; ++i) assert(processor->process(data) == kResultOk);
             double largest = 0; int peakPosition = -1;

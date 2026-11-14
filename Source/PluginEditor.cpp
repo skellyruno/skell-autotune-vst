@@ -635,11 +635,20 @@ void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
         0xff8effaa, 0xff71d7ff, 0xffb996ff, 0xfff4bf69, 0xffff8aae,
         0xff83ebda, 0xffffab73, 0xffaaaaff, 0xffd6fc79};
     const float energy = orb.reducedMotion ? 0.0f : orb.activity;
-    for (int i = 0; i < 24; ++i) {
-      const float phase = travel * (.25f + .05f * i) + i * 2.1f;
-      const float x = 162.0f + i * 21.0f + std::sin(phase) * (2 + 3 * energy);
-      const float y = 470.0f + std::cos(phase) * (2 + 6 * energy);
-      const float reach = 1.0f + energy * std::sin(phase);
+    constexpr int runeCount = 42;
+    for (int i = 0; i < runeCount; ++i) {
+      const float slot = static_cast<float>(i) / runeCount;
+      float cluster = 0.0f;
+      for (int j = 0; j < 3; ++j) {
+        const float head = travel * (.025f + .014f * j) + j / 3.0f;
+        const float distance = std::abs(std::remainder(slot - head, 1.0f));
+        cluster = std::max(cluster, std::max(0.0f, 1.0f - distance * 13.0f));
+      }
+      const float twinkle = std::max(0.0f, std::sin(travel * .83f + i * 2.399963f));
+      const float response = orb.reducedMotion ? 0.0f
+          : (.09f + .55f * energy) * cluster + .32f * energy * twinkle * twinkle * twinkle;
+      const float x = 158.0f + i * 12.0f;
+      const float y = 467.0f + (i % 3) * 3.0f;
       juce::Path bones;
       if (i % 2 == 0) {
         bones.addRoundedRectangle(x - 4, y - 6, 8, 8, 2.5f);
@@ -654,13 +663,17 @@ void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
         bones.startNewSubPath(x, y - 4);
         bones.lineTo(x, y + 5);
         for (int rib = -3; rib <= 3; rib += 3) {
-          bones.startNewSubPath(x - 3 * reach, y + rib - 1);
+          bones.startNewSubPath(x - 3, y + rib - 1);
           bones.lineTo(x, y + rib + 1);
-          bones.lineTo(x + 3 * reach, y + rib - 1);
+          bones.lineTo(x + 3, y + rib - 1);
         }
       }
-      g.setColour(juce::Colour(colours[static_cast<size_t>(i) % colours.size()])
-                      .withAlpha(.37f + .46f * energy));
+      const auto colour = juce::Colour(colours[static_cast<size_t>(i) % colours.size()]);
+      if (response > .28f) {
+        g.setColour(colour.withAlpha(.18f * response));
+        g.strokePath(bones, juce::PathStrokeType(2.7f));
+      }
+      g.setColour(colour.withAlpha(.30f + .60f * response));
       g.strokePath(bones, juce::PathStrokeType(1.3f));
     }
   }

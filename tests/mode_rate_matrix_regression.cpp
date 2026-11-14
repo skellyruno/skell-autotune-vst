@@ -29,7 +29,7 @@ static std::vector<float> render(double sr,int block,bool low,bool stereo){
         for(int i=0;i<count;++i)for(int ch=0;ch<2;++ch){float x=b.getReadPointer(ch)[i];assert(std::isfinite(x));assert(std::abs(x)<1);result[static_cast<size_t>(2*(pos+i)+ch)]=x;}
         pos+=count;
     }
-    assert(e.getLatencySamples()==(low?static_cast<int>(std::ceil(sr*.0019)):static_cast<int>(std::ceil(1.3*std::ceil(sr/80)))+8));
+    assert(e.getLatencySamples()==(low?static_cast<int>(std::ceil(sr*.0022)):static_cast<int>(std::ceil(1.3*std::ceil(sr/80)))+8));
     double difference=0;for(int i=n/2;i<n;++i)difference+=std::abs(result[static_cast<size_t>(2*i)]-result[static_cast<size_t>(2*i+1)]);
     assert(stereo ? difference/n>.001 : difference/n<.00001);
     return result;
