@@ -458,7 +458,10 @@ public:
     return juce::Font(juce::FontOptions(12 * scale));
   }
   void positionComboBoxText(juce::ComboBox &box, juce::Label &label) override {
-    label.setBounds(12 * scale, 1, box.getWidth() - 30 * scale,
+    const bool key = static_cast<bool>(box.getProperties().getWithDefault("keyReadout", false));
+    const auto inset = juce::roundToInt((key ? 6 : 12) * scale);
+    const auto arrow = juce::roundToInt(18 * scale);
+    label.setBounds(inset, 1, juce::jmax(1, box.getWidth() - inset - arrow),
                     box.getHeight() - 2);
     label.setFont(getComboBoxFont(box));
   }

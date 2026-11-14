@@ -18,7 +18,7 @@ class SkeletonOrb : public juce::Component {
         graphics.addTransform(juce::AffineTransform::scale(getWidth() / 280.0f, getHeight() / 280.0f));
         auto &g = graphics;
         if (!shell.isValid() || cachedAccent != accent || cachedHigh != metalHigh || cachedLow != metalLow) {
-            const auto density = juce::jlimit(1.0f, 2.0f,
+            const auto density = juce::jlimit(1.0f, 1.5f,
                 juce::Component::getApproximateScaleFactorForComponent(this));
             shell = juce::Image(juce::Image::ARGB, juce::roundToInt(getWidth() * density),
                                 juce::roundToInt(getHeight() * density), true);
@@ -34,7 +34,7 @@ class SkeletonOrb : public juce::Component {
             juce::Graphics::ScopedSaveState globe(g);
             if (!reducedMotion && !bypassed)
                 g.addTransform(juce::AffineTransform::rotation(
-                    .055f * activity * std::sin(static_cast<float>(phase)), 140, 140));
+                    static_cast<float>(sweepPhase) + .055f * activity * std::sin(static_cast<float>(phase)), 140, 140));
             g.drawImage(shell, juce::Rectangle<float>(0, 0, 280, 280));
         }
         if (bypassed) {
@@ -48,31 +48,38 @@ class SkeletonOrb : public juce::Component {
             clip.addEllipse(18, 18, 244, 244);
             g.reduceClipRegion(clip);
             if (!reducedMotion) for (int light = 0; light < 2; ++light) {
-                const float phaseAngle = static_cast<float>(sweepPhase) + light * juce::MathConstants<float>::pi;
-                const float sweepX = 140 + 110 * std::sin(phaseAngle);
-                const float sweepY = 140 + (light == 0 ? 68 : -92) * std::cos(phaseAngle) + 9 * activity * std::sin(static_cast<float>(phase));
+                const float travel = static_cast<float>(sweepPhase);
+                const float longitude = travel * (light == 0 ? 1.0f : -2.0f) + light * 2.3f;
+                const float latitude = 1.27f * std::sin((light == 0 ? 2 : 3) * travel + light * 1.9f);
+                const float depth = std::cos(latitude) * std::cos(longitude);
+                if (depth <= 0.0f)
+                    continue;
+                const float sweepX = 140 + 116 * std::cos(latitude) * std::sin(longitude);
+                const float sweepY = 140 + 116 * std::sin(latitude);
                 const auto neon = juce::Colour(0xff64ff32);
-                juce::ColourGradient glow(neon.withAlpha(.18f + .34f * activity), sweepX, sweepY,
+                juce::ColourGradient glow(neon.withAlpha(depth * (.20f + .34f * activity)), sweepX, sweepY,
                                           neon.withAlpha(0.0f), sweepX + 49, sweepY, true);
                 g.setGradientFill(glow);
                 g.fillEllipse(sweepX - 49, sweepY - 49, 98, 98);
-                g.setColour(neon.withAlpha(.45f + .45f * activity));
-                g.drawLine(sweepX, sweepY - 12, sweepX, sweepY + 12, 1.1f + activity);
+                g.setColour(neon.withAlpha(depth * (.45f + .45f * activity)));
+                g.fillEllipse(sweepX - 2, sweepY - 2, 4, 4);
             }
             juce::Graphics::ScopedSaveState skeleton(g);
-            const float movement = reducedMotion ? 0.0f : motionLevel;
+            const float movement = reducedMotion ? 0.0f : .22f + .78f * motionLevel;
             g.addTransform(juce::AffineTransform::rotation(
-                static_cast<float>(std::sin(phase) * .035 * movement), 140, 150));
+                static_cast<float>(std::sin(phase) * .065 * movement), 140, 150).translated(0,
+                    static_cast<float>(std::sin(phase * .5) * 5 * movement)));
             const auto boneColour = juce::Colour(0xffdbe8cc)
                                         .interpolatedWith(accent, .25f)
                                         .withAlpha(bypassed ? .3f : .85f + .15f * activity);
             auto bone = [&](float x, float y, float xx, float yy, float width = 2.0f) {
-                const float energy = reducedMotion ? 0.0f : activity * intensity;
+                const float recovery = .45f + .55f * std::abs(std::sin(static_cast<float>(phase) * .35f + x * .022f));
+                const float energy = reducedMotion ? 0.0f : activity * intensity * recovery;
                 const float identity = x * .17f + y * .071f + xx * .023f;
-                const int pieces = energy > .01f && width > 1.5f ? 3 : 1;
+                const int pieces = energy > .01f && width > 1.5f ? 2 : 1;
                 for (int segment = 0; segment < pieces; ++segment) {
                     const float u = static_cast<float>(segment) / pieces;
-                    const float v = (segment + (energy > .01f ? .78f : 1.0f)) / pieces;
+                    const float v = (segment + (energy > .01f ? .94f : 1.0f)) / pieces;
                     const float angle = static_cast<float>(phase) + identity + segment * 2.4f;
                     const float orbitRadius = 28.0f + 78.0f * (.5f + .5f * std::sin(identity * 2.13f + segment));
                     const float scatter = juce::jlimit(0.0f, 1.0f, energy * (width > 1.5f ? 1.75f : 1.45f));
@@ -91,7 +98,7 @@ class SkeletonOrb : public juce::Component {
                     g.drawLine(ax, ay, bx, by, width);
                 }
             };
-            // An articulated character; its movement follows voiced activity only.
+            // Let the character keep moving gently between phrases.
             juce::Path skull;
             skull.startNewSubPath(124, 58);
             skull.cubicTo(120, 37, 160, 37, 156, 58);
