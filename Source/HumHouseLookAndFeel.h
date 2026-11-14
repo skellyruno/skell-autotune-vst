@@ -157,34 +157,12 @@ public:
     g.drawLine(cx + std::sin(angle) * r * .76f, cy - std::cos(angle) * r * .76f,
                cx + std::sin(angle) * r * .94f, cy - std::cos(angle) * r * .94f,
                3 * scale);
-    if (!static_cast<bool>(
-            slider.getProperties().getWithDefault("showDragValue", false))) {
-      const float hub = face * .2f;
-      g.setColour(palette.metalLow.withAlpha(.24f));
-      g.drawEllipse(cx - hub, cy - hub, hub * 2, hub * 2, .7f * scale);
-      g.setColour(juce::Colours::white.withAlpha(.2f));
-      g.drawEllipse(cx - hub + scale, cy - hub + scale, hub * 2 - 2 * scale,
-                    hub * 2 - 2 * scale, .6f * scale);
-    }
-    if (static_cast<bool>(
-            slider.getProperties().getWithDefault("showDragValue", false)) &&
-        slider.isEnabled()) {
-      const bool flipped = static_cast<bool>(
-          slider.getProperties().getWithDefault("displayFlip", false));
-      const double value =
-          (flipped ? 1 - slider.getValue() : slider.getValue()) *
-          static_cast<double>(
-              slider.getProperties().getWithDefault("displayScale", 1.0));
-      const juce::String text =
-          juce::String(juce::roundToInt(value)) + slider.getTextValueSuffix();
-      g.setColour(juce::Colour(0xff17201a));
-      g.setFont(juce::Font(juce::FontOptions(26 * scale).withStyle("Bold")));
-      g.drawText(text,
-                 juce::Rectangle<float>(cx - face, cy - 20 * scale, 2 * face,
-                                        40 * scale)
-                     .toNearestInt(),
-                 juce::Justification::centred, false);
-    }
+    const float hub = face * .2f;
+    g.setColour(palette.metalLow.withAlpha(.24f));
+    g.drawEllipse(cx - hub, cy - hub, hub * 2, hub * 2, .7f * scale);
+    g.setColour(juce::Colours::white.withAlpha(.2f));
+    g.drawEllipse(cx - hub + scale, cy - hub + scale, hub * 2 - 2 * scale,
+                  hub * 2 - 2 * scale, .6f * scale);
     if (flare > .02f && slider.isEnabled()) {
       juce::Path glint;
       const float sweep =

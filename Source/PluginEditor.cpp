@@ -78,15 +78,9 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
             "How fast the pitch snaps to the note. Turn right for faster.\n0 = "
             "instant (hard tune), 100 = "
             "slow and natural.");
-  speedKnob.getProperties().set("displayScale", 100.0); // shown as 0..100
-  speedKnob.getProperties().set(
-      "displayFlip",
-      true); // fully right = 0 (fastest), fully left = 100 (slowest)
-
   setupKnob(humanizeKnob, "HUMANIZE",
             "Eases off correction on sustained notes.");
-  humanizeKnob.getProperties().set("displayScale", 100.0);
-  humanizeKnob.setTextValueSuffix("%");
+
   setupKnob(referenceFreqKnob, "PITCH REF",
             "What frequency the note A4 is tuned to. 440 Hz is the standard.");
   referenceFreqKnob.setTextValueSuffix(" Hz");
@@ -110,6 +104,21 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   humanizeAtt = std::make_unique<SliderAttach>(apvts, "humanize", humanizeKnob);
   referenceFreqAtt =
       std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
+  for (auto* value : {&retuneValue, &humanizeValue}) {
+    value->setJustificationType(juce::Justification::centred);
+    value->setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(*value);
+  }
+  speedKnob.onValueChange = [this] {
+    retuneValue.setText(juce::String(juce::roundToInt(100 * (1 - speedKnob.getValue()))),
+                        juce::dontSendNotification);
+  };
+  humanizeKnob.onValueChange = [this] {
+    humanizeValue.setText(juce::String(juce::roundToInt(100 * humanizeKnob.getValue())),
+                          juce::dontSendNotification);
+  };
+  speedKnob.onValueChange();
+  humanizeKnob.onValueChange();
 
   // --- Scale selector: western modes plus optional quarter-tone / Maqam scales
   // ---
@@ -286,14 +295,6 @@ void HumHouseVocalTuneEditor::setupKnob(juce::Slider &knob,
                                         const juce::String &tooltip) {
   knob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
   knob.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
-  knob.onDragStart = [&knob] {
-    knob.getProperties().set("showDragValue", true);
-    knob.repaint();
-  };
-  knob.onDragEnd = [&knob] {
-    knob.getProperties().set("showDragValue", false);
-    knob.repaint();
-  };
   knob.setMouseDragSensitivity(220);
   knob.setName(text);
   knob.setTooltip(tooltip);
@@ -341,6 +342,8 @@ void HumHouseVocalTuneEditor::applyScaleFromControls() {
 void HumHouseVocalTuneEditor::applyAppearance() {
   appearanceTheme = proc.getUiTheme();
   lnf.setTheme(appearanceTheme);
+  for (auto* value : {&retuneValue, &humanizeValue})
+    value->setColour(juce::Label::textColourId, lnf.palette.bodyText);
   orb.accent = lnf.palette.accentBright;
   orb.metalHigh = lnf.palette.metalHigh;
   orb.metalLow = lnf.palette.metalLow;
@@ -450,6 +453,9 @@ void HumHouseVocalTuneEditor::timerCallback() {
       now - lastOrbRepaint >= (orb.activity > 0.015f ? 30.0 : 65.0))) {
     lastOrbRepaint = now;
     orb.repaint();
+    repaint(juce::Rectangle<float>(490, 449, 169, 37)
+                .transformedBy(juce::AffineTransform::scale(scaleFactor()))
+                .getSmallestIntegerContainer());
   }
 
   const float illumination = .3f + .7f * orb.activity;
@@ -609,6 +615,22 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
 
 void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
   g.addTransform(juce::AffineTransform::scale(scaleFactor()));
+  if (g.getClipBounds().intersects(juce::Rectangle<int>(490, 449, 169, 37))) {
+    const float travel = orb.reducedMotion ? 0.0f : static_cast<float>(orb.phase);
+    for (int i = 0; i < 3; ++i) {
+      const float phase = travel * (i + 1) * .1f + i * 2.1f;
+      const float x = 518.0f + i * 49 + std::sin(phase) * 6;
+      const float y = 472.0f + std::cos(phase) * 4;
+      juce::Path rune;
+      rune.startNewSubPath(x, y - 6);
+      rune.lineTo(x, y + 6);
+      rune.startNewSubPath(x - 4, y + 2);
+      rune.lineTo(x + 4, y - 3);
+      rune.lineTo(x, y - (i == 1 ? 6 : 1));
+      g.setColour(lnf.palette.accentBright.withAlpha(.22f + .13f * std::cos(phase)));
+      g.strokePath(rune, juce::PathStrokeType(1.4f));
+    }
+  }
   if (displayDetectedMidi >= 0 && enableBtn.getToggleState()) {
     const auto bounds =
         noteButtons[static_cast<size_t>(displayDetectedMidi % 12)]
@@ -640,6 +662,8 @@ void HumHouseVocalTuneEditor::resized() {
   };
   speedKnob.setBounds(rect(40, 154, 152, 152));
   humanizeKnob.setBounds(rect(508, 154, 152, 152));
+  retuneValue.setBounds(rect(40, 310, 152, 24));
+  humanizeValue.setBounds(rect(508, 310, 152, 24));
   orb.setBounds(rect(215, 95, 270, 270));
   rootNoteBox.setBounds(rect(382, 26, 62, 30));
   scaleBox.setBounds(rect(450, 26, 154, 30));

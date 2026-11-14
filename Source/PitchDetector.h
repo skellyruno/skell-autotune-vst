@@ -555,7 +555,7 @@ private:
 
     static constexpr int kMedianSize = 3;
     static constexpr float kFastJumpCents = 400.0f;
-    static constexpr float kFastWindowPeriods = 1.0f;   // Low Latency analysis window, in periods
+    static constexpr float kFastWindowPeriods = 0.95f;   // Low Latency analysis window, in periods
     bool fastResponse = false, jumpPending = false;
 #ifndef SKELLYTUNE_LL_FAST_HOP
 #define SKELLYTUNE_LL_FAST_HOP 0
