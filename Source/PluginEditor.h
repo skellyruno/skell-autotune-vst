@@ -33,10 +33,13 @@ class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor, private juce:
     SkeletonOrb orb;
     juce::TextButton appearanceButton{""};
     juce::TextButton settingsButton{""};
-    juce::Random lightingRandom;
-    int lightingHold = 0, flareHold = 180;
-    float lightingTarget = .5f, lightingLevel = .5f, lightingFlare = 0;
-    double lightingPhase = 0;
+    bool lastPowered = true;
+    bool themeNotificationPending = false;
+    double themeChangedAt = 0;
+    double lastAnimationTick = 0;
+    double lastOrbRepaint = 0;
+    juce::Image backdrop;
+    void paintBackdrop(juce::Graphics &);
     int appearanceTheme = -1;
     void applyAppearance();
 
@@ -84,10 +87,11 @@ class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor, private juce:
     int displayTargetMidi = -1;
     float displayInputLevel = 0.0f;
     // Pitch heatmap history (scrolling)
-    static constexpr int kHeatmapWidth = 200;
+    static constexpr int kHeatmapWidth = 104;
     std::array<float, kHeatmapWidth> heatmapDetected{};
     std::array<float, kHeatmapWidth> heatmapTarget{};
     int heatmapWriteIdx = 0;
+    int historyFrames = 0;
 
     void setupKnob(juce::Slider &, const juce::String &text, const juce::String &tooltip);
     void applyScaleFromControls();

@@ -80,6 +80,7 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
         v39_steady_phase_precision_regression
         stereo_phase_mark_link_regression
         overlap_gain_regression
+        live_model_startup_regression
         live_unity_phase_regression
         live_cycle_clock_regression
         live_spectral_stereo_regression

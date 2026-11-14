@@ -90,7 +90,7 @@ public:
 
 private:
     void timerCallback() override;
-    std::atomic<int> uiTheme {0};
+    std::atomic<int> uiTheme {1};
     std::atomic<bool> reducedMotion {false};
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     void cacheParameterRefs();
@@ -116,7 +116,6 @@ private:
         std::atomic<float>* rangeProtection = nullptr;
         std::atomic<float>* enabled = nullptr;
         std::atomic<float>* lowLatencyMode = nullptr;
-        std::atomic<float>* lowLatencyFastHop = nullptr;
         std::atomic<float>* inputGain = nullptr;
         std::atomic<float>* outputGain = nullptr;
         std::array<std::atomic<float>*, 12> notes{};

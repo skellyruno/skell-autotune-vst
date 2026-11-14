@@ -82,7 +82,7 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::ParameterID{"noteStabilizer", 1}, "Note Stabilizer", false));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"formantPreserve", 1}, "Formant Preserve", true));
+        juce::ParameterID{"formantPreserve", 1}, "Formant Preserve", false));
 
     // Independent vocal-tract colour shift. The zero default is intentionally
     // neutral so prior sessions retain the existing sound until this is adjusted.
@@ -105,12 +105,7 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::ParameterID{"enabled", 1}, "Enabled", true));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"lowLatencyMode", 1}, "Low Latency (Experimental)", false));
-
-    // EXPERIMENTAL: Low Latency re-measures pitch every ~2 ms instead of ~4 ms. Only has an effect
-    // while Low Latency is on. Not shown in the editor; toggle it from the host's parameter list.
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"lowLatencyFastHop", 1}, "Low Latency Fast Hop (Experimental)", false));
+        juce::ParameterID{"lowLatencyMode", 1}, "Low Latency (Experimental)", true));
 
     // Hidden from the current editor but retained so older sessions/automation remain valid.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -221,7 +216,7 @@ void HumHouseVocalTuneProcessor::registerPresetTracking(bool add)
     static constexpr const char* kParameters[] = {
         "retune", "humanize", "flexTune", "glide", "rootNote", "scaleType",
         "scaleExtension", "referenceFreq", "noteStabilizer", "formantPreserve",
-        "formantShift", "range", "rangeProtection", "enabled", "lowLatencyMode", "lowLatencyFastHop", "inputGain", "outputGain"
+        "formantShift", "range", "rangeProtection", "enabled", "lowLatencyMode", "inputGain", "outputGain"
     };
     for (const auto* id : kParameters)
     {
@@ -253,7 +248,6 @@ void HumHouseVocalTuneProcessor::cacheParameterRefs()
     parameterRefs.rangeProtection = apvts.getRawParameterValue("rangeProtection");
     parameterRefs.enabled = apvts.getRawParameterValue("enabled");
     parameterRefs.lowLatencyMode = apvts.getRawParameterValue("lowLatencyMode");
-    parameterRefs.lowLatencyFastHop = apvts.getRawParameterValue("lowLatencyFastHop");
     parameterRefs.inputGain = apvts.getRawParameterValue("inputGain");
     parameterRefs.outputGain = apvts.getRawParameterValue("outputGain");
 
@@ -271,8 +265,8 @@ void HumHouseVocalTuneProcessor::prepareToPlay (double sampleRate, int samplesPe
 {
     engine.setRangeProtection(parameterRefs.rangeProtection->load(std::memory_order_relaxed) > 0.5f);
     engine.setVoiceRange(static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed)));
+    engine.setLowLatencyFastHop(true);
     engine.setLowLatencyMode(parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f);
-    engine.setLowLatencyFastHop(parameterRefs.lowLatencyFastHop->load(std::memory_order_relaxed) > 0.5f);
     engine.prepare(sampleRate, samplesPerBlock);
     inputGainRamp.prepare(sampleRate,juce::Decibels::decibelsToGain(parameterRefs.inputGain->load(std::memory_order_relaxed)));
     outputGainRamp.prepare(sampleRate,juce::Decibels::decibelsToGain(parameterRefs.outputGain->load(std::memory_order_relaxed)));
@@ -305,7 +299,6 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const bool rangeProtection = parameterRefs.rangeProtection->load(std::memory_order_relaxed) > 0.5f;
     const bool on          = parameterRefs.enabled->load(std::memory_order_relaxed) > 0.5f;
     const bool lowLatency  = parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f;
-    const bool fastHop     = parameterRefs.lowLatencyFastHop->load(std::memory_order_relaxed) > 0.5f;
     const float inGainDb   = parameterRefs.inputGain->load(std::memory_order_relaxed);
     const float outGainDb  = parameterRefs.outputGain->load(std::memory_order_relaxed);
 
@@ -332,7 +325,6 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     engine.setRangeProtection(rangeProtection);
     engine.setVoiceRange(range);
     engine.setLowLatencyMode(lowLatency);
-    engine.setLowLatencyFastHop(fastHop);
     engine.setEnabled(on);
 
     // The delay depends on the Voice Range: tell the host when it changes

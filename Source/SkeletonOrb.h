@@ -9,7 +9,7 @@ class SkeletonOrb : public juce::Component {
     float activity = 0;
     float motionLevel = 0;
     double phase = 0;
-    double globePhase = 0;
+    double sweepPhase = 0;
     float intensity = 1;
     bool bypassed = false;
     bool reducedMotion = false;
@@ -17,62 +17,47 @@ class SkeletonOrb : public juce::Component {
         juce::Graphics::ScopedSaveState saved(graphics);
         graphics.addTransform(juce::AffineTransform::scale(getWidth() / 280.0f, getHeight() / 280.0f));
         auto &g = graphics;
-        g.setColour(juce::Colours::black.withAlpha(.20f));
-        g.fillEllipse(5, 8, 270, 270);
-        juce::ColourGradient rim(metalHigh, 35, 15, metalLow, 250, 265, false);
-        g.setGradientFill(rim);
-        g.fillEllipse(5, 5, 270, 270);
-        g.setColour(juce::Colour(0xff07100b));
-        g.fillEllipse(11, 11, 258, 258);
+        if (!shell.isValid() || cachedAccent != accent || cachedHigh != metalHigh || cachedLow != metalLow) {
+            const auto density = juce::jlimit(1.0f, 2.0f,
+                juce::Component::getApproximateScaleFactorForComponent(this));
+            shell = juce::Image(juce::Image::ARGB, juce::roundToInt(getWidth() * density),
+                                juce::roundToInt(getHeight() * density), true);
+            juce::Graphics shellGraphics(shell);
+            shellGraphics.addTransform(juce::AffineTransform::scale(shell.getWidth() / 280.0f,
+                                                                    shell.getHeight() / 280.0f));
+            paintShell(shellGraphics);
+            cachedAccent = accent;
+            cachedHigh = metalHigh;
+            cachedLow = metalLow;
+        }
+        {
+            juce::Graphics::ScopedSaveState globe(g);
+            if (!reducedMotion && !bypassed)
+                g.addTransform(juce::AffineTransform::rotation(
+                    .055f * activity * std::sin(static_cast<float>(phase)), 140, 140));
+            g.drawImage(shell, juce::Rectangle<float>(0, 0, 280, 280));
+        }
         if (bypassed) {
             g.setColour(juce::Colour(0xff070a08));
-            g.fillEllipse(18, 18, 244, 244);
+            g.fillEllipse(17, 17, 246, 246);
             return;
         }
-        juce::ColourGradient glass(juce::Colour(0xff1d3d27), 93, 58, juce::Colour(0xff030a06), 235, 243,
-                                   true);
-        glass.addColour(.4, juce::Colour(0xff0c2114));
-        g.setGradientFill(glass);
-        g.fillEllipse(18, 18, 244, 244);
-        juce::Path clip;
-        clip.addEllipse(18, 18, 244, 244);
         {
             juce::Graphics::ScopedSaveState clipped(g);
+            juce::Path clip;
+            clip.addEllipse(18, 18, 244, 244);
             g.reduceClipRegion(clip);
-            g.setColour(accent.withAlpha(.10f));
-            // A rotating spherical grid uses true 3D projection and depth shading.
-            auto project = [&](float latitude, float longitude) {
-                const float angle = longitude + static_cast<float>(globePhase);
-                const float x = std::cos(latitude) * std::sin(angle);
-                const float z = std::cos(latitude) * std::cos(angle);
-                const float y = std::sin(latitude);
-                return juce::Point<float>(140 + 120 * x, 140 + 116 * y + 18 * z);
-            };
-            for (int meridian = 0; meridian < 10; ++meridian) {
-                juce::Path line;
-                for (int sample = 0; sample <= 48; ++sample) {
-                    auto point = project(-1.57f + sample * 3.14f / 48, meridian * 6.283185f / 10);
-                    if (sample == 0)
-                        line.startNewSubPath(point);
-                    else
-                        line.lineTo(point);
-                }
-                g.setColour(accent.withAlpha(
-                    .08f +
-                    .06f * std::max(0.0f, std::cos(static_cast<float>(globePhase) + meridian * .6283f))));
-                g.strokePath(line, juce::PathStrokeType(.8f));
-            }
-            for (int latitude = -2; latitude <= 2; ++latitude) {
-                juce::Path line;
-                for (int sample = 0; sample <= 64; ++sample) {
-                    auto point = project(latitude * .48f, sample * 6.283185f / 64);
-                    if (sample == 0)
-                        line.startNewSubPath(point);
-                    else
-                        line.lineTo(point);
-                }
-                g.setColour(accent.withAlpha(.12f));
-                g.strokePath(line, juce::PathStrokeType(.8f));
+            if (!reducedMotion) for (int light = 0; light < 2; ++light) {
+                const float phaseAngle = static_cast<float>(sweepPhase) + light * juce::MathConstants<float>::pi;
+                const float sweepX = 140 + 110 * std::sin(phaseAngle);
+                const float sweepY = 140 + (light == 0 ? 68 : -92) * std::cos(phaseAngle) + 9 * activity * std::sin(static_cast<float>(phase));
+                const auto neon = juce::Colour(0xff64ff32);
+                juce::ColourGradient glow(neon.withAlpha(.18f + .34f * activity), sweepX, sweepY,
+                                          neon.withAlpha(0.0f), sweepX + 49, sweepY, true);
+                g.setGradientFill(glow);
+                g.fillEllipse(sweepX - 49, sweepY - 49, 98, 98);
+                g.setColour(neon.withAlpha(.45f + .45f * activity));
+                g.drawLine(sweepX, sweepY - 12, sweepX, sweepY + 12, 1.1f + activity);
             }
             juce::Graphics::ScopedSaveState skeleton(g);
             const float movement = reducedMotion ? 0.0f : motionLevel;
@@ -84,26 +69,26 @@ class SkeletonOrb : public juce::Component {
             auto bone = [&](float x, float y, float xx, float yy, float width = 2.0f) {
                 const float energy = reducedMotion ? 0.0f : activity * intensity;
                 const float identity = x * .17f + y * .071f + xx * .023f;
-                for (int segment = 0, pieces = energy < .01f ? 1 : (width > 1.5f ? 5 : 2); segment < pieces; ++segment) {
-                    const float u = segment / static_cast<float>(pieces), v = (segment + (energy < .01f ? 1.0f : .86f)) / static_cast<float>(pieces);
-                    const float pulse =
-                        std::max(0.0f, static_cast<float>(std::sin(phase * 2.7 + identity + segment * 1.9)));
-                    const float fracture = energy * pulse * pulse;
-                    const float dx = fracture * 15 * std::sin(identity + segment * 2.4f);
-                    const float dy = fracture * 11 * std::cos(identity + segment * 1.3f);
+                const int pieces = energy > .01f && width > 1.5f ? 3 : 1;
+                for (int segment = 0; segment < pieces; ++segment) {
+                    const float u = static_cast<float>(segment) / pieces;
+                    const float v = (segment + (energy > .01f ? .78f : 1.0f)) / pieces;
+                    const float angle = static_cast<float>(phase) + identity + segment * 2.4f;
+                    const float orbitRadius = 28.0f + 78.0f * (.5f + .5f * std::sin(identity * 2.13f + segment));
+                    const float scatter = juce::jlimit(0.0f, 1.0f, energy * (width > 1.5f ? 1.75f : 1.45f));
+                    const float midX = x + (xx - x) * (u + v) * .5f;
+                    const float midY = y + (yy - y) * (u + v) * .5f;
+                    const float dx = scatter * (140 + orbitRadius * std::sin(angle) - midX);
+                    const float dy = scatter * (140 + orbitRadius * std::cos(angle) - midY);
                     const float ax = x + (xx - x) * u + dx, ay = y + (yy - y) * u + dy;
                     const float bx = x + (xx - x) * v + dx, by = y + (yy - y) * v + dy;
-                    if (fracture > .10f) {
-                        g.setColour(accent.withAlpha(fracture * .22f));
-                        g.drawLine(ax, ay, bx, by, width + 3);
+                    if (scatter > .2f && width > 1.5f) {
+                        g.setColour(accent.withAlpha(scatter * .28f));
+                        g.drawLine(ax - 9 * scatter * std::cos(angle),
+                                   ay + 9 * scatter * std::sin(angle), ax, ay, .9f);
                     }
-                    g.setColour(boneColour.withMultipliedAlpha(1 - fracture * .4f));
+                    g.setColour(boneColour.interpolatedWith(accent, .65f * scatter));
                     g.drawLine(ax, ay, bx, by, width);
-                    if (fracture > .12f) {
-                        g.setColour(accent.withAlpha(fracture * .7f));
-                        g.fillRect(ax - 1, ay - 1, 1.8f, 1.8f);
-                        g.drawLine(ax, ay, ax, ay + 3 + fracture * 8, .6f);
-                    }
                 }
             };
             // An articulated character; its movement follows voiced activity only.
@@ -119,7 +104,9 @@ class SkeletonOrb : public juce::Component {
             skull.closeSubPath();
             g.setGradientFill(juce::ColourGradient(boneColour.brighter(.2f), 126, 44, boneColour.darker(.5f),
                                                    155, 77, false));
-            g.fillPath(skull);
+            if (activity < .45f || reducedMotion)
+                g.fillPath(skull);
+            if (activity < .45f || reducedMotion) {
             g.setColour(juce::Colour(0xff092114));
             g.fillEllipse(128, 53, 9, 11);
             g.fillEllipse(143, 53, 9, 11);
@@ -129,11 +116,12 @@ class SkeletonOrb : public juce::Component {
             for (int i = 0; i < 5; ++i)
                 g.drawLine(133.0f + i * 3.5f, 71, 133.0f + i * 3.5f, 76, .7f);
             g.setColour(boneColour);
+            }
             bone(128, 73, 152, 73);
             for (int i = 0; i < 5; ++i)
                 bone(132 + i * 4, 71, 132 + i * 4, 77, 1);
             for (int i = 0; i < 12; ++i)
-                g.drawEllipse(137, 81 + i * 5, 6, 4, 1.2f);
+                bone(137, 81 + i * 5, 143, 83 + i * 5, 1.2f);
             bone(140, 89, 113, 97);
             bone(140, 89, 167, 97);
             for (int i = 0; i < 5; ++i) {
@@ -159,18 +147,16 @@ class SkeletonOrb : public juce::Component {
                 bone(97 + i * 2, 177, 91 + i * 3, 190, 1);
                 bone(183 - i * 2, 177, 189 - i * 3, 190, 1);
             }
-            juce::Path pelvis;
-            pelvis.startNewSubPath(124, 146);
-            pelvis.lineTo(156, 146);
-            pelvis.lineTo(150, 165);
-            pelvis.lineTo(140, 159);
-            pelvis.lineTo(130, 165);
-            pelvis.closeSubPath();
-            g.strokePath(pelvis, juce::PathStrokeType(2));
+            bone(124, 146, 156, 146);
+            bone(156, 146, 150, 165);
+            bone(150, 165, 140, 159);
+            bone(140, 159, 130, 165);
+            bone(130, 165, 124, 146);
             bone(130, 163, 124, 199);
             bone(124, 199, 119, 231);
             bone(150, 163, 156, 199);
             bone(156, 199, 161, 231);
+            if (activity < .2f)
             for (auto point : {juce::Point<float>(102, 139 + sway), juce::Point<float>(178, 139 - sway),
                                juce::Point<float>(124, 199), juce::Point<float>(156, 199)})
                 g.drawEllipse(point.x - 3, point.y - 3, 6, 6, 1.2f);
@@ -179,9 +165,72 @@ class SkeletonOrb : public juce::Component {
             bone(161, 231, 172, 237);
             bone(172, 237, 155, 237);
         }
-        g.setColour(accent.withAlpha(bypassed ? .15f : .55f));
+    }
+
+    void resized() override { shell = {}; }
+
+  private:
+    juce::Image shell;
+    juce::Colour cachedAccent, cachedHigh, cachedLow;
+
+    void paintShell(juce::Graphics &g) {
+        g.setColour(juce::Colours::black.withAlpha(.20f));
+        g.fillEllipse(5, 8, 270, 270);
+        juce::ColourGradient rim(metalHigh, 35, 15, metalLow, 250, 265, false);
+        g.setGradientFill(rim);
+        g.fillEllipse(5, 5, 270, 270);
+        g.setColour(juce::Colour(0xff07100b));
+        g.fillEllipse(11, 11, 258, 258);
+        juce::ColourGradient glass(juce::Colour(0xff346a46), 96, 74, juce::Colour(0xff010302), 238, 243,
+                                   true);
+        glass.addColour(.36, juce::Colour(0xff153723));
+        glass.addColour(.68, juce::Colour(0xff081b10));
+        g.setGradientFill(glass);
+        g.fillEllipse(18, 18, 244, 244);
+        juce::Path clip;
+        clip.addEllipse(18, 18, 244, 244);
+        {
+            juce::Graphics::ScopedSaveState clipped(g);
+            g.reduceClipRegion(clip);
+            g.setColour(accent.withAlpha(.10f));
+            // Cache the projected grid and glass shading once per size and theme.
+            auto project = [&](float latitude, float longitude) {
+                const float angle = longitude + 0.35f;
+                const float x = std::cos(latitude) * std::sin(angle);
+                const float z = std::cos(latitude) * std::cos(angle);
+                const float y = std::sin(latitude);
+                return juce::Point<float>(140 + 120 * x, 140 + 116 * y + 18 * z);
+            };
+            for (int meridian = 0; meridian < 10; ++meridian) {
+                juce::Path line;
+                for (int sample = 0; sample <= 48; ++sample) {
+                    auto point = project(-1.57f + sample * 3.14f / 48, meridian * 6.283185f / 10);
+                    if (sample == 0)
+                        line.startNewSubPath(point);
+                    else
+                        line.lineTo(point);
+                }
+                g.setColour(accent.withAlpha(
+                    .092f +
+                    .069f * std::max(0.0f, std::cos(0.35f + meridian * .6283f))));
+                g.strokePath(line, juce::PathStrokeType(.8f));
+            }
+            for (int latitude = -2; latitude <= 2; ++latitude) {
+                juce::Path line;
+                for (int sample = 0; sample <= 64; ++sample) {
+                    auto point = project(latitude * .48f, sample * 6.283185f / 64);
+                    if (sample == 0)
+                        line.startNewSubPath(point);
+                    else
+                        line.lineTo(point);
+                }
+                g.setColour(accent.withAlpha(.138f));
+                g.strokePath(line, juce::PathStrokeType(.8f));
+            }
+        }
+        g.setColour(accent.withAlpha(.6325f));
         g.drawEllipse(15, 15, 250, 250, 1.4f);
-        juce::ColourGradient reflection(juce::Colours::white.withAlpha(.27f), 65, 42,
+        juce::ColourGradient reflection(juce::Colours::white.withAlpha(.31f), 65, 42,
                                         juce::Colours::white.withAlpha(0.0f), 111, 110, false);
         g.setGradientFill(reflection);
         juce::Path shine;
@@ -190,7 +239,7 @@ class SkeletonOrb : public juce::Component {
         g.fillPath(shine);
         juce::Path edge;
         edge.addCentredArc(140, 140, 127, 127, 0, -1.1f, .3f, true);
-        g.setColour(juce::Colours::white.withAlpha(.3f));
+        g.setColour(juce::Colours::white.withAlpha(.345f));
         g.strokePath(edge, juce::PathStrokeType(1.2f));
     }
 };
