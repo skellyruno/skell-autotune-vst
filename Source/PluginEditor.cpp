@@ -104,6 +104,17 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   humanizeAtt = std::make_unique<SliderAttach>(apvts, "humanize", humanizeKnob);
   referenceFreqAtt =
       std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
+  for (auto* step : {&referenceDown, &referenceUp}) {
+    const bool up = step == &referenceUp;
+    step->setTitle(up ? "Raise A4 reference" : "Lower A4 reference");
+    step->getProperties().set("referenceStep", true);
+    step->onClick = [this, up] {
+      const auto interval = referenceFreqKnob.getInterval();
+      referenceFreqKnob.setValue(referenceFreqKnob.getValue() + (up ? interval : -interval),
+                                 juce::sendNotificationSync);
+    };
+    addAndMakeVisible(*step);
+  }
   for (auto* value : {&retuneValue, &humanizeValue}) {
     value->setJustificationType(juce::Justification::centred);
     value->setInterceptsMouseClicks(false, false);
@@ -373,9 +384,10 @@ void HumHouseVocalTuneEditor::timerCallback() {
   const bool powerChanged = powered != lastPowered;
   if (powerChanged) {
     lastPowered = powered;
-    for (auto *control : std::array<juce::Component *, 8>{
+    for (auto *control : std::array<juce::Component *, 10>{
              &speedKnob, &humanizeKnob, &referenceFreqKnob, &rangeBox,
-             &rootNoteBox, &scaleBox, &appearanceButton, &settingsButton})
+             &rootNoteBox, &scaleBox, &appearanceButton, &settingsButton,
+             &referenceDown, &referenceUp})
       control->setEnabled(powered);
     for (auto &key : noteButtons)
       key.setEnabled(powered);
@@ -453,7 +465,7 @@ void HumHouseVocalTuneEditor::timerCallback() {
       now - lastOrbRepaint >= (orb.activity > 0.015f ? 30.0 : 65.0))) {
     lastOrbRepaint = now;
     orb.repaint();
-    repaint(juce::Rectangle<float>(490, 449, 169, 37)
+    repaint(juce::Rectangle<float>(148, 449, 511, 37)
                 .transformedBy(juce::AffineTransform::scale(scaleFactor()))
                 .getSmallestIntegerContainer());
   }
@@ -617,22 +629,39 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
 
 void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
   g.addTransform(juce::AffineTransform::scale(scaleFactor()));
-  if (g.getClipBounds().intersects(juce::Rectangle<int>(490, 449, 169, 37))) {
+  if (g.getClipBounds().intersects(juce::Rectangle<int>(148, 449, 511, 37))) {
     const float travel = orb.reducedMotion ? 0.0f : static_cast<float>(orb.phase);
-    constexpr std::array<juce::uint32, 6> colours{
-        0xff8effaa, 0xff71d7ff, 0xffb996ff, 0xfff4bf69, 0xffff8aae, 0xff83ebda};
-    for (int i = 0; i < static_cast<int>(colours.size()); ++i) {
-      const float phase = travel * (i + 1) * .1f + i * 2.1f;
-      const float x = 502.0f + i * 28 + std::sin(phase) * 6;
-      const float y = 472.0f + std::cos(phase) * 4;
-      juce::Path rune;
-      rune.startNewSubPath(x, y - 6);
-      rune.lineTo(x, y + 6);
-      rune.startNewSubPath(x - 4, y + 2);
-      rune.lineTo(x + 4, y - 3);
-      rune.lineTo(x, y - (i == 1 ? 6 : 1));
-      g.setColour(juce::Colour(colours[static_cast<size_t>(i)]).withAlpha(.46f + .16f * std::cos(phase)));
-      g.strokePath(rune, juce::PathStrokeType(1.4f));
+    constexpr std::array<juce::uint32, 9> colours{
+        0xff8effaa, 0xff71d7ff, 0xffb996ff, 0xfff4bf69, 0xffff8aae,
+        0xff83ebda, 0xffffab73, 0xffaaaaff, 0xffd6fc79};
+    const float energy = orb.reducedMotion ? 0.0f : orb.activity;
+    for (int i = 0; i < 24; ++i) {
+      const float phase = travel * (.25f + .05f * i) + i * 2.1f;
+      const float x = 162.0f + i * 21.0f + std::sin(phase) * (2 + 3 * energy);
+      const float y = 470.0f + std::cos(phase) * (2 + 6 * energy);
+      const float reach = 1.0f + energy * std::sin(phase);
+      juce::Path bones;
+      if (i % 2 == 0) {
+        bones.addRoundedRectangle(x - 4, y - 6, 8, 8, 2.5f);
+        bones.startNewSubPath(x - 2.5f, y + 2);
+        bones.lineTo(x - 2.5f, y + 5);
+        bones.lineTo(x + 2.5f, y + 5);
+        bones.lineTo(x + 2.5f, y + 2);
+        bones.addEllipse(x - 2.6f, y - 2.8f, 1.9f, 2.2f);
+        bones.addEllipse(x + .7f, y - 2.8f, 1.9f, 2.2f);
+      } else {
+        bones.addRoundedRectangle(x - 5, y - 7, 10, 14, 2.0f);
+        bones.startNewSubPath(x, y - 4);
+        bones.lineTo(x, y + 5);
+        for (int rib = -3; rib <= 3; rib += 3) {
+          bones.startNewSubPath(x - 3 * reach, y + rib - 1);
+          bones.lineTo(x, y + rib + 1);
+          bones.lineTo(x + 3 * reach, y + rib - 1);
+        }
+      }
+      g.setColour(juce::Colour(colours[static_cast<size_t>(i) % colours.size()])
+                      .withAlpha(.37f + .46f * energy));
+      g.strokePath(bones, juce::PathStrokeType(1.3f));
     }
   }
   if (displayDetectedMidi >= 0 && enableBtn.getToggleState()) {
@@ -671,7 +700,9 @@ void HumHouseVocalTuneEditor::resized() {
   orb.setBounds(rect(215, 95, 270, 270));
   rootNoteBox.setBounds(rect(382, 26, 62, 30));
   scaleBox.setBounds(rect(450, 26, 154, 30));
-  referenceFreqKnob.setBounds(rect(526, 386, 138, 24));
+  referenceFreqKnob.setBounds(rect(550, 386, 86, 24));
+  referenceDown.setBounds(rect(522, 387, 24, 22));
+  referenceUp.setBounds(rect(640, 387, 24, 22));
   referenceFreqLabel.setVisible(false);
   rootNoteLabel.setVisible(false);
   appearanceButton.setBounds(rect(32, 24, 32, 34));

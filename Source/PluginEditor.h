@@ -48,6 +48,7 @@ class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor, private juce:
 
     // Labels for knobs
     juce::Label referenceFreqLabel;
+    juce::TextButton referenceDown{"-"}, referenceUp{"+"};
     juce::Label retuneValue, humanizeValue;
 
     // Scale selector (western scales plus optional 24-TET and Maqam modes)

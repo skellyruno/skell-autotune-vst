@@ -86,14 +86,14 @@ class SkeletonOrb : public juce::Component {
                                         .interpolatedWith(accent, .25f)
                                         .withAlpha(bypassed ? .3f : .85f + .15f * activity);
             auto bone = [&](float x, float y, float xx, float yy, float width = 2.0f) {
-                const float recovery = .45f + .55f * std::abs(std::sin(static_cast<float>(phase) * .35f + x * .022f));
+                const float recovery = .16f + .84f * std::pow(std::abs(std::sin(static_cast<float>(phase) * (.58f + .14f * std::sin(x)) + x * .091f + y * .023f)), 3.0f);
                 const float energy = reducedMotion ? 0.0f : activity * intensity * recovery;
                 const float identity = x * .17f + y * .071f + xx * .023f;
                 const int pieces = energy > .01f && width > 1.5f ? 2 : 1;
                 for (int segment = 0; segment < pieces; ++segment) {
                     const float u = static_cast<float>(segment) / pieces;
                     const float v = (segment + (energy > .01f ? .94f : 1.0f)) / pieces;
-                    const float angle = static_cast<float>(phase) + identity + segment * 2.4f;
+                    const float angle = static_cast<float>(phase) + identity + segment * 2.4f + .85f * std::sin(identity * 2.63f + segment + static_cast<float>(phase) * .71f);
                     const float orbitRadius = 28.0f + 78.0f * (.5f + .5f * std::sin(identity * 2.13f + segment));
                     const float scatter = juce::jlimit(0.0f, 1.0f, energy * (width > 1.5f ? 1.75f : 1.45f));
                     const float midX = x + (xx - x) * (u + v) * .5f;
