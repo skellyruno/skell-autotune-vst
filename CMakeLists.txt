@@ -80,6 +80,7 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
         v39_steady_phase_precision_regression
         stereo_phase_mark_link_regression
         overlap_gain_regression
+        live_model_startup_regression
         live_unity_phase_regression
         live_cycle_clock_regression
         live_spectral_stereo_regression
@@ -280,6 +281,10 @@ target_compile_definitions(HumHouseVocalTune
         JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_DISPLAY_SPLASH_SCREEN=0
 )
+
+juce_add_binary_data(SkellyTuneRunes HEADER_NAME SkellyTuneRunes.h
+    NAMESPACE SkellyTuneRunes SOURCES Assets/rune_atlas.png)
+target_link_libraries(HumHouseVocalTune PRIVATE SkellyTuneRunes)
 
 target_link_libraries(HumHouseVocalTune
     PRIVATE

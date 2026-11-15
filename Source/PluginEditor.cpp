@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include <cmath>
+#include "SkellyTuneRunes.h"
 
 namespace {
 const juce::StringArray kNoteNames{"C",  "C#", "D",  "D#", "E",  "F",
@@ -10,6 +11,56 @@ constexpr bool isBlackKey(int idx) {
   return idx == 1 || idx == 3 || idx == 6 || idx == 8 || idx == 10;
 }
 
+class SettingsRow final : public juce::PopupMenu::CustomComponent {
+public:
+  SettingsRow(juce::String label, bool checked, std::function<void()> action,
+              juce::Colour textColour, float scale)
+      : CustomComponent(false), caption(std::move(label)), active(checked),
+        colour(textColour), zoom(scale) {
+    button.setTitle(caption);
+    button.setAccessible(true);
+    button.onClick = [this, action = std::move(action)] {
+      action();
+      active = !active;
+      repaint();
+    };
+    addAndMakeVisible(button);
+  }
+  void getIdealSize(int& width, int& height) override {
+    width = juce::roundToInt(158 * zoom);
+    height = juce::roundToInt(29 * zoom);
+  }
+  void resized() override { button.setBounds(getLocalBounds()); }
+  void paintOverChildren(juce::Graphics& g) override {
+    auto area = getLocalBounds().reduced(juce::roundToInt(8 * zoom), 1);
+    if (button.isOver() || button.hasKeyboardFocus(false)) {
+      g.setColour(colour.withAlpha(.12f));
+      g.fillRoundedRectangle(area.toFloat(), 4.0f);
+    }
+    g.setColour(colour);
+    g.setFont(juce::Font(juce::FontOptions(14 * zoom)));
+    auto mark = area.removeFromRight(juce::roundToInt(18 * zoom)).toFloat();
+    g.drawText(caption, area, juce::Justification::centredLeft, false);
+    if (active) {
+      const auto c = mark.getCentre();
+      juce::Path check;
+      check.startNewSubPath(c.x - 5 * zoom, c.y);
+      check.lineTo(c.x - 1 * zoom, c.y + 4 * zoom);
+      check.lineTo(c.x + 6 * zoom, c.y - 4 * zoom);
+      g.strokePath(check, juce::PathStrokeType(1.8f * zoom));
+    }
+  }
+private:
+  struct RowButton final : juce::Button {
+    RowButton() : Button("Setting") {}
+    void paintButton(juce::Graphics&, bool, bool) override {}
+  } button;
+  juce::String caption;
+  bool active;
+  juce::Colour colour;
+  float zoom;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -17,6 +68,7 @@ constexpr bool isBlackKey(int idx) {
 // ---------------------------------------------------------------------------
 HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
     : AudioProcessorEditor(p), proc(p) {
+  setOpaque(true);
   setLookAndFeel(&lnf);
   enableBtn.getProperties().set("powerButton", true);
 
@@ -27,21 +79,15 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
             "How fast the pitch snaps to the note. Turn right for faster.\n0 = "
             "instant (hard tune), 100 = "
             "slow and natural.");
-  speedKnob.getProperties().set("displayScale", 100.0); // shown as 0..100
-  speedKnob.getProperties().set(
-      "displayFlip",
-      true); // fully right = 0 (fastest), fully left = 100 (slowest)
-
   setupKnob(humanizeKnob, "HUMANIZE",
             "Eases off correction on sustained notes.");
-  humanizeKnob.getProperties().set("displayScale", 100.0);
-  humanizeKnob.setTextValueSuffix("%");
+
   setupKnob(referenceFreqKnob, "PITCH REF",
             "What frequency the note A4 is tuned to. 440 Hz is the standard.");
   referenceFreqKnob.setTextValueSuffix(" Hz");
-  referenceFreqKnob.setSliderStyle(juce::Slider::IncDecButtons);
-  referenceFreqKnob.setIncDecButtonsMode(
-      juce::Slider::incDecButtonsNotDraggable);
+  referenceFreqKnob.setSliderStyle(juce::Slider::LinearHorizontal);
+  referenceFreqKnob.getProperties().set("referenceReadout", true);
+  referenceFreqKnob.setScrollWheelEnabled(true);
   referenceFreqKnob.setNumDecimalPlacesToDisplay(1);
   referenceFreqKnob.setDoubleClickReturnValue(true, 440.0);
   referenceFreqKnob.setColour(juce::Slider::textBoxBackgroundColourId,
@@ -59,6 +105,32 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   humanizeAtt = std::make_unique<SliderAttach>(apvts, "humanize", humanizeKnob);
   referenceFreqAtt =
       std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
+  for (auto* step : {&referenceDown, &referenceUp}) {
+    const bool up = step == &referenceUp;
+    step->setTitle(up ? "Raise A4 reference" : "Lower A4 reference");
+    step->getProperties().set("referenceStep", true);
+    step->onClick = [this, up] {
+      const auto interval = referenceFreqKnob.getInterval();
+      referenceFreqKnob.setValue(referenceFreqKnob.getValue() + (up ? interval : -interval),
+                                 juce::sendNotificationSync);
+    };
+    addAndMakeVisible(*step);
+  }
+  for (auto* value : {&retuneValue, &humanizeValue}) {
+    value->setJustificationType(juce::Justification::centred);
+    value->setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(*value);
+  }
+  speedKnob.onValueChange = [this] {
+    retuneValue.setText(juce::String(juce::roundToInt(100 * (1 - speedKnob.getValue()))),
+                        juce::dontSendNotification);
+  };
+  humanizeKnob.onValueChange = [this] {
+    humanizeValue.setText(juce::String(juce::roundToInt(100 * humanizeKnob.getValue())),
+                          juce::dontSendNotification);
+  };
+  speedKnob.onValueChange();
+  humanizeKnob.onValueChange();
 
   // --- Scale selector: western modes plus optional quarter-tone / Maqam scales
   // ---
@@ -131,6 +203,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
 
   // --- Key (root note) ---
   rootNoteBox.addItemList(kNoteNames, 1);
+  rootNoteBox.getProperties().set("keyReadout", true);
   rootNoteBox.setSelectedItemIndex(0, juce::dontSendNotification);
   rootNoteBox.setTooltip("The key of your song.\nChanging it re-lights the "
                          "piano keys for the chosen scale.");
@@ -167,12 +240,11 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
 
   // Readable at the design size, with proportional resizing.
   setResizable(true, true);
-  setResizeLimits(630, 612, 1050, 1020);
+  setResizeLimits(420, 408, 1050, 1020);
   if (auto *c = getConstrainer())
     c->setFixedAspectRatio(static_cast<double>(kDesignW) /
                            static_cast<double>(kDesignH));
-  setSize(juce::roundToInt(static_cast<float>(kDesignW)),
-          juce::roundToInt(static_cast<float>(kDesignH)));
+  setSize(476, 462);
 
   appearanceButton.setName("Cycle theme");
   appearanceButton.setTooltip("Click the skull to cycle themes.");
@@ -180,9 +252,8 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   addAndMakeVisible(appearanceButton);
   appearanceButton.onClick = [this] {
     proc.setUiTheme((proc.getUiTheme() + 1) % 4);
-    proc.updateHostDisplay(
-        juce::AudioProcessor::ChangeDetails{}.withNonParameterStateChanged(
-            true));
+    themeNotificationPending = true;
+    themeChangedAt = juce::Time::getMillisecondCounterHiRes();
     applyAppearance();
   };
   settingsButton.setName("Settings");
@@ -192,52 +263,55 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   settingsButton.onClick = [this] {
     juce::PopupMenu menu;
     menu.setLookAndFeel(&lnf);
-    const bool preserve =
-        proc.getAPVTS().getRawParameterValue("formantPreserve")->load() > .5f;
-    menu.addSectionHeader("Processing");
-    menu.addItem(11, "Formant", true, preserve);
-    menu.addSeparator();
-    menu.addItem(
-        1, "Low Latency", true,
-        proc.getAPVTS().getRawParameterValue("lowLatencyMode")->load() > .5f);
-    menu.addItem(3, "Reduce motion and lighting", true,
-                 proc.getReducedMotion());
-    menu.showMenuAsync(
-        juce::PopupMenu::Options().withTargetComponent(&settingsButton),
-        [safe = juce::Component::SafePointer<HumHouseVocalTuneEditor>(this)](
-            int result) {
-          if (safe == nullptr || result == 0)
-            return;
-          if (result == 11) {
-            auto *parameter =
-                safe->proc.getAPVTS().getParameter("formantPreserve");
+    const auto safe = juce::Component::SafePointer<HumHouseVocalTuneEditor>(this);
+    const auto addParameter = [&](int id, const char* label, const char* parameterId) {
+      const auto checked = proc.getAPVTS().getParameter(parameterId)->getValue() > .5f;
+      menu.addCustomItem(id, std::make_unique<SettingsRow>(label, checked,
+          [safe, parameterId] {
+            if (safe == nullptr) return;
+            auto* parameter = safe->proc.getAPVTS().getParameter(parameterId);
             parameter->beginChangeGesture();
-            const bool current = safe->proc.getAPVTS()
-                                     .getRawParameterValue("formantPreserve")
-                                     ->load() > .5f;
-            parameter->setValueNotifyingHost(current ? 0.0f : 1.0f);
+            parameter->setValueNotifyingHost(parameter->getValue() > .5f ? 0.f : 1.f);
             parameter->endChangeGesture();
-          } else if (result == 1) {
-            auto *parameter =
-                safe->proc.getAPVTS().getParameter("lowLatencyMode");
-            parameter->beginChangeGesture();
-            parameter->setValueNotifyingHost(
-                parameter->getValue() > .5f ? 0.0f : 1.0f);
-            parameter->endChangeGesture();
-          } else if (result == 3) {
-            safe->proc.setReducedMotion(!safe->proc.getReducedMotion());
-            safe->proc.updateHostDisplay(
-                juce::AudioProcessor::ChangeDetails{}
-                    .withNonParameterStateChanged(true));
-          }
-        });
+          }, lnf.palette.bodyText, scaleFactor()));
+    };
+    addParameter(11, "Formant", "formantPreserve");
+    addParameter(1, "Low Latency", "lowLatencyMode");
+    menu.addCustomItem(3, std::make_unique<SettingsRow>("Reduce motion", proc.getReducedMotion(),
+        [safe] {
+          if (safe == nullptr) return;
+          safe->proc.setReducedMotion(!safe->proc.getReducedMotion());
+          safe->proc.updateHostDisplay(juce::AudioProcessor::ChangeDetails{}.withNonParameterStateChanged(true));
+        }, lnf.palette.bodyText, scaleFactor()));
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&settingsButton)
+                           .withParentComponent(this));
   };
+  const auto atlas = juce::ImageCache::getFromMemory(
+      SkellyTuneRunes::rune_atlas_png, SkellyTuneRunes::rune_atlas_pngSize);
+  juce::Random runeRandom(142857);
+  for (size_t i = 0; i < runeSprites.size(); ++i) {
+    const auto glyph = runeRandom.nextInt(40);
+    const auto tile = atlas.getClippedImage({(glyph % 8) * 32, (glyph / 8) * 32, 32, 32});
+    const int size = 9 + runeRandom.nextInt(5);
+    runeSprites[i] = juce::Image(juce::Image::ARGB, size, size, true);
+    juce::Graphics sprite(runeSprites[i]);
+    const float mix = .5f + .5f * std::cos(static_cast<float>(i) * .39f);
+    const auto tint = mix < .55f
+        ? juce::Colour(0xff9b5cff).interpolatedWith(juce::Colour(0xff75ff45), mix / .55f)
+        : juce::Colour(0xff75ff45).interpolatedWith(juce::Colour(0xff3affd9), (mix - .55f) / .45f);
+    sprite.setColour(tint.interpolatedWith(juce::Colour(0xffe8e6da), .35f));
+    sprite.drawImageTransformed(tile, juce::AffineTransform::scale(size / 32.f), true);
+  }
   applyAppearance();
+  lastAnimationTick = juce::Time::getMillisecondCounterHiRes();
   startTimerHz(30);
 }
 
 HumHouseVocalTuneEditor::~HumHouseVocalTuneEditor() {
+  stopTimer();
   juce::PopupMenu::dismissAllActiveMenus();
+  if (themeNotificationPending)
+    proc.updateHostDisplay(juce::AudioProcessor::ChangeDetails{}.withNonParameterStateChanged(true));
   setLookAndFeel(nullptr);
 }
 
@@ -249,14 +323,7 @@ void HumHouseVocalTuneEditor::setupKnob(juce::Slider &knob,
                                         const juce::String &tooltip) {
   knob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
   knob.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
-  knob.onDragStart = [&knob] {
-    knob.getProperties().set("showDragValue", true);
-    knob.repaint();
-  };
-  knob.onDragEnd = [&knob] {
-    knob.getProperties().set("showDragValue", false);
-    knob.repaint();
-  };
+  knob.setMouseDragSensitivity(220);
   knob.setName(text);
   knob.setTooltip(tooltip);
   addAndMakeVisible(knob);
@@ -303,6 +370,8 @@ void HumHouseVocalTuneEditor::applyScaleFromControls() {
 void HumHouseVocalTuneEditor::applyAppearance() {
   appearanceTheme = proc.getUiTheme();
   lnf.setTheme(appearanceTheme);
+  for (auto* value : {&retuneValue, &humanizeValue})
+    value->setColour(juce::Label::textColourId, lnf.palette.bodyText);
   orb.accent = lnf.palette.accentBright;
   orb.metalHigh = lnf.palette.metalHigh;
   orb.metalLow = lnf.palette.metalLow;
@@ -312,60 +381,66 @@ void HumHouseVocalTuneEditor::applyAppearance() {
                               lnf.palette.textValue);
   referenceFreqKnob.setColour(juce::Slider::textBoxOutlineColourId,
                               lnf.palette.edge);
-  sendLookAndFeelChange();
+  backdrop = {};
   repaint();
 }
 
 void HumHouseVocalTuneEditor::timerCallback() {
-  displayDetectedHz = proc.getDetectedHz();
-  displayTargetHz = proc.getTargetHz();
-  displayConfidence = proc.getConfidence();
-  displayDetectedMidi = proc.getDetectedMidiNote();
-  displayTargetMidi = proc.getTargetMidiNote();
-  displayInputLevel = proc.getInputLevel();
-  const bool powered = enableBtn.getToggleState();
-  for (auto *control : std::array<juce::Component *, 8>{
-           &speedKnob, &humanizeKnob, &referenceFreqKnob, &rangeBox,
-           &rootNoteBox, &scaleBox, &appearanceButton, &settingsButton})
-    control->setEnabled(powered);
-  for (auto &key : noteButtons)
-    key.setEnabled(powered);
-  if (powered && !proc.getReducedMotion()) {
-    if (--lightingHold <= 0) {
-      lightingTarget = .4f + .6f * lightingRandom.nextFloat();
-      lightingHold = 45 + lightingRandom.nextInt(110);
-    }
-    if (--flareHold <= 0) {
-      lightingFlare = .65f + .35f * lightingRandom.nextFloat();
-      flareHold = 180 + lightingRandom.nextInt(180);
-    }
-    lightingLevel += .035f * (lightingTarget - lightingLevel);
-    lightingFlare *= .86f;
-    lightingPhase += .025;
-  } else {
-    lightingFlare = 0;
-    lightingLevel = powered ? .6f : 0;
+  if (!isShowing()) return;
+  const auto now = juce::Time::getMillisecondCounterHiRes();
+  const float elapsed = static_cast<float>(juce::jlimit(0.0, .08, (now - lastAnimationTick) * .001));
+  lastAnimationTick = now;
+  if (themeNotificationPending && now - themeChangedAt >= 180) {
+    themeNotificationPending = false;
+    proc.updateHostDisplay(juce::AudioProcessor::ChangeDetails{}.withNonParameterStateChanged(true));
   }
-  lnf.illumination = lightingLevel;
-  lnf.flare = lightingFlare;
-  lnf.lightPhase = static_cast<float>(lightingPhase);
+
+  const int previousDetected = displayDetectedMidi;
+  const int previousTarget = displayTargetMidi;
+  const bool powered = enableBtn.getToggleState();
+  const bool powerChanged = powered != lastPowered;
+  if (powerChanged) {
+    lastPowered = powered;
+    for (auto *control : std::array<juce::Component *, 10>{
+             &speedKnob, &humanizeKnob, &referenceFreqKnob, &rangeBox,
+             &rootNoteBox, &scaleBox, &appearanceButton, &settingsButton,
+             &referenceDown, &referenceUp})
+      control->setEnabled(powered);
+    for (auto &key : noteButtons)
+      key.setEnabled(powered);
+    repaint();
+  }
+
+  displayDetectedHz = powered ? proc.getDetectedHz() : 0;
+  displayTargetHz = powered ? proc.getTargetHz() : 0;
+  displayConfidence = powered ? proc.getConfidence() : 0;
+  displayDetectedMidi = powered ? proc.getDetectedMidiNote() : -1;
+  displayTargetMidi = powered ? proc.getTargetMidiNote() : -1;
+  displayInputLevel = powered ? proc.getInputLevel() : 0;
   const int voice =
       static_cast<int>(proc.getAPVTS().getRawParameterValue("range")->load());
   // A ComboBox change callback is asynchronous. Refresh only on a real
   // parameter change, so a timer tick cannot replace a pending user selection.
   if (voice != lastDisplayedVoice)
     refreshVoiceType(voice);
-  if (!powered) {
-    displayDetectedHz = displayTargetHz = displayInputLevel =
-        displayConfidence = 0;
-    displayDetectedMidi = displayTargetMidi = -1;
-    heatmapDetected.fill(0);
-    heatmapTarget.fill(0);
+  const auto slot = static_cast<size_t>(heatmapWriteIdx);
+  if (displayDetectedHz > 0 || displayTargetHz > 0 || historyFrames > 0 || powerChanged
+      || previousDetected != displayDetectedMidi || previousTarget != displayTargetMidi) {
+    if (displayDetectedHz > 0 || displayTargetHz > 0)
+      historyFrames = kHeatmapWidth;
+    else if (historyFrames > 0)
+      --historyFrames;
+    if (!powered) {
+      heatmapDetected.fill(0);
+      heatmapTarget.fill(0);
+      historyFrames = 0;
+    }
+    heatmapDetected[slot] = displayDetectedHz;
+    heatmapTarget[slot] = displayTargetHz;
+    heatmapWriteIdx = (heatmapWriteIdx + 1) % kHeatmapWidth;
+    repaint(juce::Rectangle<float>(24, 386, 652, 58).transformedBy(juce::AffineTransform::scale(scaleFactor()))
+                .getSmallestIntegerContainer());
   }
-  // Pitch heatmap
-  heatmapDetected[static_cast<size_t>(heatmapWriteIdx)] = displayDetectedHz;
-  heatmapTarget[static_cast<size_t>(heatmapWriteIdx)] = displayTargetHz;
-  heatmapWriteIdx = (heatmapWriteIdx + 1) % kHeatmapWidth;
 
   // Reflect host automation and presets. Only rewrite the keyboard when the
   // named scale or root actually changes, so a user's manual key mask is not
@@ -382,32 +457,64 @@ void HumHouseVocalTuneEditor::timerCallback() {
 
   if (appearanceTheme != proc.getUiTheme())
     applyAppearance();
-  orb.bypassed = !enableBtn.getToggleState();
-  const float active = !orb.bypassed && displayConfidence > .3f
-                           ? juce::jlimit(0.0f, 1.0f, displayInputLevel * 2.0f)
+  const bool motion = powered && !proc.getReducedMotion();
+  const bool motionChanged = orb.reducedMotion == motion;
+  orb.bypassed = !powered;
+  orb.targetNote = displayTargetMidi;
+  orb.reducedMotion = !motion;
+  const float active = motion && displayInputLevel > .002f
+                           ? std::sqrt(juce::jlimit(0.0f, 1.0f, displayInputLevel * 3.5f))
                            : 0.0f;
-  orb.activity += .2f * (active - orb.activity);
-  orb.reducedMotion = proc.getReducedMotion();
-  if (!orb.reducedMotion && active > .01f) {
-    orb.motionLevel += .2f * (active - orb.motionLevel);
-    orb.phase += .16 * active;
+  const float oldActivity = orb.activity;
+  orb.activity += (1.0f - std::exp(-elapsed / (active > oldActivity ? .025f : .12f)))
+                  * (active - oldActivity);
+  if (!motion || orb.activity < .003f)
+    orb.activity = 0;
+  orb.motionLevel = orb.activity * (.6f + .4f * juce::jlimit(0.0f, 1.0f, displayConfidence));
+  orb.phase = std::fmod(orb.phase + .49 * elapsed * (3.0 + 20.0 * orb.activity),
+                        juce::MathConstants<double>::twoPi * 10.0);
+  orb.intensity = .75f + .25f * static_cast<float>(speedKnob.getValue());
+  if (motion)
+    orb.sweepPhase = std::fmod(orb.sweepPhase + .60 * elapsed * (.42 + 1.2 * speedKnob.getValue()
+                                        + 1.75 * orb.activity),
+                               juce::MathConstants<double>::twoPi);
+  // Near-idle sweep stays visible at 15 Hz, while audio can animate at 30 Hz.
+  if (powerChanged || motionChanged || (motion &&
+      now - lastOrbRepaint >= (orb.activity > 0.015f ? 30.0 : 65.0))) {
+    lastOrbRepaint = now;
+    orb.repaint();
+    repaint(juce::Rectangle<float>(64, 410, 595, 32)
+                .transformedBy(juce::AffineTransform::scale(scaleFactor()))
+                .getSmallestIntegerContainer());
   }
-  for (int i = 0; i < 12; ++i)
-    noteButtons[static_cast<size_t>(i)].getProperties().set(
-        "target", i == displayTargetMidi % 12 && displayTargetMidi >= 0);
-  orb.intensity = static_cast<float>(speedKnob.getValue()) *
-                  (1.0f - .65f * static_cast<float>(humanizeKnob.getValue()));
-  if (!orb.reducedMotion && !orb.bypassed)
-    orb.globePhase += .012 + .025 * active;
-  orb.repaint();
 
-  repaint();
+  const float illumination = .3f + .77f * orb.activity;
+  if (std::abs(illumination - lnf.illumination) >= .025f || powerChanged || motionChanged) {
+    lnf.illumination = illumination;
+    lnf.flare = orb.activity;
+    lnf.lightPhase = static_cast<float>(orb.phase);
+    speedKnob.repaint();
+    humanizeKnob.repaint();
+  }
+
+  for (int i = 0; i < 12; ++i) {
+    auto &key = noteButtons[static_cast<size_t>(i)];
+    const bool target = displayTargetMidi >= 0 && i == displayTargetMidi % 12;
+    const bool oldTarget = previousTarget >= 0 && i == previousTarget % 12;
+    const bool markerMoved = previousDetected != displayDetectedMidi
+        && ((previousDetected >= 0 && i == previousDetected % 12)
+            || (displayDetectedMidi >= 0 && i == displayDetectedMidi % 12));
+    if (target != oldTarget)
+      key.getProperties().set("target", target);
+    if (target != oldTarget || markerMoved)
+      key.repaint();
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Paint (everything is drawn in design coordinates and scaled)
 // ---------------------------------------------------------------------------
-void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
+void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   const float scale = scaleFactor();
   const auto &p = lnf.palette;
   juce::ColourGradient body(p.surface, 0, 0, p.body, 0,
@@ -453,29 +560,17 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
        juce::Justification::centredLeft);
 
   panel({24, 84, 652, 286}, p.surface, 12);
-  text("RETUNE", 36, 103, 160, 22, 16, p.bodyText);
-  text("HUMANIZE", 504, 103, 160, 22, 16, p.bodyText);
-  text("SLOW", 38, 331, 54, 20, 11, p.bodyText,
-       juce::Justification::centredLeft);
-  text("FAST", 142, 331, 54, 20, 11, p.bodyText,
-       juce::Justification::centredRight);
-  text("LESS", 506, 331, 54, 20, 11, p.bodyText,
-       juce::Justification::centredLeft);
-  text("MORE", 610, 331, 54, 20, 11, p.bodyText,
-       juce::Justification::centredRight);
+  text("RETUNE", 36, 124, 160, 22, 16, p.bodyText);
+  text("HUMANIZE", 504, 124, 160, 22, 16, p.bodyText);
   text("KEY", 386, 8, 52, 14, 9, p.bodyText, juce::Justification::centredLeft);
   text("SCALE", 450, 8, 154, 14, 9, p.bodyText,
        juce::Justification::centredLeft);
   text("INPUT TYPE", 234, 8, 140, 14, 9, p.bodyText,
        juce::Justification::centredLeft);
   panel({24, 380, 652, 64}, p.bgDark, 9);
-  text("ORIGINAL", 270, 386, 80, 24, 10, p.heatCold);
-  text("TARGET", 366, 386, 70, 24, 10, p.heatWarm);
+  text("ORIGINAL", 270, 386, 68, 24, 10, p.heatCold);
+  text("TARGET", 380, 386, 56, 24, 10, p.heatWarm);
   text("A4", 490, 386, 30, 24, 10, p.textDim);
-  const auto pitchY = [](float hz) {
-    const float midi = 69 + 12 * std::log2(juce::jmax(1.0f, hz) / 440.0f);
-    return juce::jlimit(418.0f, 436.0f, 436 - (midi - 36) * 18 / 48);
-  };
   for (int midi : {36, 84}) {
     const float y = 436 - (midi - 36) * 18 / 48.0f;
     g.setColour(p.accentDeep.withAlpha(.6f));
@@ -483,6 +578,57 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
     text("C" + juce::String(midi / 12 - 1), 32, static_cast<int>(y) - 6, 28, 12,
          9, p.textDim);
   }
+  text("ALLOWED NOTES", 30, 460, 300, 18, 10, p.bodyText.withAlpha(.75f), juce::Justification::centredLeft);
+  panel({24, 490, 652, 170}, p.bgDark, 8);
+}
+
+void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
+  if (!backdrop.isValid()) {
+    const float displayScale = juce::Component::getApproximateScaleFactorForComponent(this);
+    const float rasterScale = juce::jlimit(1.0f, 1.5f, displayScale);
+    backdrop = juce::Image(juce::Image::RGB, juce::roundToInt(getWidth() * rasterScale),
+                           juce::roundToInt(getHeight() * rasterScale), true);
+    juce::Graphics imageGraphics(backdrop);
+    imageGraphics.addTransform(juce::AffineTransform::scale(rasterScale));
+    paintBackdrop(imageGraphics);
+  }
+  g.drawImage(backdrop, getLocalBounds().toFloat());
+  g.addTransform(juce::AffineTransform::scale(scaleFactor()));
+  if (!g.getClipBounds().intersects(juce::Rectangle<int>(24, 386, 652, 58)))
+    return;
+  const auto &p = lnf.palette;
+  const auto drawNote = [&](int midi, int x, juce::Colour colour) {
+    if (midi < 0) return;
+    g.setColour(colour);
+    g.setFont(juce::Font(juce::FontOptions(12.0f).withStyle("Bold")));
+    g.drawText(kNoteNames[midi % 12] + juce::String(midi / 12 - 1),
+               x, 386, 34, 24, juce::Justification::centred);
+  };
+  drawNote(displayDetectedMidi, 342, p.heatCold);
+  drawNote(displayTargetMidi, 439, p.heatWarm);
+  if (g.getClipBounds().intersects(juce::Rectangle<int>(64, 410, 595, 32))) {
+    const float travel = orb.reducedMotion ? 0.0f : static_cast<float>(orb.phase);
+    const float energy = orb.reducedMotion ? 0.0f : orb.activity;
+    juce::Graphics::ScopedSaveState runeState(g);
+    g.reduceClipRegion({64, 411, 595, 31});
+    for (int i = 0; i < static_cast<int>(runeSprites.size()); ++i) {
+      const float slot = i / 42.0f;
+      float cluster = 0.0f;
+      for (int j = 0; j < 3; ++j) {
+        const float head = travel * (.025f + .014f * j) + j / 3.0f;
+        const float distance = std::abs(std::remainder(slot - head, 1.0f));
+        cluster = std::max(cluster, std::max(0.0f, 1.0f - distance * 13.0f));
+      }
+      const float pulse = std::max(0.0f, std::sin(travel * .83f + i * 2.399963f));
+      g.setOpacity(.28f + (.10f + .45f * energy) * cluster + .22f * energy * pulse * pulse);
+      g.drawImageAt(runeSprites[static_cast<size_t>(i)], 66 + i * 14, 413 + (i % 3) * 3);
+    }
+  }
+  if (historyFrames == 0) return;
+  const auto pitchY = [](float hz) {
+    const float midi = 69 + 12 * std::log2(juce::jmax(1.0f, hz) / 440.0f);
+    return juce::jlimit(418.0f, 436.0f, 436 - (midi - 36) * 18 / 48);
+  };
   juce::Path sung, target;
   bool sungOpen = false, targetOpen = false;
   for (int i = 0; i < kHeatmapWidth; ++i) {
@@ -508,13 +654,14 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
     } else
       targetOpen = false;
   }
+  // Draw the wider target first so both colours remain visible where notes agree.
+  g.setColour(p.heatWarm.withAlpha(.88f));
+  g.strokePath(target, juce::PathStrokeType(3.1f));
   g.setColour(p.heatCold);
-  g.strokePath(sung, juce::PathStrokeType(1.2f));
-  g.setColour(p.heatWarm);
-  g.strokePath(target, juce::PathStrokeType(1.8f));
-  text("ALLOWED NOTES", 30, 460, 300, 18, 10, p.bodyText.withAlpha(.75f), juce::Justification::centredLeft);
-  panel({24, 490, 652, 170}, p.bgDark, 8);
+  g.strokePath(sung, juce::PathStrokeType(1.25f));
+
 }
+
 
 void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
   g.addTransform(juce::AffineTransform::scale(scaleFactor()));
@@ -539,6 +686,7 @@ void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
 }
 
 void HumHouseVocalTuneEditor::resized() {
+  backdrop = {};
   const float scale = scaleFactor();
   lnf.setScale(scale);
   auto rect = [scale](int x, int y, int w, int h) {
@@ -548,13 +696,14 @@ void HumHouseVocalTuneEditor::resized() {
   };
   speedKnob.setBounds(rect(40, 154, 152, 152));
   humanizeKnob.setBounds(rect(508, 154, 152, 152));
+  retuneValue.setBounds(rect(40, 310, 152, 24));
+  humanizeValue.setBounds(rect(508, 310, 152, 24));
   orb.setBounds(rect(215, 95, 270, 270));
-  rootNoteBox.setBounds(rect(386, 26, 52, 30));
+  rootNoteBox.setBounds(rect(382, 26, 62, 30));
   scaleBox.setBounds(rect(450, 26, 154, 30));
-  referenceFreqKnob.setBounds(rect(526, 386, 138, 24));
-  referenceFreqKnob.setTextBoxStyle(juce::Slider::TextBoxLeft, false,
-                                    juce::roundToInt(90 * scale),
-                                    juce::roundToInt(24 * scale));
+  referenceFreqKnob.setBounds(rect(550, 386, 86, 24));
+  referenceDown.setBounds(rect(522, 387, 24, 22));
+  referenceUp.setBounds(rect(640, 387, 24, 22));
   referenceFreqLabel.setVisible(false);
   rootNoteLabel.setVisible(false);
   appearanceButton.setBounds(rect(32, 24, 32, 34));

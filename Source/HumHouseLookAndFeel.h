@@ -66,6 +66,19 @@ public:
     setColour(juce::TooltipWindow::textColourId, palette.textBright);
     setColour(juce::TooltipWindow::outlineColourId, palette.edge);
   }
+  void drawLinearSlider(juce::Graphics &g, int x, int y, int w, int h,
+                        float position, float minimum, float maximum,
+                        juce::Slider::SliderStyle style, juce::Slider &slider) override {
+    if (static_cast<bool>(slider.getProperties().getWithDefault("referenceReadout", false))) {
+      g.setColour(palette.textValue);
+      g.setFont(juce::Font(juce::FontOptions(15 * scale)));
+      g.drawText(slider.getTextFromValue(slider.getValue()), x, y, w, h,
+                 juce::Justification::centred, false);
+      return;
+    }
+    LookAndFeel_V4::drawLinearSlider(g, x, y, w, h, position, minimum,
+                                     maximum, style, slider);
+  }
   void drawRotarySlider(juce::Graphics &g, int x, int y, int w, int h,
                         float position, float start, float end,
                         juce::Slider &slider) override {
@@ -117,8 +130,8 @@ public:
     metal.addColour(.47, palette.metalHigh.darker(.13f));
     g.setGradientFill(metal);
     g.fillEllipse(cx - face, cy - face, 2 * face, 2 * face);
-    for (int i = 0; i < 72; ++i) {
-      const float angle = i * juce::MathConstants<float>::twoPi / 72;
+    for (int i = 0; i < 18; ++i) {
+      const float angle = i * juce::MathConstants<float>::twoPi / 18;
       g.setColour(juce::Colours::white.withAlpha(i % 2 == 0 ? .05f : .015f));
       g.drawLine(cx + std::sin(angle) * face * .24f,
                  cy - std::cos(angle) * face * .24f,
@@ -129,8 +142,8 @@ public:
     g.drawEllipse(cx - face, cy - face, 2 * face, 2 * face, 1.1f * scale);
     // Fine grip cuts follow the machined rim without competing with the
     // position marker.
-    for (int i = 0; i < 64; ++i) {
-      const float a = i * juce::MathConstants<float>::twoPi / 64;
+    for (int i = 0; i < 20; ++i) {
+      const float a = i * juce::MathConstants<float>::twoPi / 20;
       g.setColour(palette.metalLow.withAlpha(.45f));
       g.drawLine(cx + std::sin(a) * face * .94f, cy - std::cos(a) * face * .94f,
                  cx + std::sin(a) * face * .985f,
@@ -144,34 +157,12 @@ public:
     g.drawLine(cx + std::sin(angle) * r * .76f, cy - std::cos(angle) * r * .76f,
                cx + std::sin(angle) * r * .94f, cy - std::cos(angle) * r * .94f,
                3 * scale);
-    if (!static_cast<bool>(
-            slider.getProperties().getWithDefault("showDragValue", false))) {
-      const float hub = face * .2f;
-      g.setColour(palette.metalLow.withAlpha(.24f));
-      g.drawEllipse(cx - hub, cy - hub, hub * 2, hub * 2, .7f * scale);
-      g.setColour(juce::Colours::white.withAlpha(.2f));
-      g.drawEllipse(cx - hub + scale, cy - hub + scale, hub * 2 - 2 * scale,
-                    hub * 2 - 2 * scale, .6f * scale);
-    }
-    if (static_cast<bool>(
-            slider.getProperties().getWithDefault("showDragValue", false)) &&
-        slider.isEnabled()) {
-      const bool flipped = static_cast<bool>(
-          slider.getProperties().getWithDefault("displayFlip", false));
-      const double value =
-          (flipped ? 1 - slider.getValue() : slider.getValue()) *
-          static_cast<double>(
-              slider.getProperties().getWithDefault("displayScale", 1.0));
-      const juce::String text =
-          juce::String(juce::roundToInt(value)) + slider.getTextValueSuffix();
-      g.setColour(juce::Colour(0xff17201a));
-      g.setFont(juce::Font(juce::FontOptions(26 * scale).withStyle("Bold")));
-      g.drawText(text,
-                 juce::Rectangle<float>(cx - face, cy - 20 * scale, 2 * face,
-                                        40 * scale)
-                     .toNearestInt(),
-                 juce::Justification::centred, false);
-    }
+    const float hub = face * .2f;
+    g.setColour(palette.metalLow.withAlpha(.24f));
+    g.drawEllipse(cx - hub, cy - hub, hub * 2, hub * 2, .7f * scale);
+    g.setColour(juce::Colours::white.withAlpha(.2f));
+    g.drawEllipse(cx - hub + scale, cy - hub + scale, hub * 2 - 2 * scale,
+                  hub * 2 - 2 * scale, .6f * scale);
     if (flare > .02f && slider.isEnabled()) {
       juce::Path glint;
       const float sweep =
@@ -360,10 +351,8 @@ public:
                       bool) override {
     const int key =
         static_cast<int>(button.getProperties().getWithDefault("pianoKey", 0));
-    const bool target = static_cast<bool>(
-        button.getProperties().getWithDefault("target", false));
-    g.setColour(key == 2 && !(target && button.isEnabled())
-                    ? palette.textBright
+    g.setColour(key == 2
+                    ? juce::Colours::white
                     : juce::Colour(0xff253029));
     g.setFont(juce::Font(
         juce::FontOptions((key == 0 ? 12 : 13) * scale).withStyle("Bold")));
@@ -387,19 +376,19 @@ public:
     g.fillPath(p);
   }
   juce::Font getPopupMenuFont() override {
-    return juce::Font(juce::FontOptions(13 * scale));
+    return juce::Font(juce::FontOptions(juce::jmax(10.f, 12 * scale)));
   }
   void getIdealPopupMenuItemSize(const juce::String &, bool separator, int,
                                  int &width, int &height) override {
-    width = juce::roundToInt(224 * scale);
-    height = juce::roundToInt((separator ? 10 : 30) * scale);
+    width = juce::roundToInt(190 * scale);
+    height = separator ? 4 : juce::jmax(18, juce::roundToInt(25 * scale));
   }
   void drawPopupMenuBackground(juce::Graphics &g, int w, int h) override {
-    g.fillAll(palette.bgDark);
+    g.fillAll(palette.surface);
     auto b = juce::Rectangle<float>(1, 1, w - 2.f, h - 2.f);
-    g.setColour(palette.bgPanel);
+    g.setColour(palette.surface);
     g.fillRoundedRectangle(b, 8 * scale);
-    g.setColour(palette.textDim.withAlpha(.25f));
+    g.setColour(palette.edge);
     g.drawRoundedRectangle(b, 8 * scale, scale);
   }
   void drawPopupMenuSectionHeader(juce::Graphics &g,
@@ -423,11 +412,12 @@ public:
       return;
     }
     if (highlight && active) {
-      g.setColour(juce::Colours::white.withAlpha(.07f));
+      g.setColour(palette.accent.withAlpha(.16f));
       g.fillRoundedRectangle(b, 5 * scale);
     }
-    g.setColour(palette.textBright.withAlpha(active ? 1.f : .4f));
-    g.setFont(getPopupMenuFont());
+    g.setColour((ticked ? palette.bodyText.interpolatedWith(palette.accentDim, .45f)
+                        : palette.bodyText).withAlpha(active ? 1.f : .4f));
+    g.setFont(ticked ? getPopupMenuFont().boldened() : getPopupMenuFont());
     g.drawText(text,
                b.withTrimmedLeft(9 * scale)
                    .withTrimmedRight(35 * scale)
@@ -436,16 +426,6 @@ public:
     auto check = juce::Rectangle<float>(b.getRight() - 25 * scale,
                                         b.getCentreY() - 8 * scale, 16 * scale,
                                         16 * scale);
-    g.setColour(palette.textDim.withAlpha(.35f));
-    g.drawRoundedRectangle(check, 3 * scale, scale);
-    if (ticked) {
-      juce::Path mark;
-      mark.startNewSubPath(check.getX() + 3 * scale, check.getCentreY());
-      mark.lineTo(check.getX() + 7 * scale, check.getBottom() - 4 * scale);
-      mark.lineTo(check.getRight() - 3 * scale, check.getY() + 4 * scale);
-      g.setColour(palette.accentBright);
-      g.strokePath(mark, juce::PathStrokeType(1.8f * scale));
-    }
     if (submenu) {
       g.setColour(palette.textDim);
       g.drawText(">", check.toNearestInt(), juce::Justification::centred,
@@ -456,7 +436,10 @@ public:
     return juce::Font(juce::FontOptions(12 * scale));
   }
   void positionComboBoxText(juce::ComboBox &box, juce::Label &label) override {
-    label.setBounds(12 * scale, 1, box.getWidth() - 30 * scale,
+    const bool key = static_cast<bool>(box.getProperties().getWithDefault("keyReadout", false));
+    const auto inset = juce::roundToInt((key ? 6 : 12) * scale);
+    const auto arrow = juce::roundToInt(18 * scale);
+    label.setBounds(inset, 1, juce::jmax(1, box.getWidth() - inset - arrow),
                     box.getHeight() - 2);
     label.setFont(getComboBoxFont(box));
   }

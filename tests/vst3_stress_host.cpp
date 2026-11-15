@@ -163,7 +163,7 @@ int main(int argc,char** argv)
     assert(processor->setProcessing(false)==kResultOk);assert(component->setActive(false)==kResultOk);assert(component->setActive(true)==kResultOk);assert(processor->setProcessing(true)==kResultOk);pump();
     const double floors[]={70,80,100,130,180,40};
     const double floor=protect ? std::min(80.,floors[voice]) : floors[voice];
-    const int expected=low ? static_cast<int>(std::ceil(rate*.0019)) : static_cast<int>(std::ceil(1.3*std::ceil(rate/floor)))+8;
+    const int expected=low ? static_cast<int>(std::ceil(rate*.0022)) : static_cast<int>(std::ceil(1.3*std::ceil(rate/floor)))+8;
     assert(processor->getLatencySamples()==static_cast<uint32>(expected));
     const int frames=static_cast<int>(rate*(seconds+.5)),automationHop=rate/40;
     const double source=vocal ? 0 : floors[voice]*(motion ? 1.5 : 1.027),tau=6.2831853071795864769;
@@ -192,10 +192,13 @@ int main(int argc,char** argv)
     std::vector<CallbackTiming> callbackTrace;
     if(traceLength)callbackTrace.reserve(capacity);
     Changes automation;automation.queue.id=ids.at("Formant Shift");
-    const auto thread=GetCurrentThread();double total=0,totalCycles=0,peak=0;int measured=0,late=0;
+    double total=0,totalCycles=0,peak=0;int measured=0,late=0;
     // Optional functional editor preview. Audio is processed silently, never sent to a device.
     // The GUI and paced audio worker use separate threads; no audio device is opened.
     const bool preview = GetEnvironmentVariableA("SKELLYTUNE_PREVIEW_UI", nullptr, 0) != 0;
+    const bool paced = preview || GetEnvironmentVariableA("SKELLYTUNE_STRESS_PACED", nullptr, 0) != 0;
+    const bool capture = GetEnvironmentVariableA("SKELLYTUNE_STRESS_RENDER", nullptr, 0) != 0;
+    std::vector<float> rendered(capture ? raw.size() : 0);
     IPlugView* view = nullptr;
     HWND previewWindow = nullptr;
     if (preview) {
@@ -210,6 +213,8 @@ int main(int argc,char** argv)
     }
     const auto previewStart = std::chrono::steady_clock::now();
     const auto renderLoop = [&] {
+    // Resolve the pseudo-handle on the processing thread, including closed-editor runs.
+    const auto thread = GetCurrentThread();
     for(int offset=0;offset<frames;) {
         const int n=vocal ? std::min(block,frames-offset)
                           : std::min({block,frames-offset,automationHop-offset%automationHop});
@@ -226,18 +231,27 @@ int main(int argc,char** argv)
             callbackTrace.push_back({offset,n,data.inputParameterChanges!=nullptr,duration,after-before});
         }
         for(int i=0;i<n;++i) {assert(std::isfinite(outLeft[i]) && std::isfinite(outRight[i]));peak=std::max({peak,static_cast<double>(std::abs(outLeft[i])),static_cast<double>(std::abs(outRight[i]))});}
-        offset+=n; if (!preview) pump();
-        if (preview) std::this_thread::sleep_until(previewStart + std::chrono::microseconds(
+        if (capture) for(int i=0;i<n;++i) {
+            rendered[2*static_cast<size_t>(offset+i)]=outLeft[i];
+            rendered[2*static_cast<size_t>(offset+i)+1]=outRight[i];
+        }
+        offset+=n; if (!paced) pump();
+        if (paced) std::this_thread::sleep_until(previewStart + std::chrono::microseconds(
             static_cast<int64_t>(1000000.0 * offset / rate)));
     }
     };
-    if (preview) {
+    if (paced) {
         // Model a DAW: painting/message handling must not run on the audio worker.
         std::atomic<bool> finished{false};
         std::thread audioWorker([&] { renderLoop(); finished.store(true, std::memory_order_release); });
         while (!finished.load(std::memory_order_acquire)) { pump(); Sleep(1); }
         audioWorker.join();
     } else renderLoop();
+    if(capture) {
+        std::ofstream audio(std::string(argv[2])+"-output.raw",std::ios::binary);assert(audio);
+        audio.write(reinterpret_cast<const char*>(rendered.data()),static_cast<std::streamsize>(rendered.size()*sizeof(float)));
+        assert(audio.good());
+    }
     if(traceLength) {
         std::ofstream trace(tracePath);assert(trace);
         trace.precision(17);
@@ -254,6 +268,7 @@ int main(int argc,char** argv)
     if(vocal)manifest<<"VST3 component process; supplied stereo vocal; major root "<<root<<"; Catch Low Notes "<<protect<<"; full correction; Humanize 0; no color automation or artificial block splits; measurement duration recorded below\n";
     else manifest<<"VST3 component process; full correction; chromatic; Humanize 0; moving profile uses Target Glide 25ms; color +/-4st every 25ms; no wall-time conversion from thread cycles\n";
     manifest<<"warmup_seconds="<<static_cast<double>(frames-measured)/rate<<"; measured_seconds="<<static_cast<double>(measured)/rate<<"; measure_startup="<<measureStartup<<"\n";
+    manifest<<"editor_open="<<preview<<"; paced_worker="<<paced<<"; captured_output="<<capture<<"\n";
     assert(processor->setProcessing(false)==kResultOk);assert(component->setActive(false)==kResultOk);
     if (preview) {
         Stream snapshot; assert(component->getState(&snapshot) == kResultOk);
