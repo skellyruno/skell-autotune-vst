@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include <cmath>
+#include "SkellyTuneRunes.h"
 
 namespace {
 const juce::StringArray kNoteNames{"C",  "C#", "D",  "D#", "E",  "F",
@@ -239,11 +240,11 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
 
   // Readable at the design size, with proportional resizing.
   setResizable(true, true);
-  setResizeLimits(501, 486, 1050, 1020);
+  setResizeLimits(420, 408, 1050, 1020);
   if (auto *c = getConstrainer())
     c->setFixedAspectRatio(static_cast<double>(kDesignW) /
                            static_cast<double>(kDesignH));
-  setSize(501, 486);
+  setSize(476, 462);
 
   appearanceButton.setName("Cycle theme");
   appearanceButton.setTooltip("Click the skull to cycle themes.");
@@ -285,6 +286,22 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&settingsButton)
                            .withParentComponent(this));
   };
+  const auto atlas = juce::ImageCache::getFromMemory(
+      SkellyTuneRunes::rune_atlas_png, SkellyTuneRunes::rune_atlas_pngSize);
+  juce::Random runeRandom(142857);
+  for (size_t i = 0; i < runeSprites.size(); ++i) {
+    const auto glyph = runeRandom.nextInt(40);
+    const auto tile = atlas.getClippedImage({(glyph % 8) * 32, (glyph / 8) * 32, 32, 32});
+    const int size = 9 + runeRandom.nextInt(5);
+    runeSprites[i] = juce::Image(juce::Image::ARGB, size, size, true);
+    juce::Graphics sprite(runeSprites[i]);
+    const float mix = .5f + .5f * std::cos(static_cast<float>(i) * .39f);
+    const auto tint = mix < .55f
+        ? juce::Colour(0xff9b5cff).interpolatedWith(juce::Colour(0xff75ff45), mix / .55f)
+        : juce::Colour(0xff75ff45).interpolatedWith(juce::Colour(0xff3affd9), (mix - .55f) / .45f);
+    sprite.setColour(tint.interpolatedWith(juce::Colour(0xffe8e6da), .35f));
+    sprite.drawImageTransformed(tile, juce::AffineTransform::scale(size / 32.f), true);
+  }
   applyAppearance();
   lastAnimationTick = juce::Time::getMillisecondCounterHiRes();
   startTimerHz(30);
@@ -443,6 +460,7 @@ void HumHouseVocalTuneEditor::timerCallback() {
   const bool motion = powered && !proc.getReducedMotion();
   const bool motionChanged = orb.reducedMotion == motion;
   orb.bypassed = !powered;
+  orb.targetNote = displayTargetMidi;
   orb.reducedMotion = !motion;
   const float active = motion && displayInputLevel > .002f
                            ? std::sqrt(juce::jlimit(0.0f, 1.0f, displayInputLevel * 3.5f))
@@ -465,12 +483,12 @@ void HumHouseVocalTuneEditor::timerCallback() {
       now - lastOrbRepaint >= (orb.activity > 0.015f ? 30.0 : 65.0))) {
     lastOrbRepaint = now;
     orb.repaint();
-    repaint(juce::Rectangle<float>(148, 449, 511, 37)
+    repaint(juce::Rectangle<float>(64, 410, 595, 32)
                 .transformedBy(juce::AffineTransform::scale(scaleFactor()))
                 .getSmallestIntegerContainer());
   }
 
-  const float illumination = .3f + .7f * orb.activity;
+  const float illumination = .3f + .77f * orb.activity;
   if (std::abs(illumination - lnf.illumination) >= .025f || powerChanged || motionChanged) {
     lnf.illumination = illumination;
     lnf.flare = orb.activity;
@@ -588,6 +606,24 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
   };
   drawNote(displayDetectedMidi, 342, p.heatCold);
   drawNote(displayTargetMidi, 439, p.heatWarm);
+  if (g.getClipBounds().intersects(juce::Rectangle<int>(64, 410, 595, 32))) {
+    const float travel = orb.reducedMotion ? 0.0f : static_cast<float>(orb.phase);
+    const float energy = orb.reducedMotion ? 0.0f : orb.activity;
+    juce::Graphics::ScopedSaveState runeState(g);
+    g.reduceClipRegion({64, 411, 595, 31});
+    for (int i = 0; i < static_cast<int>(runeSprites.size()); ++i) {
+      const float slot = i / 42.0f;
+      float cluster = 0.0f;
+      for (int j = 0; j < 3; ++j) {
+        const float head = travel * (.025f + .014f * j) + j / 3.0f;
+        const float distance = std::abs(std::remainder(slot - head, 1.0f));
+        cluster = std::max(cluster, std::max(0.0f, 1.0f - distance * 13.0f));
+      }
+      const float pulse = std::max(0.0f, std::sin(travel * .83f + i * 2.399963f));
+      g.setOpacity(.28f + (.10f + .45f * energy) * cluster + .22f * energy * pulse * pulse);
+      g.drawImageAt(runeSprites[static_cast<size_t>(i)], 66 + i * 14, 413 + (i % 3) * 3);
+    }
+  }
   if (historyFrames == 0) return;
   const auto pitchY = [](float hz) {
     const float midi = 69 + 12 * std::log2(juce::jmax(1.0f, hz) / 440.0f);
@@ -629,54 +665,6 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
 
 void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
   g.addTransform(juce::AffineTransform::scale(scaleFactor()));
-  if (g.getClipBounds().intersects(juce::Rectangle<int>(148, 449, 511, 37))) {
-    const float travel = orb.reducedMotion ? 0.0f : static_cast<float>(orb.phase);
-    constexpr std::array<juce::uint32, 9> colours{
-        0xff8effaa, 0xff71d7ff, 0xffb996ff, 0xfff4bf69, 0xffff8aae,
-        0xff83ebda, 0xffffab73, 0xffaaaaff, 0xffd6fc79};
-    const float energy = orb.reducedMotion ? 0.0f : orb.activity;
-    constexpr int runeCount = 42;
-    for (int i = 0; i < runeCount; ++i) {
-      const float slot = static_cast<float>(i) / runeCount;
-      float cluster = 0.0f;
-      for (int j = 0; j < 3; ++j) {
-        const float head = travel * (.025f + .014f * j) + j / 3.0f;
-        const float distance = std::abs(std::remainder(slot - head, 1.0f));
-        cluster = std::max(cluster, std::max(0.0f, 1.0f - distance * 13.0f));
-      }
-      const float twinkle = std::max(0.0f, std::sin(travel * .83f + i * 2.399963f));
-      const float response = orb.reducedMotion ? 0.0f
-          : (.09f + .55f * energy) * cluster + .32f * energy * twinkle * twinkle * twinkle;
-      const float x = 158.0f + i * 12.0f;
-      const float y = 467.0f + (i % 3) * 3.0f;
-      juce::Path bones;
-      if (i % 2 == 0) {
-        bones.addRoundedRectangle(x - 4, y - 6, 8, 8, 2.5f);
-        bones.startNewSubPath(x - 2.5f, y + 2);
-        bones.lineTo(x - 2.5f, y + 5);
-        bones.lineTo(x + 2.5f, y + 5);
-        bones.lineTo(x + 2.5f, y + 2);
-        bones.addEllipse(x - 2.6f, y - 2.8f, 1.9f, 2.2f);
-        bones.addEllipse(x + .7f, y - 2.8f, 1.9f, 2.2f);
-      } else {
-        bones.addRoundedRectangle(x - 5, y - 7, 10, 14, 2.0f);
-        bones.startNewSubPath(x, y - 4);
-        bones.lineTo(x, y + 5);
-        for (int rib = -3; rib <= 3; rib += 3) {
-          bones.startNewSubPath(x - 3, y + rib - 1);
-          bones.lineTo(x, y + rib + 1);
-          bones.lineTo(x + 3, y + rib - 1);
-        }
-      }
-      const auto colour = juce::Colour(colours[static_cast<size_t>(i) % colours.size()]);
-      if (response > .28f) {
-        g.setColour(colour.withAlpha(.18f * response));
-        g.strokePath(bones, juce::PathStrokeType(2.7f));
-      }
-      g.setColour(colour.withAlpha(.30f + .60f * response));
-      g.strokePath(bones, juce::PathStrokeType(1.3f));
-    }
-  }
   if (displayDetectedMidi >= 0 && enableBtn.getToggleState()) {
     const auto bounds =
         noteButtons[static_cast<size_t>(displayDetectedMidi % 12)]

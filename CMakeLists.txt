@@ -282,6 +282,10 @@ target_compile_definitions(HumHouseVocalTune
         JUCE_DISPLAY_SPLASH_SCREEN=0
 )
 
+juce_add_binary_data(SkellyTuneRunes HEADER_NAME SkellyTuneRunes.h
+    NAMESPACE SkellyTuneRunes SOURCES Assets/rune_atlas.png)
+target_link_libraries(HumHouseVocalTune PRIVATE SkellyTuneRunes)
+
 target_link_libraries(HumHouseVocalTune
     PRIVATE
         juce::juce_audio_utils

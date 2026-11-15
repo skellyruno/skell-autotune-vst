@@ -39,6 +39,7 @@ class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor, private juce:
     double lastAnimationTick = 0;
     double lastOrbRepaint = 0;
     juce::Image backdrop;
+    std::array<juce::Image, 42> runeSprites;
     void paintBackdrop(juce::Graphics &);
     int appearanceTheme = -1;
     void applyAppearance();

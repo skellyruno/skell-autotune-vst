@@ -113,7 +113,7 @@ public:
             for(int bit=kLiveFFT/4;bit>0;bit>>=1) {reversed=(reversed<<1)|(input&1);input>>=1;}
             liveBitReversal[i]=static_cast<uint16_t>(reversed);
         }
-        liveBlendStep=1.0/std::max(1.0,sr*0.002);
+        liveBlendStep = 1.0 / std::max(1.0, sr * (lowLatencyExperiment ? 0.0016 : 0.002));
         // A phase-continuous clock still creates sharp slope changes at target updates.
         // Standard uses a 0.25-ms slew to soften that curvature; the explicit live
         // mode retains its established 0.15-ms response. Neither changes transport delay.
@@ -209,6 +209,7 @@ public:
         if (lowLatencyExperiment == on)
             return;
         lowLatencyExperiment = on;
+        liveBlendStep = 1.0 / std::max(1.0, sr * (on ? 0.0016 : 0.002));
         liveFrequencyCoefficient = on ? liveLowFrequencyCoefficient : liveStandardFrequencyCoefficient;
         updateLatency();
         reset();

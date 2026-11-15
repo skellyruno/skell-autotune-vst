@@ -7,6 +7,7 @@ class SkeletonOrb : public juce::Component {
     SkeletonOrb() { setInterceptsMouseClicks(false, false); }
     juce::Colour accent{0xff86dc50}, metalHigh{0xffdeded3}, metalLow{0xff777b6e};
     float activity = 0;
+    int targetNote = -1;
     float motionLevel = 0;
     double phase = 0;
     double sweepPhase = 0;
@@ -111,6 +112,27 @@ class SkeletonOrb : public juce::Component {
                     g.drawLine(ax, ay, bx, by, width);
                 }
             };
+            if (targetNote >= 0) {
+                const int pitchClass = targetNote % 12;
+                if (pitchClass != shapedPitchClass) {
+                    shapedPitchClass = pitchClass;
+                    static constexpr const char* names[]{"C", "C#", "D", "D#", "E", "F",
+                                                          "F#", "G", "G#", "A", "A#", "B"};
+                    juce::GlyphArrangement glyphs;
+                    glyphs.addLineOfText(juce::Font(juce::FontOptions(100.f).withStyle("Bold")),
+                                         names[pitchClass], 0, 0);
+                    noteOutline.clear();
+                    glyphs.createPath(noteOutline);
+                    noteOutline.scaleToFit(76, 76, 128, 128, true);
+                }
+                juce::PathFlatteningIterator outline(noteOutline, {}, 1.4f);
+                while (outline.next()) {
+                    g.setColour(boneColour.withAlpha(.30f));
+                    g.drawLine(outline.x1, outline.y1, outline.x2, outline.y2, 1.f);
+                    bone(outline.x1, outline.y1, outline.x2, outline.y2, 2.4f);
+                }
+                return;
+            }
             // Let the character keep moving gently between phrases.
             juce::Path skull;
             skull.startNewSubPath(124, 58);
@@ -160,11 +182,15 @@ class SkeletonOrb : public juce::Component {
             }
             const float sway = static_cast<float>(std::sin(phase * 1.2) * 6 * movement);
             bone(113, 97, 102, 139 + sway);
-            bone(102, 139 + sway, 97, 177);
+            const float wrist = reducedMotion ? 0.f : 13.f * (1.f - activity)
+                * std::pow(std::max(0.0, std::sin(phase * .47) * std::cos(phase * .21)), 2.0);
+            const float kick = reducedMotion ? 0.f : 15.f * (1.f - activity)
+                * std::pow(std::max(0.0, std::cos(phase * .39) * std::sin(phase * .26)), 2.0);
+            bone(102, 139 + sway, 97 - wrist, 177 - wrist);
             bone(167, 97, 178, 139 - sway);
             bone(178, 139 - sway, 183, 177);
             for (int i = 0; i < 4; ++i) {
-                bone(97 + i * 2, 177, 91 + i * 3, 190, 1);
+                bone(97 + i * 2 - wrist, 177 - wrist, 91 + i * 3 - wrist, 190 - 1.3f * wrist, 1);
                 bone(183 - i * 2, 177, 189 - i * 3, 190, 1);
             }
             bone(124, 146, 156, 146);
@@ -173,15 +199,15 @@ class SkeletonOrb : public juce::Component {
             bone(140, 159, 130, 165);
             bone(130, 165, 124, 146);
             bone(130, 163, 124, 199);
-            bone(124, 199, 119, 231);
+            bone(124, 199, 119 - kick, 231 - .6f * kick);
             bone(150, 163, 156, 199);
             bone(156, 199, 161, 231);
             if (activity < .2f)
             for (auto point : {juce::Point<float>(102, 139 + sway), juce::Point<float>(178, 139 - sway),
                                juce::Point<float>(124, 199), juce::Point<float>(156, 199)})
                 g.drawEllipse(point.x - 3, point.y - 3, 6, 6, 1.2f);
-            bone(119, 231, 108, 237);
-            bone(108, 237, 125, 237);
+            bone(119 - kick, 231 - .6f * kick, 108 - kick, 237 - kick);
+            bone(108 - kick, 237 - kick, 125 - kick, 237 - .6f * kick);
             bone(161, 231, 172, 237);
             bone(172, 237, 155, 237);
         }
@@ -191,6 +217,8 @@ class SkeletonOrb : public juce::Component {
 
   private:
     juce::Image shell;
+    int shapedPitchClass = -1;
+    juce::Path noteOutline;
     juce::Colour cachedAccent, cachedHigh, cachedLow;
 
     void paintShell(juce::Graphics &g) {
