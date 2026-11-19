@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "product_name": "SkellyTune",
+  "version": "1.1.2",
+  "vendor": "HumHouse",
+  "manufacturer_code": "Humh",
+  "plugin_code": "Sktn",
+  "class_ids": [
+    "ABCDEF019182FAEB48756D68536B746E",
+    "ABCDEF011234ABCD48756D68536B746E",
+    "ABCDEF01C0DEF00D48756D68536B746E"
+  ],
+  "owner_approved": false,
+  "vendor_url": "",
+  "support_email": "",
+  "license_status": "pending",
+  "third_party_notices_status": "missing",
+  "eula_status": "missing",
+  "trademark_status": "pending",
+  "notes": "Protected from the verified 1.1.2 Windows preview metadata. Publisher identity and legal/commercial details are recorded as currently built, not approved for public release. Do not change manufacturer/plugin codes or class IDs without explicit owner approval."
+}
