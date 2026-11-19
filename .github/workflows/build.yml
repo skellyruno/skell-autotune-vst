@@ -1,48 +1,79 @@
-name: Build plugin artifacts
+name: Windows VST3 release package
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, devin/1778052783-initial-plugin]
   pull_request:
   workflow_dispatch:
   release:
     types: [published]
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: skellytune-\${{ github.workflow }}-\${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: \${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
-    name: Windows (VST3 + Standalone)
+    name: Windows x64 VST3
     runs-on: windows-2022
-
+    timeout-minutes: 60
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
 
-      - name: Configure
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Test release package validator
+        run: python -m unittest discover -s tests -p "test_package_vst3.py" -v
+
+      - name: Require owner-approved identity before public release assets
+        if: github.event_name == 'release'
+        run: python scripts/package_vst3.py --identity release/identity.json --check-release-approval
+
+      - name: Configure Windows x64
         run: cmake -S . -B build -A x64
 
-      - name: Build
-        run: cmake --build build --config Release -j
+      - name: Build VST3 target only
+        run: cmake --build build --config Release --target HumHouseVocalTune_VST3 --parallel 2
 
-      - name: Package Windows zip
+      - name: Normalize metadata and create verified VST3 preview ZIP
         shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path artifacts
-          $vst3 = "build\HumHouseVocalTune_artefacts\Release\VST3\SkellyTune.vst3"
-          if (-not (Test-Path $vst3)) { throw "SkellyTune VST3 bundle missing: $vst3" }
-          Compress-Archive -Path $vst3 -DestinationPath "artifacts\SkellyTune-Windows-x64.zip" -Force
+        run: >-
+          python scripts/package_vst3.py
+          --identity release/identity.json
+          --cmake CMakeLists.txt
+          --bundle build/HumHouseVocalTune_artefacts/Release/VST3/SkellyTune.vst3
+          --output artifacts/SkellyTune-Windows-x64.zip
 
-      - name: Upload Windows artifacts
+      - name: Upload verified Windows VST3 preview
         uses: actions/upload-artifact@v6
         with:
-          name: SkellyTune-Windows-x64
+          name: SkellyTune-Windows-VST3
           path: artifacts/*
-          retention-days: 7
+          if-no-files-found: error
+          retention-days: 30
 
-      # ---------- Release assets ----------
-      - name: Attach release assets
-        if: github.event_name == 'release'
+  publish:
+    name: Attach owner-approved release assets
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SkellyTune-Windows-VST3
+          path: artifacts
+
+      - name: Attach VST3 ZIP and SHA-256 sidecar
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
+          fail_on_unmatched_files: true
+          generate_release_notes: false
