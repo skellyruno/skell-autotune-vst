@@ -475,31 +475,28 @@ private:
             return observedMidi;
         }
 
-        // Retain five samples at a 4 ms reference spacing. The 17-entry ring
-        // covers four intervals even when Low Latency's detector hop is shorter.
-        constexpr int kReferenceStrideMax = 4;
+        // A 16 ms causal secant averages local YIN period jitter. Its time
+        // centroid is half a span behind the newest observation, so include
+        // that half-span in the forecast horizon.
         const int stride = std::clamp(static_cast<int>(std::lround(0.004 * sr / hop)),
-                                      1, kReferenceStrideMax);
+                                      1, 4);
+        constexpr int kForecastSpan = 4;
         pitchMotionHistory[static_cast<size_t>(pitchMotionHistoryCount % kPitchMotionHistory)] = observedMidi;
         ++pitchMotionHistoryCount;
-
         if (!pitchMotionHasPrevious)
         {
             previousObservedMidi = observedMidi;
             pitchMotionHasPrevious = true;
             return observedMidi;
         }
-        if (pitchMotionHistoryCount <= 4 * stride)
+        if (pitchMotionHistoryCount <= kForecastSpan * stride)
             return observedMidi;
 
         const auto historyAt = [this](int ageHops) noexcept {
             return pitchMotionHistory[static_cast<size_t>(
                 (pitchMotionHistoryCount - 1 - ageHops) % kPitchMotionHistory)];
         };
-
-        // Reject note/octave jumps before fitting; a jump must not masquerade
-        // as high velocity or curvature during the following four observations.
-        for (int interval = 1; interval <= 4; ++interval)
+        for (int interval = 1; interval <= kForecastSpan; ++interval)
         {
             const double stepCents = (static_cast<double>(historyAt((interval - 1) * stride))
                                     - static_cast<double>(historyAt(interval * stride))) * 100.0;
@@ -510,50 +507,26 @@ private:
             }
         }
 
-        const double dt = static_cast<double>(hop) * stride / sr;
+        const double deltaCents = (static_cast<double>(observedMidi)
+                                 - static_cast<double>(historyAt(kForecastSpan * stride))) * 100.0;
+        const double dt = static_cast<double>(hop) * stride * kForecastSpan / sr;
         if (dt <= 0.0)
             return observedMidi;
-
-        // Five-point, causal, quadratic least-squares derivative at the newest
-        // observation. Compared with a two/three-point difference this averages
-        // detector jitter while retaining curvature for vibrato and a rising
-        // or falling legato glide. Samples are ordered oldest -> newest.
-        const double y0 = historyAt(4 * stride);
-        const double y1 = historyAt(3 * stride);
-        const double y2 = historyAt(2 * stride);
-        const double y3 = historyAt(stride);
-        const double y4 = observedMidi;
-        const double derivative =
-              (13.0 / 35.0) * y0
-            - (27.0 / 70.0) * y1
-            - (4.0 / 7.0) * y2
-            - (13.0 / 70.0) * y3
-            + (27.0 / 35.0) * y4;
-        const double secondDerivative =
-              (2.0 / 7.0) * y0
-            - (1.0 / 7.0) * y1
-            - (2.0 / 7.0) * y2
-            - (1.0 / 7.0) * y3
-            + (2.0 / 7.0) * y4;
-        const double measuredVelocity = std::clamp(derivative * 100.0 / dt,
-                                                   -6000.0, 6000.0);
-        const double measuredAcceleration = std::clamp(secondDerivative * 100.0 / (dt * dt),
-                                                       -200000.0, 200000.0);
+        const double measuredVelocity = std::clamp(deltaCents / dt, -6000.0, 6000.0);
         previousObservedMidi = observedMidi;
 
-        const double deltaCents = (static_cast<double>(observedMidi) - y3) * 100.0;
-        // Ignore detector jitter on held notes. Confidence scales the forecast
-        // smoothly instead of adding another hard voicing gate.
         if (std::abs(deltaCents) < 1.5 || std::abs(measuredVelocity) < 350.0)
             return observedMidi;
 
         const double confidenceWeight = std::clamp((static_cast<double>(confidence) - 0.55) / 0.35,
                                                    0.0, 1.0);
         const double estimateAge = detector.getPitchEstimateAgeSeconds(observedHz);
+        // Higher-register short windows are more phase-sensitive: use a shorter
+        // horizon there, while bass and midrange retain the full half-span correction.
+        const double horizonScale = observedHz >= 205.0f ? 0.25 : 0.50;
+        const double horizon = (estimateAge + 0.5 * dt) * horizonScale;
         const double predictionCents = std::clamp(
-            (measuredVelocity * estimateAge
-             + 0.5 * measuredAcceleration * estimateAge * estimateAge) * confidenceWeight,
-            -85.0, 85.0);
+            measuredVelocity * horizon * confidenceWeight, -85.0, 85.0);
         return observedMidi + static_cast<float>(predictionCents / 100.0);
     }
 
