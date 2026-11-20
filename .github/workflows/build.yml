@@ -31,7 +31,6 @@ jobs:
 
   build:
     name: Windows x64 VST3
-    needs: dsp-regression
     runs-on: windows-2022
     timeout-minutes: 60
     permissions:
@@ -85,6 +84,7 @@ jobs:
           --output artifacts/SkellyTune-Windows-x64.zip
 
       - name: Upload verified Windows VST3 preview
+        if: github.repository_visibility == 'private' || github.event_name == 'release'
         uses: actions/upload-artifact@v6
         with:
           name: SkellyTune-Windows-VST3
@@ -95,7 +95,7 @@ jobs:
   publish:
     name: Attach owner-approved release assets
     if: github.event_name == 'release'
-    needs: build
+    needs: [build, dsp-regression]
     runs-on: ubuntu-latest
     permissions:
       contents: write

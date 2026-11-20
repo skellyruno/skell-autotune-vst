@@ -19,14 +19,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             r"(?m)^\s+pluginval-version:\s*v2\.0\.0-beta3\s*$",
         )
 
-    def test_windows_release_build_waits_for_offline_dsp_gate(self):
+    def test_windows_release_build_waits_for_offline_dsp_gate_before_publish(self):
         build = re.search(
             r"(?ms)^  build:\n(.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
             WORKFLOW,
         )
         self.assertIsNotNone(build)
-        self.assertRegex(build.group(1), r"(?m)^\s+needs:\s*dsp-regression\s*$")
-
+        self.assertNotRegex(build.group(1), r"(?m)^\s+needs:")
         dsp = re.search(
             r"(?ms)^  dsp-regression:\n(.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
             WORKFLOW,
@@ -38,6 +37,20 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "ctest --test-dir build-dsp",
         ):
             self.assertIn(required, dsp.group(1))
+        publish = re.search(r"(?ms)^  publish:\n(.*)\Z", WORKFLOW)
+        self.assertIsNotNone(publish)
+        self.assertRegex(publish.group(1), r"(?m)^\s+needs:\s*\[build,\s*dsp-regression\]\s*$")
+
+    def test_public_prs_withhold_product_artifacts(self):
+        upload = re.search(
+            r"(?ms)^      - name: Upload verified Windows VST3 preview\n(.*?)(?=^      - name:|^  publish:)",
+            WORKFLOW,
+        )
+        self.assertIsNotNone(upload)
+        self.assertRegex(
+            upload.group(1),
+            r"(?m)^        if:\s*github\.repository_visibility == 'private' \|\| github\.event_name == 'release'\s*$",
+        )
 
     def test_superseded_cancellation_excludes_protected_refs(self):
         self.assertIn("github.event_name == 'pull_request'", WORKFLOW)
