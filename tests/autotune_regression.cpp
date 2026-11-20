@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <numeric>
 #include <vector>
 
 namespace {
@@ -1062,6 +1063,10 @@ PitchMotionMetrics measurePitchMotionCompensation (int scenario)
 
     std::vector<double> rawErrors;
     std::vector<double> predictedErrors;
+    std::vector<double> rawMidiValues;
+    std::vector<double> expectedMidiValues;
+    std::vector<double> estimateAges;
+    std::vector<double> detectorConfidences;
     PitchMotionMetrics result;
     double phase = 0.0;
     constexpr int total = static_cast<int>(sr * 2.0);
@@ -1121,6 +1126,10 @@ PitchMotionMetrics measurePitchMotionCompensation (int scenario)
         result.maxPredictionOffsetCents = std::max(result.maxPredictionOffsetCents, forecastOffset);
         rawErrors.push_back(rawCents);
         predictedErrors.push_back(predictedCents);
+        rawMidiValues.push_back(69.0 + 12.0 * std::log2(rawHz / 440.0));
+        expectedMidiValues.push_back(69.0 + 12.0 * std::log2(referenceHz / 440.0));
+        estimateAges.push_back(referenceDetector.getPitchEstimateAgeSeconds(rawHz));
+        detectorConfidences.push_back(referenceDetector.getConfidence());
     }
 
     auto summarize = [](std::vector<double>& values, double& mean, double& p95)
@@ -1137,6 +1146,65 @@ PitchMotionMetrics measurePitchMotionCompensation (int scenario)
     summarize(rawErrors, result.rawMae, result.rawP95);
     summarize(predictedErrors, result.predictedMae, result.predictedP95);
     result.frames = static_cast<int>(rawErrors.size());
+
+    // Offline-only forecast sweep. It reuses the exact measured F0/time-age
+    // observations above and evaluates causal secants over different time spans
+    // and horizon multipliers. It does not feed the engine or alter audio.
+    struct ForecastCandidate { int span = 0; double scale = 0, mae = 0, p95 = 0; };
+    std::vector<ForecastCandidate> candidates;
+    for (int span = 1; span <= 8; ++span)
+    {
+        const double derivativeWindowSeconds = static_cast<double>(span) * hop / sr;
+        for (int scaleIndex = 1; scaleIndex <= 8; ++scaleIndex)
+        {
+            const double scale = 0.25 * scaleIndex;
+            std::vector<double> errors;
+            errors.reserve(rawMidiValues.size());
+            for (size_t i = 0; i < rawMidiValues.size(); ++i)
+            {
+                double predictedMidi = rawMidiValues[i];
+                if (i >= static_cast<size_t>(span))
+                {
+                    const double deltaCents = (rawMidiValues[i]
+                        - rawMidiValues[i - static_cast<size_t>(span)]) * 100.0;
+                    bool jump = false;
+                    for (int k = 0; k < span; ++k)
+                    {
+                        const size_t current = i - static_cast<size_t>(k);
+                        const size_t previous = current - 1;
+                        if (std::abs((rawMidiValues[current] - rawMidiValues[previous]) * 100.0) > 175.0)
+                            jump = true;
+                    }
+                    const double velocity = deltaCents / derivativeWindowSeconds;
+                    if (!jump && std::abs(deltaCents) >= 1.5 && std::abs(velocity) >= 350.0)
+                    {
+                        const double weight = std::clamp(
+                            (detectorConfidences[i] - 0.55) / 0.35, 0.0, 1.0);
+                        const double horizon = (estimateAges[i] + 0.5 * derivativeWindowSeconds) * scale;
+                        const double offset = std::clamp(velocity * horizon * weight, -85.0, 85.0);
+                        predictedMidi += offset / 100.0;
+                    }
+                }
+                errors.push_back(std::abs((predictedMidi - expectedMidiValues[i]) * 100.0));
+            }
+            const double mae = std::accumulate(errors.begin(), errors.end(), 0.0)
+                             / std::max<size_t>(1, errors.size());
+            std::sort(errors.begin(), errors.end());
+            const double p95 = errors.empty() ? 0.0
+                : errors[std::min(errors.size() - 1, (errors.size() - 1) * 95 / 100)];
+            candidates.push_back({span, scale, mae, p95});
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b)
+    {
+        return a.mae < b.mae || (a.mae == b.mae && a.p95 < b.p95);
+    });
+    std::printf("pitch motion sweep %s: ", scenario == 0 ? "110Hz" :
+        scenario == 1 ? "glide" : scenario == 2 ? "220Hz" : scenario == 3 ? "subtle" : "jumps");
+    for (size_t i = 0; i < std::min<size_t>(3, candidates.size()); ++i)
+        std::printf("[span=%d scale=%.2f MAE=%.1f p95=%.1f] ",
+            candidates[i].span, candidates[i].scale, candidates[i].mae, candidates[i].p95);
+    std::printf("\\n");
     return result;
 }
 
