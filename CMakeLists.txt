@@ -167,6 +167,15 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
         else()
             target_compile_options(${test_name} PRIVATE -UNDEBUG)
         endif()
+        # The detector SIMD oracle intentionally compares separate multiply/add
+        # rounding. Prevent compiler FMA contraction in the scalar reference only.
+        if(test_name STREQUAL "detector_difference_regression")
+            if(MSVC)
+                target_compile_options(${test_name} PRIVATE /fp:strict)
+            elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+                target_compile_options(${test_name} PRIVATE -ffp-contract=off)
+            endif()
+        endif()
         if(SKELLYTUNE_ENABLE_SANITIZERS)
             target_compile_options(${test_name} PRIVATE
                 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
