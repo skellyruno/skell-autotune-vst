@@ -1137,6 +1137,7 @@ PitchMotionMetrics measurePitchMotionCompensation (int scenario)
     summarize(rawErrors, result.rawMae, result.rawP95);
     summarize(predictedErrors, result.predictedMae, result.predictedP95);
     result.frames = static_cast<int>(rawErrors.size());
+
     return result;
 }
 
