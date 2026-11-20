@@ -490,43 +490,28 @@ private:
         if (pitchMotionHistoryCount <= stride)
             return observedMidi;
 
-        if (pitchMotionHistoryCount <= 2 * stride)
-            return observedMidi;
-
-        const auto historyAt = [this](int ageHops) noexcept {
-            return pitchMotionHistory[static_cast<size_t>(
-                (pitchMotionHistoryCount - 1 - ageHops) % kPitchMotionHistory)];
-        };
-        const float oneBack = historyAt(stride);
-        const float twoBack = historyAt(2 * stride);
+        const float strideStartMidi = pitchMotionHistory[static_cast<size_t>(
+            (pitchMotionHistoryCount - 1 - stride) % kPitchMotionHistory)];
         const double deltaCents = (static_cast<double>(observedMidi)
-                                   - static_cast<double>(oneBack)) * 100.0;
-        const double previousDeltaCents = (static_cast<double>(oneBack)
-                                           - static_cast<double>(twoBack)) * 100.0;
+                                   - static_cast<double>(strideStartMidi)) * 100.0;
         previousObservedMidi = observedMidi;
 
         // Do not extrapolate a discrete note jump or likely octave correction.
-        // Check both intervals so a jump cannot contaminate the second-order
-        // estimate on the following hop.
-        if (std::abs(deltaCents) > 175.0 || std::abs(previousDeltaCents) > 175.0)
+        // A 1.75-semitone frame-to-frame step is well outside normal vibrato and
+        // short glides at this hop rate; seed the tracker again after the jump.
+        if (std::abs(deltaCents) > 175.0)
+        {
             return observedMidi;
+        }
 
         const double dt = static_cast<double>(hop) * stride / sr;
         if (dt <= 0.0)
             return observedMidi;
 
-        // A two-point secant is centred half an interval behind the latest
-        // detector observation. Use a causal three-point backward derivative
-        // instead, so velocity is estimated at the latest observation time.
-        // The companion second derivative models the curvature of vibrato and
-        // legato motion instead of projecting one straight line through a bend.
-        const double measuredVelocity = std::clamp(
-            (3.0 * deltaCents - previousDeltaCents) / (2.0 * dt), -6000.0, 6000.0);
-        const double measuredAcceleration = std::clamp(
-            (deltaCents - previousDeltaCents) / (dt * dt), -200000.0, 200000.0);
-
-        // Ignore detector jitter on held notes. Confidence scales both terms;
-        // no additional samples, buffering, or non-causal lookahead are used.
+        const double measuredVelocity = std::clamp(deltaCents / dt, -6000.0, 6000.0);
+        // Ignore detector jitter on held notes. A real expressive glide typically
+        // exceeds this threshold over a single 4 ms analysis hop. Confidence scales
+        // the forecast smoothly instead of adding another hard voicing gate.
         if (std::abs(deltaCents) < 1.5 || std::abs(measuredVelocity) < 350.0)
             return observedMidi;
 
@@ -534,9 +519,7 @@ private:
                                                    0.0, 1.0);
         const double estimateAge = detector.getPitchEstimateAgeSeconds(observedHz);
         const double predictionCents = std::clamp(
-            (measuredVelocity * estimateAge
-             + 0.5 * measuredAcceleration * estimateAge * estimateAge) * confidenceWeight,
-            -85.0, 85.0);
+            measuredVelocity * estimateAge * confidenceWeight, -85.0, 85.0);
         return observedMidi + static_cast<float>(predictionCents / 100.0);
     }
 
