@@ -41,16 +41,17 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIsNotNone(publish)
         self.assertRegex(publish.group(1), r"(?m)^\s+needs:\s*\[build,\s*dsp-regression\]\s*$")
 
-    def test_public_prs_withhold_product_artifacts(self):
+    def test_public_prs_upload_verified_vst3_artifacts(self):
         upload = re.search(
             r"(?ms)^      - name: Upload verified Windows VST3 preview\n(.*?)(?=^      - name:|^  publish:)",
             WORKFLOW,
         )
         self.assertIsNotNone(upload)
-        self.assertRegex(
-            upload.group(1),
-            r"(?m)^        if:\s*github\.repository_visibility == 'private' \|\| github\.event_name == 'release'\s*$",
-        )
+        self.assertIn("uses: actions/upload-artifact@v6", upload.group(1))
+        self.assertIn("path: artifacts/*", upload.group(1))
+        self.assertIn("retention-days: 30", upload.group(1))
+        self.assertNotRegex(upload.group(1), r"(?m)^\s+if:")
+        self.assertNotIn("Withhold", WORKFLOW)
 
     def test_superseded_cancellation_excludes_protected_refs(self):
         self.assertIn("github.event_name == 'pull_request'", WORKFLOW)
