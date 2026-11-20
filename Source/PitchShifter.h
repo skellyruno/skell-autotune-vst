@@ -986,8 +986,9 @@ private:
         // Keep diagnostics on the reference route so their work/coverage
         // accounting remains unchanged. This gate is model geometry, not a
         // signal-level heuristic; non-neutral colour/formant models fall back.
-        const bool directCycle = !detailedDiagnostics
-            && std::abs(hop * rate - period) <= 1e-12 * period;
+        // Diagnostic counters observe the selected synthesis route; enabling
+        // them must never change the audio algorithm or sample values.
+        const bool directCycle = std::abs(hop * rate - period) <= 1e-12 * period;
         for (int i = 0; i < size; ++i)
         {
             const double phase = static_cast<double> (i) / size;

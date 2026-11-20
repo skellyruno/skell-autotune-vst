@@ -12,9 +12,23 @@ permissions: {}
 
 concurrency:
   group: skellytune-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'main' && github.event.pull_request.head.ref != 'master' && github.event.pull_request.head.ref != 'production' && !startsWith(github.event.pull_request.head.ref, 'release/') && github.event.pull_request.base.ref != 'production' && !startsWith(github.event.pull_request.base.ref, 'release/') }}
 
 jobs:
+  dsp-regression:
+    name: Offline DSP regression (Release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: {}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Configure offline DSP regressions
+        run: cmake -S . -B build-dsp -DSKELLYTUNE_DSP_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build offline DSP regression executables
+        run: cmake --build build-dsp --config Release --parallel 6
+      - name: Run offline DSP regressions
+        run: ctest --test-dir build-dsp -C Release --output-on-failure --parallel 6
+
   build:
     name: Windows x64 VST3
     runs-on: windows-2022
@@ -28,8 +42,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Test release package validator
-        run: python -m unittest discover -s tests -p "test_package_vst3.py" -v
+      - name: Test release packaging and workflow contracts
+        run: python -m unittest discover -s tests -p "test_*.py" -v
 
       - name: Require owner-approved identity before public release assets
         if: github.event_name == 'release'
@@ -42,7 +56,7 @@ jobs:
         run: cmake --build build --config Release --target HumHouseVocalTune_VST3 --parallel 2
 
       - name: Validate VST3 with pluginval strictness 5
-        uses: Tracktion/pluginval/validate@v2
+        uses: Tracktion/pluginval/validate@v2.0.0-beta3
         with:
           plugins: |
             build/HumHouseVocalTune_artefacts/Release/VST3/SkellyTune.vst3
@@ -70,6 +84,7 @@ jobs:
           --output artifacts/SkellyTune-Windows-x64.zip
 
       - name: Upload verified Windows VST3 preview
+        if: github.repository_visibility == 'private' || github.event_name == 'release'
         uses: actions/upload-artifact@v6
         with:
           name: SkellyTune-Windows-VST3
@@ -80,7 +95,7 @@ jobs:
   publish:
     name: Attach owner-approved release assets
     if: github.event_name == 'release'
-    needs: build
+    needs: [build, dsp-regression]
     runs-on: ubuntu-latest
     permissions:
       contents: write
