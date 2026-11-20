@@ -475,9 +475,11 @@ private:
             return observedMidi;
         }
 
-        // Velocity is measured over a 4 ms reference stride (one hop at the normal rate), so the
-        // jitter gate and the jump limit below keep their meaning when Low Latency re-measures faster.
-        const int stride = std::clamp(static_cast<int>(std::lround(0.004 * sr / hop)), 1, kPitchMotionHistory - 1);
+        // Retain five samples at a 4 ms reference spacing. The 17-entry ring
+        // covers four intervals even when Low Latency's detector hop is shorter.
+        constexpr int kReferenceStrideMax = 4;
+        const int stride = std::clamp(static_cast<int>(std::lround(0.004 * sr / hop)),
+                                      1, kReferenceStrideMax);
         pitchMotionHistory[static_cast<size_t>(pitchMotionHistoryCount % kPitchMotionHistory)] = observedMidi;
         ++pitchMotionHistoryCount;
 
@@ -487,31 +489,61 @@ private:
             pitchMotionHasPrevious = true;
             return observedMidi;
         }
-        if (pitchMotionHistoryCount <= stride)
+        if (pitchMotionHistoryCount <= 4 * stride)
             return observedMidi;
 
-        const float strideStartMidi = pitchMotionHistory[static_cast<size_t>(
-            (pitchMotionHistoryCount - 1 - stride) % kPitchMotionHistory)];
-        const double deltaCents = (static_cast<double>(observedMidi)
-                                   - static_cast<double>(strideStartMidi)) * 100.0;
-        previousObservedMidi = observedMidi;
+        const auto historyAt = [this](int ageHops) noexcept {
+            return pitchMotionHistory[static_cast<size_t>(
+                (pitchMotionHistoryCount - 1 - ageHops) % kPitchMotionHistory)];
+        };
 
-        // Do not extrapolate a discrete note jump or likely octave correction.
-        // A 1.75-semitone frame-to-frame step is well outside normal vibrato and
-        // short glides at this hop rate; seed the tracker again after the jump.
-        if (std::abs(deltaCents) > 175.0)
+        // Reject note/octave jumps before fitting; a jump must not masquerade
+        // as high velocity or curvature during the following four observations.
+        for (int interval = 1; interval <= 4; ++interval)
         {
-            return observedMidi;
+            const double stepCents = (static_cast<double>(historyAt((interval - 1) * stride))
+                                    - static_cast<double>(historyAt(interval * stride))) * 100.0;
+            if (std::abs(stepCents) > 175.0)
+            {
+                previousObservedMidi = observedMidi;
+                return observedMidi;
+            }
         }
 
         const double dt = static_cast<double>(hop) * stride / sr;
         if (dt <= 0.0)
             return observedMidi;
 
-        const double measuredVelocity = std::clamp(deltaCents / dt, -6000.0, 6000.0);
-        // Ignore detector jitter on held notes. A real expressive glide typically
-        // exceeds this threshold over a single 4 ms analysis hop. Confidence scales
-        // the forecast smoothly instead of adding another hard voicing gate.
+        // Five-point, causal, quadratic least-squares derivative at the newest
+        // observation. Compared with a two/three-point difference this averages
+        // detector jitter while retaining curvature for vibrato and a rising
+        // or falling legato glide. Samples are ordered oldest -> newest.
+        const double y0 = historyAt(4 * stride);
+        const double y1 = historyAt(3 * stride);
+        const double y2 = historyAt(2 * stride);
+        const double y3 = historyAt(stride);
+        const double y4 = observedMidi;
+        const double derivative =
+              (13.0 / 35.0) * y0
+            - (27.0 / 70.0) * y1
+            - (4.0 / 7.0) * y2
+            - (13.0 / 70.0) * y3
+            + (27.0 / 35.0) * y4;
+        const double secondDerivative =
+              (2.0 / 7.0) * y0
+            - (1.0 / 7.0) * y1
+            - (2.0 / 7.0) * y2
+            - (1.0 / 7.0) * y3
+            + (2.0 / 7.0) * y4;
+        const double measuredVelocity = std::clamp(derivative * 100.0 / dt,
+                                                   -6000.0, 6000.0);
+        const double measuredAcceleration = std::clamp(secondDerivative * 100.0 / (dt * dt),
+                                                       -200000.0, 200000.0);
+        previousObservedMidi = observedMidi;
+
+        const double deltaCents = (static_cast<double>(observedMidi) - y3) * 100.0;
+        // Ignore detector jitter on held notes. Confidence scales the forecast
+        // smoothly instead of adding another hard voicing gate.
         if (std::abs(deltaCents) < 1.5 || std::abs(measuredVelocity) < 350.0)
             return observedMidi;
 
@@ -519,7 +551,9 @@ private:
                                                    0.0, 1.0);
         const double estimateAge = detector.getPitchEstimateAgeSeconds(observedHz);
         const double predictionCents = std::clamp(
-            measuredVelocity * estimateAge * confidenceWeight, -85.0, 85.0);
+            (measuredVelocity * estimateAge
+             + 0.5 * measuredAcceleration * estimateAge * estimateAge) * confidenceWeight,
+            -85.0, 85.0);
         return observedMidi + static_cast<float>(predictionCents / 100.0);
     }
 
@@ -1095,7 +1129,7 @@ private:
     bool hasDecisionSourceMidi = false;
     float previousDecisionSourceMidi = 0.0f;
     float  previousObservedMidi = 0.0f;
-    static constexpr int kPitchMotionHistory = 5;
+    static constexpr int kPitchMotionHistory = 17;
     float  pitchMotionHistory[kPitchMotionHistory] = {};
     int    pitchMotionHistoryCount = 0;
     double smoothedHumanize = 0.0;
