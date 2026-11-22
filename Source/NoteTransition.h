@@ -13,7 +13,18 @@ class NoteTransition
 public:
     // Motion thresholds were tuned for one estimate per 4 ms. With faster estimates, deltas are
     // still taken over that same 4 ms (stride = estimates per 4 ms); at stride 1 nothing changes.
-    void setReferenceStride (int stride) noexcept { refStride = std::clamp(stride, 1, kMaxStride); }
+    void setReferenceStride (int stride) noexcept
+    {
+        const int nextStride = std::clamp(stride, 1, kMaxStride);
+        if (nextStride != refStride)
+        {
+            // Do not mix observations spaced 2 ms and 4 ms in one velocity
+            // history. Keep the accepted target through the mode switch.
+            refStride = nextStride;
+            historyCount = 0;
+            historyWriteIndex = 0;
+        }
+    }
 
     void reset() noexcept
     {
@@ -31,7 +42,13 @@ public:
         if (!std::isfinite(observed) || !std::isfinite(predicted)
             || !std::isfinite(measuredTarget) || !std::isfinite(predictedTarget)
             || !std::isfinite(confidence) || hopSeconds <= 0.0)
+        {
+            // Invalid estimates cannot be used as a gap in an otherwise
+            // trustworthy velocity trajectory. Preserve the stored note.
+            historyCount = 0;
+            historyWriteIndex = 0;
             return measuredTarget;
+        }
 
         // Predictive crossings require a trajectory of TRUSTED detector
         // observations. A noisy weak-confidence ramp must not make the

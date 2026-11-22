@@ -55,6 +55,21 @@ jobs:
       - name: Build VST3 target only
         run: cmake --build build --config Release --target HumHouseVocalTune_VST3 --parallel 2
 
+      - name: Render genuine JUCE UI and verify retune knob direction
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target skellytune_editor_smoke --parallel 2
+          & "build/Release/skellytune_editor_smoke.exe" "reports/ui"
+
+      - name: Upload real editor screenshots
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: SkellyTune-editor-screenshots
+          path: reports/ui/*.png
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Validate VST3 with pluginval strictness 5
         uses: Tracktion/pluginval/validate@v2.0.0-beta3
         with:

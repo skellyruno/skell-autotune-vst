@@ -1,6 +1,7 @@
 #include "NoteTransition.h"
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 int main()
 {
@@ -79,5 +80,31 @@ int main()
     t.choose(62.82f,63.11f,62.f,62.f,.99f,.002,false);
     expect(t.choose(62.91f,63.23f,62.f,64.f,.99f,.002,false)==64.f,
            "2ms detector hop preserves genuine 4ms motion evidence");
+    // A 2 ms -> 4 ms detector-cadence switch used to interpret earlier 2 ms
+    // deltas as fresh 4 ms motion, and could predict the upper note one hop
+    // before any observation at the new cadence.
+    t.reset();
+    t.setReferenceStride(2);
+    for (const float observed : {62.50f, 62.62f, 62.74f, 62.86f, 62.94f})
+        t.choose(observed, observed, 62.f, 62.f, .99f, .002, false);
+    t.setReferenceStride(1);
+    const float afterCadenceChange = t.choose(63.00f, 63.24f, 62.f, 64.f, .99f, .004, false);
+    expect(afterCadenceChange == 62.f,
+           "2ms to 4ms cadence change discards stale velocity evidence");
+    t.choose(63.04f, 63.26f, 62.f, 64.f, .99f, .004, false);
+    expect(t.choose(63.08f, 63.29f, 62.f, 64.f, .99f, .004, false) == 64.f,
+           "verified 4ms trajectory can forecast again after cadence change");
+
+    // Invalid detector values also break motion continuity. The old path
+    // returned a fallback note but left pre-gap velocity fully trusted.
+    t.reset();
+    t.setReferenceStride(1);
+    t.choose(62.55f, 62.55f, 62.f, 62.f, .99f, .004, false);
+    t.choose(62.75f, 62.90f, 62.f, 62.f, .99f, .004, false);
+    const float invalid = std::numeric_limits<float>::quiet_NaN();
+    expect(t.choose(invalid, invalid, 62.f, 62.f, .99f, .004, false) == 62.f,
+           "invalid detector estimate returns measured target");
+    expect(t.choose(62.93f, 63.21f, 62.f, 64.f, .99f, .004, false) == 62.f,
+           "first reliable estimate after invalid gap does not forecast early");
     return ok ? 0 : 1;
 }

@@ -317,6 +317,14 @@ if(MINGW AND SKELLYTUNE_MINGW_COMPAT)
 endif()
 
 if(WIN32)
+    # Capture actual rendered JUCE editor states and exercise the inverted
+    # retune GUI mapping. Never use fabricated mockup screenshots as QA.
+    add_executable(skellytune_editor_smoke EXCLUDE_FROM_ALL tests/juce_editor_smoke.cpp)
+    target_include_directories(skellytune_editor_smoke PRIVATE Source)
+    target_link_libraries(skellytune_editor_smoke PRIVATE
+        HumHouseVocalTune juce::juce_audio_utils juce::juce_dsp)
+    target_compile_features(skellytune_editor_smoke PRIVATE cxx_std_20)
+
     add_executable(skellytune_vst3_smoke EXCLUDE_FROM_ALL tests/vst3_binary_smoke.cpp)
     target_include_directories(skellytune_vst3_smoke PRIVATE
         "${juce_SOURCE_DIR}/modules/juce_audio_processors/format_types/VST3_SDK")

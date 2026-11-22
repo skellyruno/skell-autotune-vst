@@ -2,6 +2,7 @@
 
 #include "HumHouseLookAndFeel.h"
 #include "PluginProcessor.h"
+#include "RetuneSpeedSlider.h"
 #include "SkeletonOrb.h"
 #include <JuceHeader.h>
 
@@ -45,7 +46,8 @@ class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor, private juce:
     void applyAppearance();
 
     // Knobs
-    juce::Slider speedKnob, humanizeKnob, referenceFreqKnob;
+    humtune::RetuneSpeedSlider speedKnob;
+    juce::Slider humanizeKnob, referenceFreqKnob;
 
     // Labels for knobs
     juce::Label referenceFreqLabel;
