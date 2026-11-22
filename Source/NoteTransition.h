@@ -17,10 +17,8 @@ public:
 
     void reset() noexcept
     {
-        hasPrevious = false;
-        previousObserved = 0.0f;
-        previousStep = 0.0f;
         historyCount = 0;
+        historyWriteIndex = 0;
         lastTarget = -1.0f;
         uncertainSeconds = 0.0;
     }
@@ -35,15 +33,35 @@ public:
             || !std::isfinite(confidence) || hopSeconds <= 0.0)
             return measuredTarget;
 
-        history[static_cast<size_t>(historyCount % kHistory)] = observed;
-        auto back = [&](int n) { return history[static_cast<size_t>(((historyCount - n) % kHistory + kHistory) % kHistory)]; };
-        const bool haveStride = historyCount >= refStride;
-        const float strideDelta = haveStride ? observed - back(refStride) : 0.0f;
-        const float strideStep = historyCount >= 2 * refStride ? back(refStride) - back(2 * refStride) : 0.0f;
-        ++historyCount;
-        const bool hasPrevious = haveStride;
-        const float delta = strideDelta;
-        const float previousStep = strideStep;
+        // Predictive crossings require a trajectory of TRUSTED detector
+        // observations. A noisy weak-confidence ramp must not make the
+        // next credible frame appear to have confirmed velocity. Reset only
+        // the motion evidence, not lastTarget/its brief confidence hold.
+        // A bounded ring counter also avoids signed overflow in long sessions.
+        constexpr float kMotionTrust = 0.93f; // matches forecast confidence gate
+        float delta = 0.0f, previousStep = 0.0f;
+        bool hasPrevious = false;
+        if (confidence >= kMotionTrust)
+        {
+            const int index = historyWriteIndex;
+            history[static_cast<size_t>(index)] = observed;
+            const auto back = [&](int n) {
+                return history[static_cast<size_t>(
+                    (index + kHistory - n) % kHistory)];
+            };
+            hasPrevious = historyCount >= refStride;
+            if (hasPrevious)
+                delta = observed - back(refStride);
+            if (historyCount >= 2 * refStride)
+                previousStep = back(refStride) - back(2 * refStride);
+            historyCount = std::min(historyCount + 1, kHistory);
+            historyWriteIndex = (index + 1) % kHistory;
+        }
+        else
+        {
+            historyCount = 0;
+            historyWriteIndex = 0;
+        }
         const int direction = delta > 0.025f ? 1 : (delta < -0.025f ? -1 : 0);
         const bool consistentMotion = hasPrevious && direction != 0 && direction == (previousStep > 0.025f ? 1 : (previousStep < -0.025f ? -1 : 0));
         // The wider onset shortcut extrapolates a historical contour. When
@@ -93,11 +111,8 @@ public:
 
 private:
     static constexpr int kMaxStride = 4, kHistory = 2 * kMaxStride + 1;
-    int refStride = 1, historyCount = 0;
+    int refStride = 1, historyCount = 0, historyWriteIndex = 0;
     float history[kHistory] = {};
-    bool hasPrevious = false;
-    float previousObserved = 0.0f;
-    float previousStep = 0.0f;
     float lastTarget = -1.0f;
     double uncertainSeconds = 0.0;
 };
