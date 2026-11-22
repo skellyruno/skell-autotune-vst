@@ -327,7 +327,8 @@ if(WIN32)
         Source
         "${CMAKE_CURRENT_BINARY_DIR}/HumHouseVocalTune_artefacts/JuceLibraryCode")
     target_link_libraries(skellytune_editor_smoke PRIVATE
-        HumHouseVocalTune juce::juce_audio_utils juce::juce_dsp)
+        HumHouseVocalTune juce::juce_audio_utils juce::juce_dsp
+        SkellCore::UI)
     target_compile_features(skellytune_editor_smoke PRIVATE cxx_std_20)
 
     add_executable(skellytune_vst3_smoke EXCLUDE_FROM_ALL tests/vst3_binary_smoke.cpp)
