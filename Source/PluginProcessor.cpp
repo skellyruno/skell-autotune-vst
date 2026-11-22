@@ -43,8 +43,10 @@ HumHouseVocalTuneProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
-    // Retune Speed: the knob is turned clockwise for FASTER tuning (the number shown goes
-    // down to 0 at the far right). 1 = instant (hard tune), 0 = slowest.
+    // Existing retune host automation: 1 = instant, 0 = slowest.
+    // Clockwise raises this stored parameter and speeds up correction.
+    // The UI displays 100 * (1 - retune): 0 = instant, 100 = slow.
+    // Do not invert this knob or alter its saved-session semantics.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"retune", 1}, "Retune Speed",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));

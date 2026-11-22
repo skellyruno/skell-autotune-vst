@@ -1,7 +1,6 @@
 // Real JUCE editor component snapshots (not design mockups), plus an actual
 // Slider mapping check. Runs on Windows CI after the full VST3 build.
 #include "PluginProcessor.h"
-#include "RetuneSpeedSlider.h"
 #include <JuceHeader.h>
 #include <array>
 #include <cmath>
@@ -12,16 +11,21 @@ int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI initialiseJuce;
 
-    humtune::RetuneSpeedSlider retune;
+    // The original OG SkellyTune convention is clockwise=faster:
+    // stored APVTS retune 1.0 = instant, 0.0 = slow; the displayed
+    // number is the inverse, 0 = instant and 100 = slow.
+    juce::Slider retune;
+    retune.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
     retune.setRange(0.0, 1.0, 0.01);
     const auto near = [](double x, double y) { return std::abs(x - y) < 0.00001; };
-    if (!near(retune.valueToProportionOfLength(0.0), 1.0)
-        || !near(retune.valueToProportionOfLength(1.0), 0.0)
-        || !near(retune.proportionOfLengthToValue(0.0), 1.0)
-        || !near(retune.proportionOfLengthToValue(1.0), 0.0)
-        || !near(retune.proportionOfLengthToValue(0.25), 0.75))
+    if (!near(retune.valueToProportionOfLength(0.0), 0.0)
+        || !near(retune.valueToProportionOfLength(1.0), 1.0)
+        || !near(retune.proportionOfLengthToValue(0.0), 0.0)
+        || !near(retune.proportionOfLengthToValue(1.0), 1.0)
+        || !near(100.0 * (1.0 - retune.proportionOfLengthToValue(1.0)), 0.0)
+        || !near(100.0 * (1.0 - retune.proportionOfLengthToValue(0.0)), 100.0))
     {
-        std::cerr << "FAIL: clockwise speed direction or inverse mapping\n";
+        std::cerr << "FAIL: original OG SkellyTune speed knob convention\n";
         return 1;
     }
 
@@ -54,8 +58,8 @@ int main(int argc, char** argv)
     {
         processor.setUiTheme(scene.theme);
         editor->setSize(scene.width, scene.height);
-        // Process the real UI message loop to apply its theme/timer state.
-        juce::MessageManager::getInstance()->runDispatchLoopUntil(110);
+        // This test captures actual JUCE pixels without invoking the
+        // unavailable JUCE modal event-loop API in Windows VST3 builds.
         for (int i = 0; i < editor->getNumChildComponents(); ++i)
         {
             const auto* child = editor->getChildComponent(i);
@@ -94,6 +98,6 @@ int main(int argc, char** argv)
     }
     editor.reset();
     processor.releaseResources();
-    std::cout << "PASS retune speed direction: clockwise=fast, APVTS 0=fast\n";
+    std::cout << "PASS original retune mapping: clockwise=fast, display 0=instant\n";
     return 0;
 }

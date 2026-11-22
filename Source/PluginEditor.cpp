@@ -76,8 +76,9 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   auto &apvts = proc.getAPVTS();
   // --- Knobs ---
   setupKnob(speedKnob, "RETUNE SPEED",
-            "Turn right for faster correction. Speed 100 = hard tune "
-            "(fastest), 0 = slow and natural. Host retune values are unchanged.");
+            "How fast the pitch snaps to the note. Turn right for faster.\n0 = "
+            "instant (hard tune), 100 = "
+            "slow and natural.");
   setupKnob(humanizeKnob, "HUMANIZE",
             "Eases off correction on sustained notes.");
 
@@ -472,10 +473,9 @@ void HumHouseVocalTuneEditor::timerCallback() {
   orb.motionLevel = orb.activity * (.6f + .4f * juce::jlimit(0.0f, 1.0f, displayConfidence));
   orb.phase = std::fmod(orb.phase + .49 * elapsed * (3.0 + 20.0 * orb.activity),
                         juce::MathConstants<double>::twoPi * 10.0);
-  const float fastness = 1.0f - static_cast<float>(speedKnob.getValue());
-  orb.intensity = .75f + .25f * fastness;
+  orb.intensity = .75f + .25f * static_cast<float>(speedKnob.getValue());
   if (motion)
-    orb.sweepPhase = std::fmod(orb.sweepPhase + .60 * elapsed * (.42 + 1.2 * fastness
+    orb.sweepPhase = std::fmod(orb.sweepPhase + .60 * elapsed * (.42 + 1.2 * speedKnob.getValue()
                                         + 1.75 * orb.activity),
                                juce::MathConstants<double>::twoPi);
   // Near-idle sweep stays visible at 15 Hz, while audio can animate at 30 Hz.
