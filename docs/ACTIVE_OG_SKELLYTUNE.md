@@ -80,3 +80,9 @@ no merge.** The public artifact gate must not be weakened just to
 distribute a preview; private download requires a safe delivery route.
 Historical Oct v39 reports/28-test instructions are preserved rather
 than rewritten as if they described the current 52-test candidate.
+
+## Performance measurement follow-up (2026-11-22)
+
+The current exact-head `f39a51e` passed [CI #45093669638](https://github.com/skellyruno/skell-autotune-vst/actions/runs/45093669638): 52/52 DSP cases, Windows VST3 target, 17/17 pluginval tests at strictness 5, strict packaging and native JUCE themed/active-state snapshots. The active-state screenshot was manually inspected: chest ribs have continuous curves and the skeleton remains intact. This does not establish FL Studio host performance or real vocal quality.
+
+An informational CI step now executes the already-existing `realtime_stress_benchmark` (previously only compiled) and uploads a synthetic callback CSV. Matrix: 44.1 kHz/127-sample Standard; 48 kHz/128-sample Standard/Low Latency with formants off/on; 96 kHz/512-sample Low Latency. The signal is generated harmonics with fast ±pitch motion, 25ms formant automation, and a 0.5s warmup; `duty`, `p99_deadline_fraction`, float peaks and missed deadlines are measured on a shared Ubuntu runner. **Synthetic CI percentages are noisy and not direct measurements of user DAW CPU or real dry vocals.** Do not infer a speedup from those values without before/after runs on the same host. Exact-head new run pending.

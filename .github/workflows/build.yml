@@ -29,6 +29,37 @@ jobs:
       - name: Run offline DSP regressions
         run: ctest --test-dir build-dsp -C Release --output-on-failure --parallel 6
 
+      # These synthetic callback timings are machine-dependent diagnostics,
+      # not audio quality or FL Studio CPU measurements. Do not gate releases
+      # on hard percentage thresholds from shared hosted runners.
+      - name: Record synthetic callback duty and p99 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/cpu
+          csv=reports/cpu/synthetic-callback-2026-11-22.csv
+          echo "rate,block,low,formants,range,source_hz,latency,duty,p99_seconds,max_seconds,p99_deadline_fraction,max_deadline_fraction,late_callbacks,callbacks,peak,pitch_motion" > "$csv"
+          for config in \
+              "44100 127 0 0 2 3 1" \
+              "48000 128 0 0 2 3 1" \
+              "48000 128 1 0 2 3 1" \
+              "48000 128 0 1 2 3 1" \
+              "48000 128 1 1 2 3 1" \
+              "96000 512 1 0 2 3 1"; do
+            read -r rate block low formants range seconds pitchMotion <<< "$config"
+            ./build-dsp/realtime_stress_benchmark "$rate" "$block" "$low" "$formants" "$range" "$seconds" "$pitchMotion" | tail -n 1 >> "$csv"
+          done
+          cat "$csv"
+
+      - name: Upload synthetic CPU measurement CSV
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: SkellyTune-synthetic-callback-cpu
+          path: reports/cpu/*.csv
+          if-no-files-found: warn
+          retention-days: 30
+
   build:
     name: Windows x64 VST3
     runs-on: windows-2022
