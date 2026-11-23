@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include "SkeletonMotion.h"
 #include <cmath>
 
 class SkeletonOrb : public juce::Component {
@@ -92,44 +93,19 @@ class SkeletonOrb : public juce::Component {
                                         .interpolatedWith(accent, .25f)
                                         .withAlpha(bypassed ? .3f : .85f + .15f * activity);
             auto bone = [&](float x, float y, float xx, float yy, float width = 2.0f) {
-                const float recovery = .16f + .84f * std::pow(std::abs(std::sin(static_cast<float>(phase) * (.58f + .14f * std::sin(x)) + x * .091f + y * .023f)), 3.0f);
-                const float energy = reducedMotion ? 0.0f : activity * intensity * recovery;
-                const float identity = x * .17f + y * .071f + xx * .023f;
-                // Splitting each bone into independently scattered pieces
-                // destroys the skeleton silhouette at high vocal activity.
-                // Move the complete stroke by a small bounded displacement.
-                const int pieces = 1;
-                for (int segment = 0; segment < pieces; ++segment) {
-                    const float u = static_cast<float>(segment) / pieces;
-                    const float v = (segment + 1.0f) / pieces;
-                    const float angle = static_cast<float>(phase) + identity + segment * 2.4f + .85f * std::sin(identity * 2.63f + segment + static_cast<float>(phase) * .71f);
-                    const float orbitRadius = 28.0f + 78.0f * (.5f + .5f * std::sin(identity * 2.13f + segment));
-                    const float scatter = juce::jlimit(0.0f, .25f, energy * (width > 1.5f ? .40f : .32f));
-                    const float midX = x + (xx - x) * (u + v) * .5f;
-                    const float midY = y + (yy - y) * (u + v) * .5f;
-                    float dx = scatter * (140 + orbitRadius * std::sin(angle) - midX);
-                    float dy = scatter * (140 + orbitRadius * std::cos(angle) - midY);
-                    // A fractional blend with an orbital point could
-                    // displace a 20px bone by 30-50px even at scatter=.25.
-                    // Cap the actual euclidean translation in design pixels.
-                    const float maxDisplacement = width > 1.5f ? 2.5f : 1.5f;
-                    const float squared = dx * dx + dy * dy;
-                    if (squared > maxDisplacement * maxDisplacement)
-                    {
-                        const float factor = maxDisplacement / std::sqrt(squared);
-                        dx *= factor;
-                        dy *= factor;
-                    }
-                    const float ax = x + (xx - x) * u + dx, ay = y + (yy - y) * u + dy;
-                    const float bx = x + (xx - x) * v + dx, by = y + (yy - y) * v + dy;
-                    if (scatter > .2f && width > 1.5f) {
-                        g.setColour(accent.withAlpha(scatter * .28f));
-                        g.drawLine(ax - 9 * scatter * std::cos(angle),
-                                   ay + 9 * scatter * std::sin(angle), ax, ay, .9f);
-                    }
-                    g.setColour(boneColour.interpolatedWith(accent, .65f * scatter));
-                    g.drawLine(ax, ay, bx, by, width);
+                const auto scatter = skellytune::motion::boneScatter(
+                    x, y, xx, yy, width, activity, intensity, phase, reducedMotion);
+                const float drive = reducedMotion ? 0.0f
+                    : juce::jlimit(0.0f, 1.0f, activity * intensity);
+                // A faint anchored bone outline keeps the figure identifiable
+                // while the brighter complete stroke scatters independently.
+                if (drive > .20f && width > 1.5f) {
+                    g.setColour(boneColour.withAlpha(.11f * drive));
+                    g.drawLine(x, y, xx, yy, width * .75f);
                 }
+                g.setColour(boneColour.interpolatedWith(accent, .17f * drive));
+                g.drawLine(x + scatter.x, y + scatter.y,
+                           xx + scatter.x, yy + scatter.y, width);
             };
             // Keep the skeleton visible while singing. Only the note badge changes.
             if (targetNote >= 0) {
@@ -152,7 +128,15 @@ class SkeletonOrb : public juce::Component {
                 g.setColour(boneColour.withAlpha(.88f));
                 g.fillPath(noteOutline);
             }
-            // Let the character keep moving gently between phrases.
+            // The head bounces independently of the torso. Keeping the
+            // face, jaw and teeth under one transform avoids detached eyes.
+            const auto head = skellytune::motion::headPose(
+                activity, motionLevel, phase, reducedMotion);
+            {
+                juce::Graphics::ScopedSaveState headState(g);
+                g.addTransform(
+                    juce::AffineTransform::rotation(head.angle, 140, 70)
+                        .translated(head.x, head.y));
             juce::Path skull;
             skull.startNewSubPath(124, 58);
             skull.cubicTo(120, 37, 160, 37, 156, 58);
@@ -180,9 +164,20 @@ class SkeletonOrb : public juce::Component {
                 g.drawLine(133.0f + i * 3.5f, 71, 133.0f + i * 3.5f, 76, .7f);
             g.setColour(boneColour);
             }
-            bone(128, 73, 152, 73);
+            // Skull details use the same transform; do not scatter its
+            // jaw/teeth independently or the bounce looks like a glitch.
+            g.setColour(boneColour.withAlpha(.9f));
+            g.drawLine(128, 73, 152, 73, 1.6f);
             for (int i = 0; i < 5; ++i)
-                bone(132 + i * 4, 71, 132 + i * 4, 77, 1);
+                g.drawLine(132 + i * 4, 71, 132 + i * 4, 77, 1.0f);
+            } // headState restores torso transform
+            // A pair of flexible neck connectors follows the head offset
+            // while all other vertebrae stay attached to the torso.
+            g.setColour(boneColour.withAlpha(.78f));
+            g.drawLine(136.0f + head.x, 77.0f + head.y,
+                       137.0f, 89.0f, 1.2f);
+            g.drawLine(144.0f + head.x, 77.0f + head.y,
+                       143.0f, 90.0f, 1.2f);
             for (int i = 0; i < 12; ++i)
                 bone(137, 81 + i * 5, 143, 83 + i * 5, 1.2f);
             bone(140, 89, 113, 97);

@@ -110,6 +110,7 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
         enable_history_regression
         frequency_slew_regression
         detector_difference_regression
+        skeleton_motion_regression
     )
 
     if(SKELLYTUNE_EXPERIMENTAL_EPOCH_REFINEMENT)

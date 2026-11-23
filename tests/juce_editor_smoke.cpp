@@ -2,6 +2,7 @@
 // This runs on the Windows CI machine after building the VST3.
 #include "PluginProcessor.h"
 #include "SkeletonOrb.h"
+#include "SkeletonMotion.h"
 #include <JuceHeader.h>
 #include <array>
 #include <cmath>
@@ -227,6 +228,45 @@ int main(int argc, char** argv)
         return 21;
     }
     std::cout << "PASS real JUCE active-note visual screenshot\n";
+
+    // Capture actual JUCE-rendered high/low bounce and an accessibility
+    // reduced-motion pose; never replace real screenshots with mockups.
+    // These are deterministic injected UI states, not an audio recording.
+    auto capturePose = [&](const char* name, double headPhase, bool still) {
+        skeleton->phase = headPhase;
+        skeleton->reducedMotion = still;
+        const auto shot = editor->createComponentSnapshot(editor->getLocalBounds(), true);
+        if (!shot.isValid()) return false;
+        const auto output = outputDir.getChildFile(juce::String(name) + ".png");
+        juce::FileOutputStream stream(output);
+        juce::PNGImageFormat encoder;
+        if (!stream.openedOk() || !encoder.writeImageToStream(shot, stream))
+            return false;
+        stream.flush();
+        return output.getSize() >= 1024;
+    };
+    if (!capturePose("skellytune-head-bounce-high", .94, false)
+        || !capturePose("skellytune-head-bounce-low", 2.06, false)
+        || !capturePose("skellytune-reduced-motion", .94, true))
+    {
+        std::cerr << "FAIL: real JUCE bounce/still screenshots unavailable\n";
+        return 22;
+    }
+    const auto high = skellytune::motion::headPose(.80f, .75f, .94, false);
+    const auto low = skellytune::motion::headPose(.80f, .75f, 2.06, false);
+    if (std::abs(high.y - low.y) < 4.0f
+        || std::abs(high.x - low.x) < .6f
+        || std::abs(high.angle - low.angle) < .005f)
+    {
+        std::cerr << "FAIL: no visible activity-driven skull bounce/sway\n";
+        return 23;
+    }
+    const auto fixed = skellytune::motion::headPose(.80f, .75f, .94, true);
+    if (fixed.x != 0 || fixed.y != 0 || fixed.angle != 0)
+    {
+        std::cerr << "FAIL: reduced-motion head was still moving\n";
+        return 24;
+    }
 
     editor.reset();
     processor.releaseResources();

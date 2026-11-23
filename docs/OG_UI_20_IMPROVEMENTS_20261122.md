@@ -78,3 +78,24 @@ subpixel, activity-linked breathing. The rest of the skeleton geometry,
 all DSP/host controls, note badge and existing screenshot scenes remain
 unchanged. **Visual result and UI CPU remain unverified until the new
 Windows-runner screenshots are inspected.**
+
+## User-directed motion correction — 2026-11-23
+
+The previous 2.5px/1.5px hard clamp was **too restrained** for the intended
+SkellyTune personality. Restore **visible, controlled scatter** using smooth
+per-stroke phases: up to 13px for main bones and 8px for smaller bones,
+with faint anchored silhouettes, rather than exploding the skeleton into
+separate scattered half-segments. Curved ribs remain intact. The head now
+**bounces, tilts and sways independently** (up to 17px lift), with its eyes,
+jaw and teeth moving together and flexible neck connectors. The existing
+Reduce Motion switch must freeze both bounce and scatter completely.
+
+A pure, deterministic `SkeletonMotion.h` helper is shared between JUCE
+rendering and `skeleton_motion_regression`, which verifies visible movement,
+mathematical bounds, no movement at rest/reduced-motion, and finite positions.
+Windows JUCE CI additionally captures high-head, low-head and reduced-motion
+screenshots alongside four themes and the existing active-note screenshot.
+
+DSP, host latency, original speed mapping, pitch graph size, 12 piano masks,
+presets and public release gating remain untouched. Screenshots, build,
+pluginval and exact-head checks **must pass before calling it verified**.
