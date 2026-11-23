@@ -1,5 +1,5 @@
-// Real JUCE editor component snapshots (not design mockups), plus an actual
-// Slider mapping check. Runs on Windows CI after the full VST3 build.
+// Actual JUCE editor snapshots, plus real-control/appearance checks.
+// This runs on the Windows CI machine after building the VST3.
 #include "PluginProcessor.h"
 #include <JuceHeader.h>
 #include <array>
@@ -9,33 +9,46 @@
 
 int main(int argc, char** argv)
 {
-    juce::ScopedJuceInitialiser_GUI initialiseJuce;
-
-    // The original OG SkellyTune convention is clockwise=faster:
-    // stored APVTS retune 1.0 = instant, 0.0 = slow; the displayed
-    // number is the inverse, 0 = instant and 100 = slow.
-    juce::Slider retune;
-    retune.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-    retune.setRange(0.0, 1.0, 0.01);
-    const auto near = [](double x, double y) { return std::abs(x - y) < 0.00001; };
-    if (!near(retune.valueToProportionOfLength(0.0), 0.0)
-        || !near(retune.valueToProportionOfLength(1.0), 1.0)
-        || !near(retune.proportionOfLengthToValue(0.0), 0.0)
-        || !near(retune.proportionOfLengthToValue(1.0), 1.0)
-        || !near(100.0 * (1.0 - retune.proportionOfLengthToValue(1.0)), 0.0)
-        || !near(100.0 * (1.0 - retune.proportionOfLengthToValue(0.0)), 100.0))
-    {
-        std::cerr << "FAIL: original OG SkellyTune speed knob convention\n";
-        return 1;
-    }
-
+    juce::ScopedJuceInitialiser_GUI juceGui;
     HumHouseVocalTuneProcessor processor;
     processor.prepareToPlay(48000.0, 512);
     std::unique_ptr<juce::AudioProcessorEditor> editor(processor.createEditor());
     if (!editor)
     {
         std::cerr << "FAIL: OG SkellyTune editor could not be created\n";
+        return 1;
+    }
+
+    // Inspect the REAL plugin's retune control, not a synthetic spare slider.
+    // Approved mapping: clockwise = faster, host retune 1 = instant,
+    // UI readout 0 = instant / 100 = slow, DSP engine uses 1 - retune.
+    juce::Slider* speed = nullptr;
+    juce::Button* cycleTheme = nullptr;
+    for (int i = 0; i < editor->getNumChildComponents(); ++i)
+    {
+        auto* child = editor->getChildComponent(i);
+        if (child->getName() == "RETUNE SPEED")
+            speed = dynamic_cast<juce::Slider*>(child);
+        if (child->getName() == "Cycle theme")
+            cycleTheme = dynamic_cast<juce::Button*>(child);
+    }
+    auto* storedRetune = processor.getAPVTS().getParameter("retune");
+    const auto near = [](double x, double y) { return std::abs(x - y) < 0.00001; };
+    if (!speed || !storedRetune
+        || !near(storedRetune->getDefaultValue(), 1.0)
+        || !near(speed->getMinimum(), 0.0) || !near(speed->getMaximum(), 1.0)
+        || !near(speed->valueToProportionOfLength(0.0), 0.0)
+        || !near(speed->valueToProportionOfLength(1.0), 1.0)
+        || !near(speed->proportionOfLengthToValue(0.0), 0.0)
+        || !near(speed->proportionOfLengthToValue(1.0), 1.0))
+    {
+        std::cerr << "FAIL: original OG SkellyTune retune control changed\n";
         return 2;
+    }
+    if (!cycleTheme || !cycleTheme->onClick)
+    {
+        std::cerr << "FAIL: actual theme-cycle button callback missing\n";
+        return 3;
     }
 
     const juce::File outputDir = argc > 1
@@ -44,7 +57,7 @@ int main(int argc, char** argv)
     if (!outputDir.createDirectory() && !outputDir.isDirectory())
     {
         std::cerr << "FAIL: screenshot output directory\n";
-        return 3;
+        return 4;
     }
 
     struct Scene { int width; int height; int theme; const char* name; };
@@ -54,12 +67,25 @@ int main(int argc, char** argv)
         {700, 680, 2, "design-theme2"},
         {1050, 1020, 3, "large-theme3"}
     }};
+    std::array<juce::Colour, 4> sampledBackgrounds{};
     for (const auto& scene : scenes)
     {
-        processor.setUiTheme(scene.theme);
+        // The editor timer deliberately does not fire while hidden in CI.
+        // Changing only processor.setUiTheme() produced four misleading
+        // filenames showing the SAME visual theme. Call the actual button
+        // callback, which synchronously applies LookAndFeel + repaints.
+        for (int attempts = 0;
+             attempts < 4 && processor.getUiTheme() != scene.theme;
+             ++attempts)
+            cycleTheme->onClick();
+        if (processor.getUiTheme() != scene.theme)
+        {
+            std::cerr << "FAIL: actual theme button cannot select "
+                      << scene.name << "\n";
+            return 5;
+        }
         editor->setSize(scene.width, scene.height);
-        // This test captures actual JUCE pixels without invoking the
-        // unavailable JUCE modal event-loop API in Windows VST3 builds.
+
         for (int i = 0; i < editor->getNumChildComponents(); ++i)
         {
             const auto* child = editor->getChildComponent(i);
@@ -67,37 +93,59 @@ int main(int argc, char** argv)
             {
                 std::cerr << "FAIL: offscreen editor control at "
                           << scene.name << " / " << child->getName() << "\n";
-                return 4;
+                return 6;
             }
         }
-        auto image = editor->createComponentSnapshot(editor->getLocalBounds(), true);
+        const auto image = editor->createComponentSnapshot(
+            editor->getLocalBounds(), true);
         if (!image.isValid() || image.getWidth() != scene.width
             || image.getHeight() != scene.height)
         {
-            std::cerr << "FAIL: invalid JUCE editor screenshot at "
+            std::cerr << "FAIL: invalid native JUCE editor screenshot at "
                       << scene.name << "\n";
-            return 5;
+            return 7;
         }
+
+        // Normalized location outside the central panels; different
+        // LookAndFeel themes must actually paint DIFFERENT body colours.
+        const int x = juce::jlimit(0, scene.width - 1,
+                                  juce::roundToInt(scene.width * 10.0 / 700.0));
+        const int y = juce::jlimit(0, scene.height - 1,
+                                  juce::roundToInt(scene.height * 225.0 / 680.0));
+        const auto sample = image.getPixelAt(x, y);
+        for (int earlier = 0; earlier < scene.theme; ++earlier)
+            if (sample.getARGB() == sampledBackgrounds[static_cast<size_t>(earlier)].getARGB())
+            {
+                std::cerr << "FAIL: scene theme " << scene.theme
+                          << " painted the same background as theme "
+                          << earlier << "\n";
+                return 8;
+            }
+        sampledBackgrounds[static_cast<size_t>(scene.theme)] = sample;
+
         const auto file = outputDir.getChildFile(
             "skellytune-" + juce::String(scene.name) + ".png");
         juce::FileOutputStream stream(file);
         juce::PNGImageFormat png;
         if (!stream.openedOk() || !png.writeImageToStream(image, stream))
         {
-            std::cerr << "FAIL: PNG write at " << scene.name << "\n";
-            return 6;
+            std::cerr << "FAIL: screenshot PNG write at " << scene.name << "\n";
+            return 9;
         }
         stream.flush();
         if (file.getSize() < 1024)
         {
             std::cerr << "FAIL: empty screenshot at " << scene.name << "\n";
-            return 7;
+            return 10;
         }
-        std::cout << "PASS real JUCE editor snapshot: " << file.getFullPathName()
-                  << " (" << scene.width << "x" << scene.height << ")\n";
+        std::cout << "PASS genuine JUCE editor: " << scene.name
+                  << " (" << scene.width << "x" << scene.height
+                  << ", distinct theme body=0x" << std::hex
+                  << sample.getARGB() << std::dec << ")\n";
     }
     editor.reset();
     processor.releaseResources();
-    std::cout << "PASS original retune mapping: clockwise=fast, display 0=instant\n";
+    std::cout << "PASS approved retune direction: clockwise faster; "
+                 "display 0=instant, 100=slow\n";
     return 0;
 }
