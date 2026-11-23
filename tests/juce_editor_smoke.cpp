@@ -1,6 +1,7 @@
 // Actual JUCE editor snapshots, plus real-control/appearance checks.
 // This runs on the Windows CI machine after building the VST3.
 #include "PluginProcessor.h"
+#include "SkeletonOrb.h"
 #include <JuceHeader.h>
 #include <array>
 #include <cmath>
@@ -26,10 +27,13 @@ int main(int argc, char** argv)
     juce::Button* cycleTheme = nullptr;
     juce::Label* speedNumber = nullptr;
     juce::Label* humanizeNumber = nullptr;
+    SkeletonOrb* skeleton = nullptr;
     std::array<juce::Button*, 12> piano{};
     for (int i = 0; i < editor->getNumChildComponents(); ++i)
     {
         auto* child = editor->getChildComponent(i);
+        if (auto* orb = dynamic_cast<SkeletonOrb*>(child))
+            skeleton = orb;
         if (child->getName() == "RETUNE SPEED")
             speed = dynamic_cast<juce::Slider*>(child);
         if (child->getName() == "Cycle theme")
@@ -57,7 +61,7 @@ int main(int argc, char** argv)
         std::cerr << "FAIL: original OG SkellyTune retune control changed\n";
         return 2;
     }
-    if (!cycleTheme || !cycleTheme->onClick || !speedNumber || !humanizeNumber)
+    if (!cycleTheme || !cycleTheme->onClick || !speedNumber || !humanizeNumber || !skeleton)
     {
         std::cerr << "FAIL: actual theme-cycle button callback missing\n";
         return 3;
@@ -185,6 +189,45 @@ int main(int argc, char** argv)
                   << ", distinct theme body=0x" << std::hex
                   << sample.getARGB() << std::dec << ")\n";
     }
+    // A genuine native-JUCE snapshot with injected target/activity state.
+    // Used solely to inspect the tuned-note badge and persistent skull,
+    // not as evidence of actual audio processing.
+    for (int attempt = 0; attempt < 4 && processor.getUiTheme() != 2; ++attempt)
+        cycleTheme->onClick();
+    if (processor.getUiTheme() != 2)
+    {
+        std::cerr << "FAIL: could not select visual active-note theme\n";
+        return 18;
+    }
+    editor->setSize(700, 680);
+    skeleton->targetNote = 64;
+    skeleton->activity = .80f;
+    skeleton->motionLevel = .75f;
+    skeleton->phase = .31;
+    skeleton->sweepPhase = .62;
+    skeleton->reducedMotion = false;
+    const auto active = editor->createComponentSnapshot(editor->getLocalBounds(), true);
+    if (!active.isValid() || active.getWidth() != 700 || active.getHeight() != 680)
+    {
+        std::cerr << "FAIL: active-note snapshot unavailable\n";
+        return 19;
+    }
+    const auto activeFile = outputDir.getChildFile("skellytune-active-note-visual-test.png");
+    juce::FileOutputStream activeStream(activeFile);
+    juce::PNGImageFormat png;
+    if (!activeStream.openedOk() || !png.writeImageToStream(active, activeStream))
+    {
+        std::cerr << "FAIL: active-note screenshot write\n";
+        return 20;
+    }
+    activeStream.flush();
+    if (activeFile.getSize() < 1024)
+    {
+        std::cerr << "FAIL: active-note screenshot empty\n";
+        return 21;
+    }
+    std::cout << "PASS real JUCE active-note visual screenshot\n";
+
     editor.reset();
     processor.releaseResources();
     std::cout << "PASS approved retune direction: clockwise faster; "

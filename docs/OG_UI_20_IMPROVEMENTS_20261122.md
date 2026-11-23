@@ -50,3 +50,8 @@ The source is **implemented**. DSP/audio processing is unchanged. Exact
 head Windows VST3, pluginval, 52 CTests and visually inspected real JUCE
 screenshots are required before declaring verified. No published or merged
 release is authorized.
+
+## Follow-up native rendering checks
+
+- Standard selected popup items now draw actual checkmarks (previously only tinted text).
+- The Windows smoke test also captures a real JUCE editor snapshot with **injected E-note/high-activity orb state**, to inspect the active-note badge and persistent skeleton. This is a visual test with synthetic UI state, not an actual recorded vocal render.

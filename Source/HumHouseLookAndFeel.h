@@ -430,6 +430,13 @@ public:
       g.setColour(palette.textDim);
       g.drawText(">", check.toNearestInt(), juce::Justification::centred,
                  false);
+    } else if (ticked) {
+      juce::Path tick;
+      tick.startNewSubPath(check.getX() + 2 * scale, check.getCentreY());
+      tick.lineTo(check.getCentreX() - scale, check.getBottom() - 4 * scale);
+      tick.lineTo(check.getRight() - 2 * scale, check.getY() + 4 * scale);
+      g.setColour(palette.accentBright);
+      g.strokePath(tick, juce::PathStrokeType(1.8f * scale));
     }
   }
   juce::Font getComboBoxFont(juce::ComboBox &) override {
