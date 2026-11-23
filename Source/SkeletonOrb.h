@@ -70,7 +70,7 @@ class SkeletonOrb : public juce::Component {
                     continue;
                 const float sweepX = 140 + 116 * std::cos(latitude) * std::sin(longitude);
                 const float sweepY = 140 + 116 * std::sin(latitude);
-                const auto neon = juce::Colour(0xff64ff32);
+                const auto neon = accent;
                 juce::ColourGradient glow(neon.withAlpha(depth * (.11f + .20f * activity)), sweepX, sweepY,
                                           neon.withAlpha(0.0f), sweepX + 49, sweepY, true);
                 g.setGradientFill(glow);
@@ -78,8 +78,13 @@ class SkeletonOrb : public juce::Component {
                 g.setColour(neon.withAlpha(depth * (.27f + .28f * activity)));
                 g.fillEllipse(sweepX - 2, sweepY - 2, 4, 4);
             }
+            juce::ColourGradient innerHalo(accent.withAlpha(.025f + .075f * activity),
+                                           140, 146, accent.withAlpha(0.0f),
+                                           216, 147, true);
+            g.setGradientFill(innerHalo);
+            g.fillEllipse(73, 70, 134, 170);
             juce::Graphics::ScopedSaveState skeleton(g);
-            const float movement = reducedMotion ? 0.0f : .22f + .78f * motionLevel;
+            const float movement = reducedMotion ? 0.0f : .20f + .72f * motionLevel;
             g.addTransform(juce::AffineTransform::rotation(
                 static_cast<float>(std::sin(phase) * .065 * movement), 140, 150).translated(0,
                     static_cast<float>(std::sin(phase * .5) * 5 * movement)));
@@ -96,7 +101,7 @@ class SkeletonOrb : public juce::Component {
                     const float v = (segment + (energy > .01f ? .94f : 1.0f)) / pieces;
                     const float angle = static_cast<float>(phase) + identity + segment * 2.4f + .85f * std::sin(identity * 2.63f + segment + static_cast<float>(phase) * .71f);
                     const float orbitRadius = 28.0f + 78.0f * (.5f + .5f * std::sin(identity * 2.13f + segment));
-                    const float scatter = juce::jlimit(0.0f, 1.0f, energy * (width > 1.5f ? 1.75f : 1.45f));
+                    const float scatter = juce::jlimit(0.0f, .25f, energy * (width > 1.5f ? .40f : .32f));
                     const float midX = x + (xx - x) * (u + v) * .5f;
                     const float midY = y + (yy - y) * (u + v) * .5f;
                     const float dx = scatter * (140 + orbitRadius * std::sin(angle) - midX);
@@ -112,6 +117,7 @@ class SkeletonOrb : public juce::Component {
                     g.drawLine(ax, ay, bx, by, width);
                 }
             };
+            // Keep the skeleton visible while singing. Only the note badge changes.
             if (targetNote >= 0) {
                 const int pitchClass = targetNote % 12;
                 if (pitchClass != shapedPitchClass) {
@@ -119,19 +125,18 @@ class SkeletonOrb : public juce::Component {
                     static constexpr const char* names[]{"C", "C#", "D", "D#", "E", "F",
                                                           "F#", "G", "G#", "A", "A#", "B"};
                     juce::GlyphArrangement glyphs;
-                    glyphs.addLineOfText(juce::Font(juce::FontOptions(100.f).withStyle("Bold")),
+                    glyphs.addLineOfText(juce::Font(juce::FontOptions(90.f).withStyle("Bold")),
                                          names[pitchClass], 0, 0);
                     noteOutline.clear();
                     glyphs.createPath(noteOutline);
-                    noteOutline.scaleToFit(76, 76, 128, 128, true);
+                    noteOutline.scaleToFit(194, 203, 37, 35, true);
                 }
-                juce::PathFlatteningIterator outline(noteOutline, {}, 1.4f);
-                while (outline.next()) {
-                    g.setColour(boneColour.withAlpha(.30f));
-                    g.drawLine(outline.x1, outline.y1, outline.x2, outline.y2, 1.f);
-                    bone(outline.x1, outline.y1, outline.x2, outline.y2, 2.4f);
-                }
-                return;
+                g.setColour(juce::Colour(0xff07130c).withAlpha(.80f));
+                g.fillRoundedRectangle(190, 200, 45, 43, 9);
+                g.setColour(accent.withAlpha(.42f + .22f * activity));
+                g.drawRoundedRectangle(190, 200, 45, 43, 9, 1.1f);
+                g.setColour(boneColour.withAlpha(.88f));
+                g.fillPath(noteOutline);
             }
             // Let the character keep moving gently between phrases.
             juce::Path skull;
@@ -146,15 +151,17 @@ class SkeletonOrb : public juce::Component {
             skull.closeSubPath();
             g.setGradientFill(juce::ColourGradient(boneColour.brighter(.2f), 126, 44, boneColour.darker(.5f),
                                                    155, 77, false));
-            if (activity < .45f || reducedMotion)
-                g.fillPath(skull);
-            if (activity < .45f || reducedMotion) {
+            g.fillPath(skull);
+            {
             g.setColour(juce::Colour(0xff092114));
             g.fillEllipse(128, 53, 9, 11);
             g.fillEllipse(143, 53, 9, 11);
             juce::Path nose;
             nose.addTriangle(140, 61, 137, 67, 143, 67);
             g.fillPath(nose);
+            g.drawLine(127, 52, 135, 52, 1.0f);
+            g.drawLine(145, 52, 153, 52, 1.0f);
+            g.drawLine(131, 70, 149, 70, .8f);
             for (int i = 0; i < 5; ++i)
                 g.drawLine(133.0f + i * 3.5f, 71, 133.0f + i * 3.5f, 76, .7f);
             g.setColour(boneColour);

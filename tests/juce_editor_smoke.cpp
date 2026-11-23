@@ -24,6 +24,9 @@ int main(int argc, char** argv)
     // UI readout 0 = instant / 100 = slow, DSP engine uses 1 - retune.
     juce::Slider* speed = nullptr;
     juce::Button* cycleTheme = nullptr;
+    juce::Label* speedNumber = nullptr;
+    juce::Label* humanizeNumber = nullptr;
+    std::array<juce::Button*, 12> piano{};
     for (int i = 0; i < editor->getNumChildComponents(); ++i)
     {
         auto* child = editor->getChildComponent(i);
@@ -31,6 +34,15 @@ int main(int argc, char** argv)
             speed = dynamic_cast<juce::Slider*>(child);
         if (child->getName() == "Cycle theme")
             cycleTheme = dynamic_cast<juce::Button*>(child);
+        if (child->getName() == "Retune number")
+            speedNumber = dynamic_cast<juce::Label*>(child);
+        if (child->getName() == "Humanize number")
+            humanizeNumber = dynamic_cast<juce::Label*>(child);
+        static const juce::StringArray names{"C", "C#", "D", "D#", "E", "F",
+                                              "F#", "G", "G#", "A", "A#", "B"};
+        for (int key = 0; key < 12; ++key)
+            if (child->getName() == "Piano key " + names[key])
+                piano[static_cast<size_t>(key)] = dynamic_cast<juce::Button*>(child);
     }
     auto* storedRetune = processor.getAPVTS().getParameter("retune");
     const auto near = [](double x, double y) { return std::abs(x - y) < 0.00001; };
@@ -45,11 +57,31 @@ int main(int argc, char** argv)
         std::cerr << "FAIL: original OG SkellyTune retune control changed\n";
         return 2;
     }
-    if (!cycleTheme || !cycleTheme->onClick)
+    if (!cycleTheme || !cycleTheme->onClick || !speedNumber || !humanizeNumber)
     {
         std::cerr << "FAIL: actual theme-cycle button callback missing\n";
         return 3;
     }
+
+    for (const auto* note : piano)
+        if (!note)
+        {
+            std::cerr << "FAIL: missing one of the 12 piano notes\n";
+            return 15;
+        }
+    speed->setValue(1.0, juce::sendNotificationSync);
+    if (speedNumber->getText() != "0")
+    {
+        std::cerr << "FAIL: retune=1 should read 0 (instant)\n";
+        return 16;
+    }
+    speed->setValue(0.0, juce::sendNotificationSync);
+    if (speedNumber->getText() != "100")
+    {
+        std::cerr << "FAIL: retune=0 should read 100 (slow)\n";
+        return 17;
+    }
+    speed->setValue(1.0, juce::sendNotificationSync);
 
     const juce::File outputDir = argc > 1
         ? juce::File::getCurrentWorkingDirectory().getChildFile(argv[1])
@@ -85,6 +117,16 @@ int main(int argc, char** argv)
             return 5;
         }
         editor->setSize(scene.width, scene.height);
+        if (!piano[0] || !piano[1] || piano[0]->getHeight() <= 0
+            || piano[1]->getHeight() <= 0
+            || piano[0]->getHeight() >= scene.height / 5
+            || piano[1]->getHeight() >= piano[0]->getHeight()
+            || speedNumber->getHeight() <= speed->getHeight() / 6)
+        {
+            std::cerr << "FAIL: compact keyboard/readout geometry at "
+                      << scene.name << "\n";
+            return 14;
+        }
 
         for (int i = 0; i < editor->getNumChildComponents(); ++i)
         {

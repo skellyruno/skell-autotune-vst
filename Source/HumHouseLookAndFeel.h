@@ -259,7 +259,7 @@ public:
       }
       gear.closeSubPath();
       if (hover || button.hasKeyboardFocus(true)) {
-        g.setColour(palette.bodyText.withAlpha(.08f));
+        g.setColour(palette.bodyText.withAlpha(.14f));
         g.fillRoundedRectangle(b.reduced(scale), 5 * scale);
       }
       g.setColour(palette.bodyText);
@@ -316,8 +316,8 @@ public:
     juce::Colour bottom =
         black ? juce::Colour(0xff101713) : juce::Colour(0xffd2d5cd);
     if (target && button.isEnabled()) {
-      top = top.interpolatedWith(palette.accentBright, .34f);
-      bottom = bottom.interpolatedWith(palette.accent, .58f);
+      top = top.interpolatedWith(palette.accentBright, .46f);
+      bottom = bottom.interpolatedWith(palette.accent, .70f);
     }
     if (down)
       bottom = bottom.darker(.12f);
@@ -336,15 +336,15 @@ public:
     g.drawRoundedRectangle(face.reduced(.5f * scale), 3 * scale, scale);
     if (hover || button.hasKeyboardFocus(true)) {
       g.setColour(palette.accent.withAlpha(.85f));
-      g.drawRoundedRectangle(face.reduced(scale), 3 * scale, 1.3f * scale);
+      g.drawRoundedRectangle(face.reduced(scale), 3 * scale, 1.6f * scale);
     }
     if (key != 0) {
-      const float y = face.getBottom() - 27 * scale;
+      const float y = face.getBottom() - 30 * scale;
       g.setColour(allowed ? (black ? palette.accentBright : palette.accentDim)
-                          : (black ? juce::Colour(0xff435147)
-                                   : juce::Colour(0xffa4ada1)));
-      g.fillRoundedRectangle(face.getCentreX() - 5 * scale, y, 10 * scale,
-                             2.5f * scale, scale);
+                          : (black ? juce::Colour(0xff68796d)
+                                   : juce::Colour(0xff758574)));
+      g.fillRoundedRectangle(face.getCentreX() - 7 * scale, y, 14 * scale,
+                             3.2f * scale, 1.5f * scale);
     }
   }
   void drawButtonText(juce::Graphics &g, juce::TextButton &button, bool,
@@ -355,10 +355,10 @@ public:
                     ? juce::Colours::white
                     : juce::Colour(0xff253029));
     g.setFont(juce::Font(
-        juce::FontOptions((key == 0 ? 12 : 13) * scale).withStyle("Bold")));
+        juce::FontOptions((key == 0 ? 13 : 15) * scale).withStyle("Bold")));
     auto b = button.getLocalBounds();
     if (key != 0)
-      b = b.removeFromBottom(juce::roundToInt(23 * scale));
+      b = b.removeFromBottom(juce::roundToInt(26 * scale));
     g.drawText(button.getButtonText(), b, juce::Justification::centred, false);
   }
   void drawComboBox(juce::Graphics &g, int w, int h, bool, int, int, int, int,
@@ -372,7 +372,7 @@ public:
     const float x = w - 14 * scale, y = h * .5f;
     p.addTriangle(x - 4 * scale, y - 2 * scale, x + 4 * scale, y - 2 * scale, x,
                   y + 3 * scale);
-    g.setColour(palette.accent);
+    g.setColour(box.isEnabled() ? palette.accent : palette.textDim);
     g.fillPath(p);
   }
   juce::Font getPopupMenuFont() override {
@@ -381,7 +381,7 @@ public:
   void getIdealPopupMenuItemSize(const juce::String &, bool separator, int,
                                  int &width, int &height) override {
     width = juce::roundToInt(190 * scale);
-    height = separator ? 4 : juce::jmax(18, juce::roundToInt(25 * scale));
+    height = separator ? 4 : juce::jmax(18, juce::roundToInt(29 * scale));
   }
   void drawPopupMenuBackground(juce::Graphics &g, int w, int h) override {
     g.fillAll(palette.surface);
@@ -433,7 +433,7 @@ public:
     }
   }
   juce::Font getComboBoxFont(juce::ComboBox &) override {
-    return juce::Font(juce::FontOptions(12 * scale));
+    return juce::Font(juce::FontOptions(13 * scale));
   }
   void positionComboBoxText(juce::ComboBox &box, juce::Label &label) override {
     const bool key = static_cast<bool>(box.getProperties().getWithDefault("keyReadout", false));
@@ -444,6 +444,8 @@ public:
     label.setFont(getComboBoxFont(box));
   }
   juce::Font getLabelFont(juce::Label &label) override {
+    if (static_cast<bool>(label.getProperties().getWithDefault("majorReadout", false)))
+      return juce::Font(juce::FontOptions(21 * scale).withStyle("Bold"));
     return juce::Font(juce::FontOptions(
         dynamic_cast<juce::Slider *>(label.getParentComponent()) ? 13 * scale
                                                                  : 12 * scale));

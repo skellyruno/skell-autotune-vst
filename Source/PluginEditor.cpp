@@ -119,6 +119,8 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   for (auto* value : {&retuneValue, &humanizeValue}) {
     value->setJustificationType(juce::Justification::centred);
     value->setInterceptsMouseClicks(false, false);
+    value->getProperties().set("majorReadout", true);
+    value->setName(value == &retuneValue ? "Retune number" : "Humanize number");
     addAndMakeVisible(*value);
   }
   speedKnob.onValueChange = [this] {
@@ -223,6 +225,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   for (int i = 0; i < 12; ++i) {
     auto &btn = noteButtons[static_cast<size_t>(i)];
     btn.setButtonText(kNoteNames[i]);
+    btn.setName("Piano key " + kNoteNames[i]);
     btn.setClickingTogglesState(true);
     btn.setToggleState(true, juce::dontSendNotification);
     btn.setTooltip("Click to allow or block this note.\nLit keys are the notes "
@@ -371,7 +374,9 @@ void HumHouseVocalTuneEditor::applyAppearance() {
   appearanceTheme = proc.getUiTheme();
   lnf.setTheme(appearanceTheme);
   for (auto* value : {&retuneValue, &humanizeValue})
-    value->setColour(juce::Label::textColourId, lnf.palette.bodyText);
+    value->setColour(juce::Label::textColourId,
+                     appearanceTheme == 0 || appearanceTheme == 3
+                         ? lnf.palette.bodyText : lnf.palette.textValue);
   orb.accent = lnf.palette.accentBright;
   orb.metalHigh = lnf.palette.metalHigh;
   orb.metalLow = lnf.palette.metalLow;
@@ -518,7 +523,7 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   const float scale = scaleFactor();
   const auto &p = lnf.palette;
   juce::ColourGradient body(p.surface, 0, 0, p.body, 0,
-                            static_cast<float>(getHeight()), false);
+                            static_cast<float>(kDesignH), false);
   g.setGradientFill(body);
   g.fillAll();
   g.addTransform(juce::AffineTransform::scale(scale));
@@ -554,7 +559,7 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   panel({24, 16, 198, 48}, p.bgDark, 8);
   text("SKELLY", 72, 23, 88, 26, 20, p.textBright,
        juce::Justification::centredLeft);
-  text("TUNE", 149, 23, 72, 26, 20, juce::Colour(0xffacfa78),
+  text("TUNE", 149, 23, 72, 26, 20, p.accentBright,
        juce::Justification::centredLeft);
   text("PITCH CORRECTION", 73, 49, 156, 11, 8, p.textDim,
        juce::Justification::centredLeft);
@@ -578,8 +583,8 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
     text("C" + juce::String(midi / 12 - 1), 32, static_cast<int>(y) - 6, 28, 12,
          9, p.textDim);
   }
-  text("ALLOWED NOTES", 30, 460, 300, 18, 10, p.bodyText.withAlpha(.75f), juce::Justification::centredLeft);
-  panel({24, 490, 652, 170}, p.bgDark, 8);
+  text("ALLOWED NOTES", 30, 460, 300, 18, 11, p.bodyText.withAlpha(.9f), juce::Justification::centredLeft);
+  panel({24, 496, 652, 146}, p.bgDark, 8);
 }
 
 void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
@@ -672,7 +677,7 @@ void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
             .toFloat() /
         scaleFactor();
     g.setColour(lnf.palette.heatCold);
-    g.drawEllipse(bounds.getCentreX() - 4, bounds.getBottom() - 41, 8, 8, 1.8f);
+    g.drawEllipse(bounds.getCentreX() - 4, bounds.getBottom() - 34, 8, 8, 1.8f);
   }
   if (!enableBtn.getToggleState()) {
     g.excludeClipRegion(
@@ -696,19 +701,19 @@ void HumHouseVocalTuneEditor::resized() {
   };
   speedKnob.setBounds(rect(40, 154, 152, 152));
   humanizeKnob.setBounds(rect(508, 154, 152, 152));
-  retuneValue.setBounds(rect(40, 310, 152, 24));
-  humanizeValue.setBounds(rect(508, 310, 152, 24));
+  retuneValue.setBounds(rect(40, 307, 152, 32));
+  humanizeValue.setBounds(rect(508, 307, 152, 32));
   orb.setBounds(rect(215, 95, 270, 270));
   rootNoteBox.setBounds(rect(382, 26, 62, 30));
   scaleBox.setBounds(rect(450, 26, 154, 30));
   referenceFreqKnob.setBounds(rect(550, 386, 86, 24));
-  referenceDown.setBounds(rect(522, 387, 24, 22));
-  referenceUp.setBounds(rect(640, 387, 24, 22));
+  referenceDown.setBounds(rect(518, 384, 29, 28));
+  referenceUp.setBounds(rect(637, 384, 29, 28));
   referenceFreqLabel.setVisible(false);
   rootNoteLabel.setVisible(false);
-  appearanceButton.setBounds(rect(32, 24, 32, 34));
-  settingsButton.setBounds(rect(624, 26, 28, 28));
-  enableBtn.setBounds(rect(660, 26, 28, 28));
+  appearanceButton.setBounds(rect(30, 22, 36, 38));
+  settingsButton.setBounds(rect(619, 24, 32, 32));
+  enableBtn.setBounds(rect(655, 24, 32, 32));
   rangeBox.setBounds(rect(234, 26, 140, 30));
   const int natural[] = {0, 2, 4, 5, 7, 9, 11}, sharps[] = {1, 3, 6, 8, 10},
             positions[] = {0, 1, 3, 4, 5};
@@ -717,13 +722,13 @@ void HumHouseVocalTuneEditor::resized() {
   };
   for (int i = 0; i < 7; ++i)
     noteButtons[static_cast<size_t>(natural[i])].setBounds(
-        edge(i), juce::roundToInt(497 * scale), edge(i + 1) - edge(i) - 1,
-        juce::roundToInt(156 * scale));
+        edge(i), juce::roundToInt(507 * scale), edge(i + 1) - edge(i) - 1,
+        juce::roundToInt(122 * scale));
   for (int i = 0; i < 5; ++i) {
     auto &key = noteButtons[static_cast<size_t>(sharps[i])];
     key.setBounds(edge(positions[i] + 1) - juce::roundToInt(24 * scale),
-                  juce::roundToInt(497 * scale), juce::roundToInt(48 * scale),
-                  juce::roundToInt(100 * scale));
+                  juce::roundToInt(507 * scale), juce::roundToInt(48 * scale),
+                  juce::roundToInt(80 * scale));
     key.toFront(false);
   }
 }
