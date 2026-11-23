@@ -79,6 +79,31 @@ class SkeletonOrb : public juce::Component {
                 g.setColour(neon.withAlpha(depth * (.27f + .28f * activity)));
                 g.fillEllipse(sweepX - 2, sweepY - 2, 4, 4);
             }
+            // Sparse electrical discharges behind the bones, confined to glass.
+            const float current = reducedMotion ? 0.0f
+                : juce::jlimit(0.0f, 1.0f, activity * intensity);
+            if (current > .10f) {
+                const int bolts = current > .72f ? 3 : (current > .37f ? 2 : 1);
+                for (int i = 0; i < bolts; ++i) {
+                    const float p = static_cast<float>(phase);
+                    const float x0 = i == 0 ? 69.0f : (i == 1 ? 207.0f : 192.0f);
+                    const float y0 = i == 0 ? 93.0f : (i == 1 ? 94.0f : 166.0f);
+                    const float direction = i == 1 ? -1.0f : 1.0f;
+                    juce::Path arc;
+                    arc.startNewSubPath(x0, y0);
+                    for (int segment = 1; segment <= 6; ++segment)
+                        arc.lineTo(x0 + direction * segment * 1.4f
+                                       + 8.0f * std::sin(p * 2.35f + i * 2.13f + segment * 2.17f),
+                                   y0 + segment * (i == 2 ? 9.0f : 12.0f));
+                    const float power = current * (.68f + .32f * std::sin(p * 2.8f + i * 2.1f));
+                    g.setColour(accent.withAlpha(.12f * power));
+                    g.strokePath(arc, juce::PathStrokeType(6.0f));
+                    g.setColour(accent.brighter(.3f).withAlpha(.42f * power));
+                    g.strokePath(arc, juce::PathStrokeType(2.0f));
+                    g.setColour(juce::Colours::white.withAlpha(.40f * power));
+                    g.strokePath(arc, juce::PathStrokeType(.65f));
+                }
+            }
             juce::ColourGradient innerHalo(accent.withAlpha(.025f + .075f * activity),
                                            140, 146, accent.withAlpha(0.0f),
                                            216, 147, true);
@@ -261,6 +286,15 @@ class SkeletonOrb : public juce::Component {
         glass.addColour(.68, juce::Colour(0xff081b10));
         g.setGradientFill(glass);
         g.fillEllipse(18, 18, 244, 244);
+        // Cached refractive layers increase spherical depth at low GPU cost.
+        juce::ColourGradient refraction(accent.withAlpha(.12f), 83, 65,
+                                         accent.withAlpha(0.0f), 224, 237, true);
+        g.setGradientFill(refraction);
+        g.fillEllipse(21, 21, 238, 238);
+        juce::ColourGradient shadow(juce::Colours::black.withAlpha(0), 139, 142,
+                                    juce::Colours::black.withAlpha(.27f), 252, 242, true);
+        g.setGradientFill(shadow);
+        g.fillEllipse(20, 20, 240, 240);
         juce::Path clip;
         clip.addEllipse(18, 18, 244, 244);
         {
@@ -290,6 +324,12 @@ class SkeletonOrb : public juce::Component {
         }
         g.setColour(accent.withAlpha(.6325f));
         g.drawEllipse(15, 15, 250, 250, 1.4f);
+        g.setColour(juce::Colours::black.withAlpha(.44f));
+        g.drawEllipse(19, 19, 242, 242, 2.4f);
+        juce::Path reflectiveRim;
+        reflectiveRim.addCentredArc(140, 140, 123, 123, 0, -1.75f, -.22f, true);
+        g.setColour(juce::Colours::white.withAlpha(.28f));
+        g.strokePath(reflectiveRim, juce::PathStrokeType(2.1f));
         juce::ColourGradient reflection(juce::Colours::white.withAlpha(.31f), 65, 42,
                                         juce::Colours::white.withAlpha(0.0f), 111, 110, false);
         g.setGradientFill(reflection);

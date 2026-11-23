@@ -109,6 +109,8 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
     const bool up = step == &referenceUp;
     step->setTitle(up ? "Raise A4 reference" : "Lower A4 reference");
     step->getProperties().set("referenceStep", true);
+    step->getProperties().set("a4StackedStep", true);
+    step->setName(up ? "A4 increase" : "A4 decrease");
     step->onClick = [this, up] {
       const auto interval = referenceFreqKnob.getInterval();
       referenceFreqKnob.setValue(referenceFreqKnob.getValue() + (up ? interval : -interval),
@@ -527,6 +529,11 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   g.setGradientFill(body);
   g.fillAll();
   g.addTransform(juce::AffineTransform::scale(scale));
+  // Cache brushed machining lines with the editor backdrop.
+  for (int y = 5; y < kDesignH; y += 8) {
+    g.setColour(p.metalHigh.withAlpha(.020f));
+    g.drawHorizontalLine(y, 6.0f, static_cast<float>(kDesignW - 6));
+  }
   auto text = [&](juce::String value, int x, int y, int w, int h, float size,
                   juce::Colour colour,
                   juce::Justification align = juce::Justification::centred) {
@@ -538,8 +545,13 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
                    float radius) {
     g.setColour(juce::Colours::black.withAlpha(.12f));
     g.fillRoundedRectangle(bounds.translated(0, 2), radius);
-    g.setColour(fill);
+    juce::ColourGradient satin(fill.brighter(.055f), bounds.getX(), bounds.getY(),
+                               fill.darker(.085f), bounds.getX(), bounds.getBottom(), false);
+    g.setGradientFill(satin);
     g.fillRoundedRectangle(bounds, radius);
+    g.setColour(p.metalHigh.withAlpha(.105f));
+    g.drawLine(bounds.getX() + radius, bounds.getY() + 1.0f,
+               bounds.getRight() - radius, bounds.getY() + 1.0f, .8f);
     g.setColour(p.edge);
     g.drawRoundedRectangle(bounds, radius, 1);
   };
@@ -557,10 +569,14 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
     g.drawLine(point.x - 2, point.y + 2, point.x + 2, point.y - 2, 1);
   }
   panel({24, 16, 198, 48}, p.bgDark, 8);
-  text("SKELLY", 72, 23, 88, 26, 20, p.textBright,
-       juce::Justification::centredLeft);
-  text("TUNE", 149, 23, 72, 26, 20, p.accentBright,
-       juce::Justification::centredLeft);
+  // Single glyph run: no space between Skelly and Tune.
+  g.setFont(juce::Font(juce::FontOptions(20).withStyle("Bold")));
+  juce::ColourGradient logo(p.textBright, 72, 32, p.accentBright, 210, 32, false);
+  logo.addColour(.57, p.textBright);
+  logo.addColour(.62, p.accentBright);
+  g.setGradientFill(logo);
+  g.drawText("SkellyTune", 72, 23, 146, 26,
+             juce::Justification::centredLeft, false);
   text("PITCH CORRECTION", 73, 49, 156, 11, 9, p.textDim,
        juce::Justification::centredLeft);
 
@@ -706,9 +722,9 @@ void HumHouseVocalTuneEditor::resized() {
   orb.setBounds(rect(215, 95, 270, 270));
   rootNoteBox.setBounds(rect(382, 26, 62, 30));
   scaleBox.setBounds(rect(450, 26, 154, 30));
-  referenceFreqKnob.setBounds(rect(550, 386, 86, 24));
-  referenceDown.setBounds(rect(518, 384, 29, 28));
-  referenceUp.setBounds(rect(637, 384, 29, 28));
+  referenceFreqKnob.setBounds(rect(527, 387, 108, 25));
+  referenceUp.setBounds(rect(642, 383, 25, 17));   // + above
+  referenceDown.setBounds(rect(642, 402, 25, 17)); // - below
   referenceFreqLabel.setVisible(false);
   rootNoteLabel.setVisible(false);
   appearanceButton.setBounds(rect(30, 22, 36, 38));

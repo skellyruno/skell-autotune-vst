@@ -25,6 +25,9 @@ int main(int argc, char** argv)
     // Approved mapping: clockwise = faster, host retune 1 = instant,
     // UI readout 0 = instant / 100 = slow, DSP engine uses 1 - retune.
     juce::Slider* speed = nullptr;
+    juce::Slider* a4Value = nullptr;
+    juce::TextButton* plus = nullptr;
+    juce::TextButton* minus = nullptr;
     juce::Button* cycleTheme = nullptr;
     juce::Label* speedNumber = nullptr;
     juce::Label* humanizeNumber = nullptr;
@@ -37,6 +40,12 @@ int main(int argc, char** argv)
             skeleton = orb;
         if (child->getName() == "RETUNE SPEED")
             speed = dynamic_cast<juce::Slider*>(child);
+        if (child->getName() == "PITCH REF")
+            a4Value = dynamic_cast<juce::Slider*>(child);
+        if (child->getName() == "A4 increase")
+            plus = dynamic_cast<juce::TextButton*>(child);
+        if (child->getName() == "A4 decrease")
+            minus = dynamic_cast<juce::TextButton*>(child);
         if (child->getName() == "Cycle theme")
             cycleTheme = dynamic_cast<juce::Button*>(child);
         if (child->getName() == "Retune number")
@@ -62,7 +71,8 @@ int main(int argc, char** argv)
         std::cerr << "FAIL: original OG SkellyTune retune control changed\n";
         return 2;
     }
-    if (!cycleTheme || !cycleTheme->onClick || !speedNumber || !humanizeNumber || !skeleton)
+    if (!cycleTheme || !cycleTheme->onClick || !speedNumber || !humanizeNumber || !skeleton
+        || !a4Value || !plus || !minus)
     {
         std::cerr << "FAIL: actual theme-cycle button callback missing\n";
         return 3;
@@ -122,6 +132,14 @@ int main(int argc, char** argv)
             return 5;
         }
         editor->setSize(scene.width, scene.height);
+        if (plus->getX() <= a4Value->getRight()
+            || minus->getX() <= a4Value->getRight()
+            || plus->getBottom() >= minus->getY()
+            || plus->getHeight() >= a4Value->getHeight()
+            || minus->getHeight() >= a4Value->getHeight()) {
+            std::cerr << "FAIL: A4 +/- not stacked at right of frequency\n";
+            return 25;
+        }
         if (!piano[0] || !piano[1] || piano[0]->getHeight() <= 0
             || piano[1]->getHeight() <= 0
             || piano[0]->getHeight() >= scene.height / 5
@@ -229,6 +247,23 @@ int main(int argc, char** argv)
     }
     std::cout << "PASS real JUCE active-note visual screenshot\n";
 
+    // Genuine JUCE lightning image with injected high voiced activity.
+    skeleton->activity = .96f;
+    skeleton->intensity = 1.0f;
+    skeleton->phase = 1.38;
+    skeleton->reducedMotion = false;
+    {
+        const auto image = editor->createComponentSnapshot(editor->getLocalBounds(), true);
+        const auto file = outputDir.getChildFile("skellytune-lightning-active.png");
+        juce::FileOutputStream stream(file);
+        juce::PNGImageFormat writer;
+        if (!image.isValid() || !stream.openedOk()
+            || !writer.writeImageToStream(image, stream))
+            return 26;
+        stream.flush();
+        if (file.getSize() < 1024) return 27;
+    }
+    skeleton->activity = .80f;
     // Capture actual JUCE-rendered high/low bounce and an accessibility
     // reduced-motion pose; never replace real screenshots with mockups.
     // These are deterministic injected UI states, not an audio recording.

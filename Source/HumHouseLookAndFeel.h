@@ -138,6 +138,21 @@ public:
                  cx + std::sin(angle) * face * .96f,
                  cy - std::cos(angle) * face * .96f, .7f * scale);
     }
+    // Precision concentric lathe cuts and specular metal.
+    for (int ring = 0; ring < 4; ++ring) {
+      const float inset = (2.0f + 3.1f * ring) * scale;
+      if (2 * face - 2 * inset > 0.0f) {
+        g.setColour(ring % 2 == 0 ? juce::Colours::white.withAlpha(.055f)
+                                 : juce::Colours::black.withAlpha(.065f));
+        g.drawEllipse(cx - face + inset, cy - face + inset,
+                      2 * face - 2 * inset, 2 * face - 2 * inset, .65f * scale);
+      }
+    }
+    juce::Path glint;
+    glint.addCentredArc(cx - .8f * scale, cy - .8f * scale,
+                         face * .91f, face * .91f, 0, -.96f, .58f, true);
+    g.setColour(juce::Colours::white.withAlpha(.26f));
+    g.strokePath(glint, juce::PathStrokeType(1.5f * scale));
     g.setColour(palette.metalHigh);
     g.drawEllipse(cx - face, cy - face, 2 * face, 2 * face, 1.1f * scale);
     // Fine grip cuts follow the machined rim without competing with the
@@ -152,7 +167,22 @@ public:
     g.setColour(juce::Colours::black.withAlpha(.45f));
     g.drawEllipse(cx - face + 2 * scale, cy - face + 2 * scale,
                   2 * face - 4 * scale, 2 * face - 4 * scale, .7f * scale);
+    // Engraved scale ticks preserve the original rotation/automation.
+    for (int tick = 0; tick <= 10; ++tick) {
+      const float a = start + (tick / 10.0f) * (end - start);
+      const float inner = r * (tick % 5 == 0 ? .945f : .966f);
+      const float outer = r * .997f;
+      g.setColour(palette.metalHigh.withAlpha(tick % 5 == 0 ? .50f : .26f));
+      g.drawLine(cx + std::sin(a) * inner, cy - std::cos(a) * inner,
+                 cx + std::sin(a) * outer, cy - std::cos(a) * outer,
+                 (tick % 5 == 0 ? 1.2f : .65f) * scale);
+    }
     const float angle = start + position * (end - start);
+    g.setColour(juce::Colours::black.withAlpha(.45f));
+    g.drawLine(cx + std::sin(angle) * r * .745f + scale,
+               cy - std::cos(angle) * r * .745f + scale,
+               cx + std::sin(angle) * r * .945f + scale,
+               cy - std::cos(angle) * r * .945f + scale, 3.3f * scale);
     g.setColour(palette.textBright);
     g.drawLine(cx + std::sin(angle) * r * .76f, cy - std::cos(angle) * r * .76f,
                cx + std::sin(angle) * r * .94f, cy - std::cos(angle) * r * .94f,
@@ -241,6 +271,21 @@ public:
   void drawButtonBackground(juce::Graphics &g, juce::Button &button,
                             const juce::Colour &, bool hover,
                             bool down) override {
+    if (static_cast<bool>(button.getProperties().getWithDefault("a4StackedStep", false))) {
+      auto b = button.getLocalBounds().toFloat().reduced(.65f * scale);
+      juce::ColourGradient darkFace(juce::Colour(0xff242a26), b.getX(), b.getY(),
+                                    juce::Colour(0xff040706), b.getX(), b.getBottom(), false);
+      g.setGradientFill(darkFace);
+      g.fillRoundedRectangle(b, 3 * scale);
+      g.setColour((hover || button.hasKeyboardFocus(true))
+                  ? palette.accentBright : juce::Colour(0xff596059));
+      g.drawRoundedRectangle(b, 3 * scale, .85f * scale);
+      if (down) {
+        g.setColour(juce::Colours::black.withAlpha(.24f));
+        g.fillRoundedRectangle(b.reduced(scale), 2 * scale);
+      }
+      return;
+    }
     if (static_cast<bool>(
             button.getProperties().getWithDefault("settingsGear", false))) {
       const auto b = button.getLocalBounds().toFloat();
@@ -349,6 +394,14 @@ public:
   }
   void drawButtonText(juce::Graphics &g, juce::TextButton &button, bool,
                       bool) override {
+    if (static_cast<bool>(button.getProperties().getWithDefault("a4StackedStep", false))) {
+      g.setColour(button.isEnabled() ? juce::Colour(0xffedf2e9)
+                                     : juce::Colour(0xff777f78));
+      g.setFont(juce::Font(juce::FontOptions(13 * scale).withStyle("Bold")));
+      g.drawText(button.getButtonText(), button.getLocalBounds(),
+                 juce::Justification::centred, false);
+      return;
+    }
     const int key =
         static_cast<int>(button.getProperties().getWithDefault("pianoKey", 0));
     g.setColour(key == 2
