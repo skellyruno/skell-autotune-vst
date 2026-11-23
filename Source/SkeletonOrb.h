@@ -291,7 +291,7 @@ class SkeletonOrb : public juce::Component {
                                          accent.withAlpha(0.0f), 224, 237, true);
         g.setGradientFill(refraction);
         g.fillEllipse(21, 21, 238, 238);
-        juce::ColourGradient shadow(juce::Colours::black.withAlpha(0), 139, 142,
+        juce::ColourGradient shadow(juce::Colours::black.withAlpha(0.0f), 139, 142,
                                     juce::Colours::black.withAlpha(.27f), 252, 242, true);
         g.setGradientFill(shadow);
         g.fillEllipse(20, 20, 240, 240);
