@@ -187,18 +187,28 @@ class SkeletonOrb : public juce::Component {
                 bone(137, 81 + i * 5, 143, 83 + i * 5, 1.2f);
             bone(140, 89, 113, 97);
             bone(140, 89, 167, 97);
-            for (int i = 0; i < 5; ++i) {
-                float y = 99 + i * 8.0f;
-                for (int side : {-1, 1}) {
-                    float px = 140, py = y;
-                    for (int part = 1; part <= 7; ++part) {
-                        const float t = part / 7.0f;
-                        const float nx = 140 + side * 28 * std::sin(t * juce::MathConstants<float>::pi);
-                        const float ny = y + 8 * t;
-                        bone(px, py, nx, ny, 1.4f);
-                        px = nx;
-                        py = ny;
-                    }
+            // Five smoothly connected ribs per side. The old rib cage
+            // formed 70 separately moved line segments each frame, making
+            // the chest look like a stack of jagged zigzags even after
+            // limiting bone displacement. Continuous paths preserve shape
+            // and need only 10 strokes; audio reacts via a gentle offset.
+            for (int rib = 0; rib < 5; ++rib) {
+                const float y = 99.0f + rib * 9.0f;
+                const float reach = 27.0f - 1.2f * std::abs(rib - 2);
+                const float breathe = reducedMotion ? 0.0f
+                    : activity * .65f * std::sin(static_cast<float>(phase) * .6f + rib * .35f);
+                for (const int side : {-1, 1}) {
+                    const float d = static_cast<float>(side);
+                    juce::Path arch;
+                    arch.startNewSubPath(140.0f, y);
+                    arch.cubicTo(140 + d * 9, y - 4 + breathe,
+                                 140 + d * reach, y - 2 + breathe,
+                                 140 + d * reach, y + 3 + breathe);
+                    arch.cubicTo(140 + d * reach, y + 8 + breathe,
+                                 140 + d * 10, y + 10,
+                                 140, y + 8);
+                    g.setColour(boneColour.withAlpha(.84f + .12f * activity));
+                    g.strokePath(arch, juce::PathStrokeType(1.35f));
                 }
             }
             const float sway = static_cast<float>(std::sin(phase * 1.2) * 6 * movement);

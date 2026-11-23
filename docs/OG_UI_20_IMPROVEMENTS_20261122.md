@@ -67,3 +67,14 @@ should keep its continuous silhouette. The same pass slightly increases
 header label typography for 420px compact-window readability. Both are
 UI-only, no audio-thread/DSP changes. Recheck latest real active-note
 screenshot and run exact-head Windows VST3/pluginval/52 DSP tests.
+
+## Follow-up: rib-cage silhouette improvement
+
+Actual 700px and 1050px JUCE screenshots after `7c9aa65` showed the
+chest as a stack of angular zigzags although the skull and limbs remained
+continuous. Replaced the old **70 individually drawn small rib strokes**
+with **10 smooth cubic curves** (five complete ribs on each side) and
+subpixel, activity-linked breathing. The rest of the skeleton geometry,
+all DSP/host controls, note badge and existing screenshot scenes remain
+unchanged. **Visual result and UI CPU remain unverified until the new
+Windows-runner screenshots are inspected.**
