@@ -41,13 +41,18 @@ public:
     {
         if (!std::isfinite(observed) || !std::isfinite(predicted)
             || !std::isfinite(measuredTarget) || !std::isfinite(predictedTarget)
-            || !std::isfinite(confidence) || hopSeconds <= 0.0)
+            || !std::isfinite(confidence) || !std::isfinite(hopSeconds)
+            || hopSeconds <= 0.0)
         {
-            // Invalid estimates cannot be used as a gap in an otherwise
-            // trustworthy velocity trajectory. Preserve the stored note.
+            // Invalid detector readings must not commit an unverified note.
+            // The prior early return leaked measuredTarget even if different
+            // from the last accepted note, causing a one-hop pitch jump.
             historyCount = 0;
             historyWriteIndex = 0;
-            return measuredTarget;
+            uncertainSeconds = 0.0;
+            if (std::isfinite(lastTarget) && lastTarget >= 0.0f)
+                return lastTarget;
+            return std::isfinite(measuredTarget) ? measuredTarget : 69.0f;
         }
 
         // Predictive crossings require a trajectory of TRUSTED detector

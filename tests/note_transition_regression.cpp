@@ -106,5 +106,25 @@ int main()
            "invalid detector estimate returns measured target");
     expect(t.choose(62.93f, 63.21f, 62.f, 64.f, .99f, .004, false) == 62.f,
            "first reliable estimate after invalid gap does not forecast early");
+    // Regression: invalid confidence/pitch/time must not replace a
+    // previously accepted target. Old source returned measuredTarget=64
+    // immediately even though it only had evidence for accepted note 62.
+    t.reset();
+    t.choose(62.55f, 62.55f, 62.f, 62.f, .99f, .004, false);
+    expect(t.choose(invalid, 65.f, 64.f, 64.f, .99f, .004, false) == 62.f,
+           "invalid observed pitch cannot force unverified target jump");
+    expect(t.choose(62.9f, invalid, 64.f, 64.f, .99f, .004, false) == 62.f,
+           "invalid forecast cannot change last accepted target");
+    expect(t.choose(62.9f, 63.2f, 64.f, 64.f, invalid, .004, false) == 62.f,
+           "invalid confidence cannot change last accepted target");
+    expect(t.choose(62.9f, 63.2f, 64.f, 64.f, .99f,
+                    std::numeric_limits<double>::quiet_NaN(), false) == 62.f,
+           "invalid elapsed hop cannot change last accepted target");
+    expect(t.choose(64.2f, 64.2f, 64.f, 64.f, .99f, .004, false) == 64.f,
+           "next confident note responds immediately");
+    t.reset();
+    expect(std::isfinite(t.choose(invalid, invalid, invalid, invalid, invalid,
+                                  std::numeric_limits<double>::quiet_NaN(), false)),
+           "invalid startup observations do not emit NaN");
     return ok ? 0 : 1;
 }
