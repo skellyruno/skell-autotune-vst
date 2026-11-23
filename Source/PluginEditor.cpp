@@ -561,16 +561,16 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
        juce::Justification::centredLeft);
   text("TUNE", 149, 23, 72, 26, 20, p.accentBright,
        juce::Justification::centredLeft);
-  text("PITCH CORRECTION", 73, 49, 156, 11, 8, p.textDim,
+  text("PITCH CORRECTION", 73, 49, 156, 11, 9, p.textDim,
        juce::Justification::centredLeft);
 
   panel({24, 84, 652, 286}, p.surface, 12);
   text("RETUNE", 36, 124, 160, 22, 16, p.bodyText);
   text("HUMANIZE", 504, 124, 160, 22, 16, p.bodyText);
-  text("KEY", 386, 8, 52, 14, 9, p.bodyText, juce::Justification::centredLeft);
-  text("SCALE", 450, 8, 154, 14, 9, p.bodyText,
+  text("KEY", 386, 8, 52, 14, 11, p.bodyText, juce::Justification::centredLeft);
+  text("SCALE", 450, 8, 154, 14, 11, p.bodyText,
        juce::Justification::centredLeft);
-  text("INPUT TYPE", 234, 8, 140, 14, 9, p.bodyText,
+  text("INPUT TYPE", 234, 8, 140, 14, 11, p.bodyText,
        juce::Justification::centredLeft);
   panel({24, 380, 652, 64}, p.bgDark, 9);
   text("ORIGINAL", 270, 386, 68, 24, 10, p.heatCold);

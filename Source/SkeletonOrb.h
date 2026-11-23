@@ -95,17 +95,31 @@ class SkeletonOrb : public juce::Component {
                 const float recovery = .16f + .84f * std::pow(std::abs(std::sin(static_cast<float>(phase) * (.58f + .14f * std::sin(x)) + x * .091f + y * .023f)), 3.0f);
                 const float energy = reducedMotion ? 0.0f : activity * intensity * recovery;
                 const float identity = x * .17f + y * .071f + xx * .023f;
-                const int pieces = energy > .01f && width > 1.5f ? 2 : 1;
+                // Splitting each bone into independently scattered pieces
+                // destroys the skeleton silhouette at high vocal activity.
+                // Move the complete stroke by a small bounded displacement.
+                const int pieces = 1;
                 for (int segment = 0; segment < pieces; ++segment) {
                     const float u = static_cast<float>(segment) / pieces;
-                    const float v = (segment + (energy > .01f ? .94f : 1.0f)) / pieces;
+                    const float v = (segment + 1.0f) / pieces;
                     const float angle = static_cast<float>(phase) + identity + segment * 2.4f + .85f * std::sin(identity * 2.63f + segment + static_cast<float>(phase) * .71f);
                     const float orbitRadius = 28.0f + 78.0f * (.5f + .5f * std::sin(identity * 2.13f + segment));
                     const float scatter = juce::jlimit(0.0f, .25f, energy * (width > 1.5f ? .40f : .32f));
                     const float midX = x + (xx - x) * (u + v) * .5f;
                     const float midY = y + (yy - y) * (u + v) * .5f;
-                    const float dx = scatter * (140 + orbitRadius * std::sin(angle) - midX);
-                    const float dy = scatter * (140 + orbitRadius * std::cos(angle) - midY);
+                    float dx = scatter * (140 + orbitRadius * std::sin(angle) - midX);
+                    float dy = scatter * (140 + orbitRadius * std::cos(angle) - midY);
+                    // A fractional blend with an orbital point could
+                    // displace a 20px bone by 30-50px even at scatter=.25.
+                    // Cap the actual euclidean translation in design pixels.
+                    const float maxDisplacement = width > 1.5f ? 2.5f : 1.5f;
+                    const float squared = dx * dx + dy * dy;
+                    if (squared > maxDisplacement * maxDisplacement)
+                    {
+                        const float factor = maxDisplacement / std::sqrt(squared);
+                        dx *= factor;
+                        dy *= factor;
+                    }
                     const float ax = x + (xx - x) * u + dx, ay = y + (yy - y) * u + dy;
                     const float bx = x + (xx - x) * v + dx, by = y + (yy - y) * v + dy;
                     if (scatter > .2f && width > 1.5f) {

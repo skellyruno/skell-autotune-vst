@@ -55,3 +55,15 @@ release is authorized.
 
 - Standard selected popup items now draw actual checkmarks (previously only tinted text).
 - The Windows smoke test also captures a real JUCE editor snapshot with **injected E-note/high-activity orb state**, to inspect the active-note badge and persistent skeleton. This is a visual test with synthetic UI state, not an actual recorded vocal render.
+
+## Real screenshot inspection — corrective patch
+
+The first active-note screenshot **failed visual inspection**: despite a
+relative scatter cap, orbit distance still moved limbs tens of pixels,
+creating a fragmented skeleton. The root fix keeps each bone stroke whole
+and caps actual Euclidean translation at **2.5 design pixels** for major
+bones or **1.5** for details. Audio reactivity remains, but the character
+should keep its continuous silhouette. The same pass slightly increases
+header label typography for 420px compact-window readability. Both are
+UI-only, no audio-thread/DSP changes. Recheck latest real active-note
+screenshot and run exact-head Windows VST3/pluginval/52 DSP tests.
