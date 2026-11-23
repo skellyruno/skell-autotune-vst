@@ -144,12 +144,14 @@ class SkeletonOrb : public juce::Component {
                                          names[pitchClass], 0, 0);
                     noteOutline.clear();
                     glyphs.createPath(noteOutline);
-                    noteOutline.scaleToFit(194, 203, 37, 35, true);
+                    // Keep the full badge inside the 122px glass clipping circle.
+                    // The old bottom-right location was partially cut by the rim.
+                    noteOutline.scaleToFit(198, 166, 34, 33, true);
                 }
                 g.setColour(juce::Colour(0xff07130c).withAlpha(.80f));
-                g.fillRoundedRectangle(190, 200, 45, 43, 9);
+                g.fillRoundedRectangle(194, 163, 42, 40, 8);
                 g.setColour(accent.withAlpha(.42f + .22f * activity));
-                g.drawRoundedRectangle(190, 200, 45, 43, 9, 1.1f);
+                g.drawRoundedRectangle(194, 163, 42, 40, 8, 1.1f);
                 g.setColour(boneColour.withAlpha(.88f));
                 g.fillPath(noteOutline);
             }
