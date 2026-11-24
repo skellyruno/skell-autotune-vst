@@ -328,7 +328,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
     const auto tint = mix < .55f
         ? juce::Colour(0xff9b5cff).interpolatedWith(juce::Colour(0xff75ff45), mix / .55f)
         : juce::Colour(0xff75ff45).interpolatedWith(juce::Colour(0xff3affd9), (mix - .55f) / .45f);
-    sprite.setColour(tint.interpolatedWith(juce::Colour(0xffe8e6da), .35f));
+    sprite.setColour(tint.interpolatedWith(juce::Colour(0xffe8e6da), .52f));
     sprite.drawImageTransformed(tile, juce::AffineTransform::scale(size / 32.f), true);
   }
   applyAppearance();
@@ -503,7 +503,7 @@ void HumHouseVocalTuneEditor::timerCallback() {
     orb.activity = 0;
   orb.motionLevel = orb.activity * (.6f + .4f * juce::jlimit(0.0f, 1.0f, displayConfidence));
   orb.phase = std::fmod(orb.phase + .49 * elapsed * (3.0 + 20.0 * orb.activity),
-                        juce::MathConstants<double>::twoPi * 10.0);
+                        juce::MathConstants<double>::twoPi * 100.0);
   orb.intensity = .75f + .25f * static_cast<float>(speedKnob.getValue());
   if (motion)
     orb.sweepPhase = std::fmod(orb.sweepPhase + .60 * elapsed * (.42 + 1.2 * speedKnob.getValue()
@@ -633,7 +633,7 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   panel({24, 386, 652, 48}, p.bgDark, 3);
   text("ORIGINAL", 51, 387, 66, 20, 10, p.heatCold);
   text("TARGET", 164, 387, 60, 20, 10, p.heatWarm);
-  text("FORMANT", 274, 387, 56, 15, 9, p.bodyText);
+  text("FORMANT", 273, 389, 56, 15, 10, p.bodyText);
   text("A4", 481, 387, 30, 20, 10, p.textDim);
   // Black recessed mounting pocket, no raised housing. The dial remains
   // centered in the strip and its left/right markers are engraved strokes.
@@ -641,6 +641,8 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   g.fillEllipse(331, 391, 38, 38);
   g.setColour(p.metalLow.withAlpha(.40f));
   g.drawEllipse(331, 391, 38, 38, .75f);
+  g.setColour(p.metalHigh.withAlpha(.14f));
+  g.drawEllipse(330, 390, 40, 40, .65f);
   g.setColour(p.textDim.withAlpha(.88f));
   g.drawLine(319, 413, 325, 413, 1.15f);
   g.drawLine(375, 413, 381, 413, 1.15f);
@@ -648,8 +650,8 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   for (int midi : {36, 84}) {
     const float y = 429 - (midi - 36) * 14 / 48.0f;
     g.setColour(p.accentDeep.withAlpha(.40f));
-    g.drawLine(50, y, 268, y, .65f);
-    g.drawLine(432, y, 654, y, .65f);
+    g.drawLine(50, y, 290, y, .65f);
+    g.drawLine(410, y, 631, y, .65f);
     text("C" + juce::String(midi / 12 - 1), 29, static_cast<int>(y) - 5,
          20, 10, 8, p.textDim);
   }
@@ -669,7 +671,7 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
   }
   g.drawImage(backdrop, getLocalBounds().toFloat());
   g.addTransform(juce::AffineTransform::scale(scaleFactor()));
-  if (!g.getClipBounds().intersects(juce::Rectangle<int>(24, 386, 652, 58)))
+  if (!g.getClipBounds().intersects(juce::Rectangle<int>(24, 386, 652, 48)))
     return;
   const auto &p = lnf.palette;
   const auto drawNote = [&](int midi, int x, juce::Colour colour) {
@@ -685,8 +687,8 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
     const float travel = orb.reducedMotion ? 0.0f : static_cast<float>(orb.phase);
     const float energy = orb.reducedMotion ? 0.0f : orb.activity;
     juce::Graphics::ScopedSaveState runeState(g);
-    g.reduceClipRegion({50, 408, 604, 24});
-    g.excludeClipRegion({268, 408, 164, 24});
+    g.reduceClipRegion({50, 408, 581, 24});
+    g.excludeClipRegion({290, 408, 120, 24});
     for (int i = 0; i < static_cast<int>(runeSprites.size()); ++i) {
       constexpr int columns = 36;
       const int column = i % columns, row = i / columns;
@@ -699,9 +701,9 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
       }
       const float pulse = std::max(0.0f, std::sin(travel * .83f + i * 2.399963f));
       g.setOpacity(juce::jlimit(0.0f, 1.0f,
-          .43f + (.12f + .36f * energy) * cluster + .18f * energy * pulse * pulse));
+          .76f + (.08f + .12f * energy) * cluster + .07f * energy * pulse * pulse));
       const int bankColumn = column % 18;
-      const int x = (column < 18 ? 50 : 432) + bankColumn * 12;
+      const int x = column < 18 ? 50 + bankColumn * 13 : 410 + bankColumn * 12;
       const auto& glyph = runeSprites[static_cast<size_t>(i)];
       const float size = static_cast<float>(juce::jmin(10, glyph.getWidth()));
       g.drawImage(glyph, juce::Rectangle<float>(static_cast<float>(x),
@@ -718,7 +720,7 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
   for (int i = 0; i < kHeatmapWidth; ++i) {
     const auto index =
         static_cast<size_t>((heatmapWriteIdx + i) % kHeatmapWidth);
-    const float x = 50 + i * 604.0f / (kHeatmapWidth - 1);
+    const float x = 50 + i * 581.0f / (kHeatmapWidth - 1);
     const float original = heatmapDetected[index],
                 corrected = heatmapTarget[index];
     if (original >= 35) {
@@ -739,8 +741,8 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
       targetOpen = false;
   }
   juce::Graphics::ScopedSaveState traceClip(g);
-  g.reduceClipRegion({50, 408, 604, 24});
-  g.excludeClipRegion({268, 408, 164, 24});
+  g.reduceClipRegion({50, 408, 581, 24});
+  g.excludeClipRegion({290, 408, 120, 24});
   // Draw the wider target first so both colours remain visible where notes agree.
   g.setColour(p.heatWarm.withAlpha(.88f));
   g.strokePath(target, juce::PathStrokeType(3.1f));

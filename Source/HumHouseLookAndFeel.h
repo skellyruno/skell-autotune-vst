@@ -160,15 +160,26 @@ public:
     ring(track, juce::jmin(from,angle), juce::jmax(from,angle),
          active, juce::jmax(1.0f, 2.5f*unit));
     const float face = r * .73f;
-    juce::ColourGradient cap(small ? juce::Colour(0xff303332) : juce::Colour(0xffb0b3b0),
-        cx-face*.45f, cy-face, small ? juce::Colour(0xff050605) : juce::Colour(0xff464b48),
-        cx+face*.5f, cy+face, false);
-    cap.addColour(.50, small ? juce::Colour(0xff141715) : juce::Colour(0xff777d79));
-    g.setGradientFill(cap);
+    // A narrow bevel adds depth without decorating the cap.
+    juce::ColourGradient bevel(juce::Colour(0xffd3d6d3), cx-face, cy-face,
+        juce::Colour(0xff333936), cx+face, cy+face, false);
+    bevel.addColour(.5, juce::Colour(0xff747a76));
+    g.setGradientFill(bevel);
     g.fillEllipse(cx-face, cy-face, 2*face, 2*face);
+    const float capR = face*.955f;
+    juce::ColourGradient cap(juce::Colour(0xffaeb4b1), cx-face*.33f, cy-face,
+        juce::Colour(0xff535a56), cx+face*.45f, cy+face, false);
+    cap.addColour(.22, juce::Colour(0xff969e99));
+    cap.addColour(.70, juce::Colour(0xff666e69));
+    g.setGradientFill(cap);
+    g.fillEllipse(cx-capR, cy-capR, 2*capR, 2*capR);
+    juce::ColourGradient specular(juce::Colours::white.withAlpha(.085f), cx-capR*.35f, cy-capR*.65f,
+        juce::Colours::white.withAlpha(0.0f), cx+capR*.66f, cy+capR*.55f, true);
+    g.setGradientFill(specular);
+    g.fillEllipse(cx-capR,cy-capR,2*capR,2*capR);
     g.setColour(juce::Colours::black.withAlpha(.65f));
     g.drawEllipse(cx-face, cy-face, 2*face, 2*face, juce::jmax(.65f,1.2f*unit));
-    ring(face*.98f, -1.55f, .35f, juce::Colours::white.withAlpha(small ? .21f : .49f),
+    ring(face*.98f, -1.55f, .35f, juce::Colours::white.withAlpha(.40f),
          juce::jmax(.6f,1.3f*unit));
     if (bipolar) {
       g.setColour(palette.textDim);
@@ -180,7 +191,7 @@ public:
     g.drawLine(cx+std::sin(angle)*face*.56f+unit, cy-std::cos(angle)*face*.56f+unit,
                cx+std::sin(angle)*face*.89f+unit, cy-std::cos(angle)*face*.89f+unit,
                juce::jmax(1.3f,3.5f*unit));
-    g.setColour(small ? active : juce::Colours::white);
+    g.setColour(juce::Colours::white);
     g.drawLine(cx+std::sin(angle)*face*.56f, cy-std::cos(angle)*face*.56f,
                cx+std::sin(angle)*face*.89f, cy-std::cos(angle)*face*.89f,
                juce::jmax(1.0f,2.4f*unit));

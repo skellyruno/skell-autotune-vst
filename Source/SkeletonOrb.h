@@ -150,7 +150,7 @@ class SkeletonOrb : public juce::Component {
                         for (int n=1; n<=8; ++n) {
                             const auto a=twig[static_cast<size_t>(n-1)], b=twig[static_cast<size_t>(n)];
                             const float fade=1.0f-n/9.0f;
-                            g.setColour(core.withAlpha(.37f*power*fade));
+                            g.setColour(core.withAlpha(.44f*power*fade));
                             g.drawLine(a.x,a.y,b.x,b.y,.25f+.55f*fade);
                         }
                         const auto fork=twig[4];
@@ -178,7 +178,8 @@ class SkeletonOrb : public juce::Component {
             const float h = juce::jlimit(0.0f, 1.0f, humanize);
             // Restore a readable skeleton through the whole Humanize range.
             // Soft tissue builds continuously without completely erasing the bones.
-            const float flesh = .78f * h * h * (3.0f - 2.0f * h);
+            const float flesh = .90f * h * h * (3.0f - 2.0f * h);
+            const float boneReveal = (1.0f-h)*(1.0f-h);
             const auto skinLight = juce::Colour(0xffd2bc9e).interpolatedWith(accent, .08f);
             const auto skinShadow = juce::Colour(0xff4b392e).interpolatedWith(accent, .08f);
             auto bone = [&](float x, float y, float xx, float yy, float width = 2.0f) {
@@ -189,15 +190,15 @@ class SkeletonOrb : public juce::Component {
                 // A faint anchored bone outline keeps the figure identifiable
                 // while the brighter complete stroke scatters independently.
                 if (drive > .20f && width > 1.5f && flesh < .99f) {
-                    g.setColour(boneColour.withAlpha(.11f * drive * (1.0f - flesh)));
+                    g.setColour(boneColour.withAlpha(.20f * drive * boneReveal));
                     g.drawLine(x, y, xx, yy, width * .75f);
                 }
                 // Bare bones scatter exactly as before; flesh reconnects the joints.
-                const float separation = .84f * (1.0f - flesh) * (1.0f - flesh);
+                const float separation = .70f * (1.0f - flesh) * (1.0f - flesh);
                 const float ax = x + scatter.x * separation, ay = y + scatter.y * separation;
                 const float bx = xx + scatter.x * separation, by = yy + scatter.y * separation;
                 if (flesh > .001f) {
-                    const float muscle = (width > 1.5f ? 11.0f : 2.8f) * flesh;
+                    const float muscle = (width > 1.5f ? (y >= 160 && y < 210 ? 12.5f : 10.0f) : 2.8f) * flesh;
                     juce::Path limb;
                     limb.startNewSubPath(ax, ay);
                     limb.lineTo(bx, by);
@@ -210,16 +211,20 @@ class SkeletonOrb : public juce::Component {
                     g.setGradientFill(skinVolume);
                     g.strokePath(limb, juce::PathStrokeType(width + muscle * .63f,
                         juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    if (width > 1.5f) {
+                        g.setColour(skinLight.brighter(.12f).withAlpha(.24f*flesh));
+                        g.drawLine(ax-1.2f, ay+1.0f, bx-1.2f, by-1.0f, 1.15f);
+                    }
                 }
                 g.setColour(boneColour.interpolatedWith(accent, .17f * drive)
-                    .withMultipliedAlpha(1.0f - .94f * flesh));
+                    .withMultipliedAlpha(.04f + .96f * boneReveal));
                 juce::Path shaft;
                 shaft.startNewSubPath(ax, ay);
                 shaft.lineTo(bx, by);
                 g.strokePath(shaft, juce::PathStrokeType(width,
                     juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
                 if (width > 1.5f && flesh < .65f) {
-                    const float joint = width * 1.42f;
+                    const float joint = width * 1.60f;
                     g.fillEllipse(ax-joint*.5f, ay-joint*.5f, joint, joint);
                     g.fillEllipse(bx-joint*.5f, by-joint*.5f, joint, joint);
                     g.setColour(boneColour.brighter(.24f).withAlpha(.46f*(1.0f-flesh)));
@@ -314,8 +319,17 @@ class SkeletonOrb : public juce::Component {
                 muscle.addColour(.54, skinLight.darker(.24f).withAlpha(.96f * flesh));
                 g.setGradientFill(muscle);
                 g.fillPath(torso);
-                g.setColour(skinShadow.withAlpha(.45f * flesh));
-                g.drawLine(140, 100, 140, 142, 1.4f);
+                // Soft pectoral planes and waist contour instead of a flat torso plate.
+                for (int side : {-1,1}) {
+                    juce::Path contour;
+                    contour.startNewSubPath(140 + side*3, 103);
+                    contour.quadraticTo(140 + side*15, 96, 140 + side*22, 106);
+                    contour.quadraticTo(140 + side*17, 119, 140 + side*3, 118);
+                    g.setColour(skinShadow.withAlpha(.25f*flesh));
+                    g.strokePath(contour, juce::PathStrokeType(1.5f));
+                }
+                g.setColour(skinShadow.withAlpha(.28f * flesh));
+                g.drawLine(140, 119, 140, 150, 1.1f);
                 g.setColour(skinLight.brighter(.14f).withAlpha(.31f * flesh));
                 g.drawLine(122, 106, 130, 128, 2.0f);
             }
@@ -327,7 +341,7 @@ class SkeletonOrb : public juce::Component {
                 g.setColour(skinLight.withAlpha(.87f * flesh));
                 g.drawLine(140.0f + head.x, 78.0f + head.y, 140, 92, 8.0f * flesh);
             }
-            g.setColour(boneColour.withAlpha(.78f * (1.0f - .92f * flesh)));
+            g.setColour(boneColour.withAlpha(.78f * boneReveal));
             g.drawLine(136.0f + head.x, 77.0f + head.y,
                        137.0f, 89.0f, 1.2f);
             g.drawLine(144.0f + head.x, 77.0f + head.y,
@@ -340,7 +354,7 @@ class SkeletonOrb : public juce::Component {
                 bone(140, 89, 113, 97);
                 bone(140, 89, 167, 97);
             } else {
-                g.setColour(boneColour.withAlpha(.85f * (1.0f - flesh)));
+                g.setColour(boneColour.withAlpha(.85f * boneReveal));
                 for (int i = 0; i < 12; ++i)
                     g.drawLine(137, 81 + i * 5, 143, 83 + i * 5, 1.2f);
                 g.drawLine(140, 89, 113, 97, 2.0f);
@@ -366,12 +380,12 @@ class SkeletonOrb : public juce::Component {
                     arch.cubicTo(140 + d * reach, y + 8 + breathe,
                                  140 + d * 13, y + 9,
                                  140 + d * 4, y + 7);
-                    g.setColour(boneColour.withAlpha((.84f + .12f * activity) * (1.0f - .94f * flesh)));
+                    g.setColour(boneColour.withAlpha((.84f + .12f * activity) * (.025f + .975f * boneReveal)));
                     g.strokePath(arch, juce::PathStrokeType(1.35f));
                 }
             }
             // Sternum joins the two open rib banks; no floating oval rings.
-            g.setColour(boneColour.withAlpha(.68f*(1.0f-.86f*flesh)));
+            g.setColour(boneColour.withAlpha(.68f*boneReveal));
             g.drawLine(140, 96, 140, 137, 1.7f);
             const float sway = static_cast<float>(std::sin(phase * 1.2) * 6 * movement);
             bone(113, 97, 102, 139 + sway);
@@ -398,7 +412,7 @@ class SkeletonOrb : public juce::Component {
                 pelvis.lineTo(156, 146); pelvis.lineTo(150, 165);
                 pelvis.lineTo(140, 159); pelvis.lineTo(130, 165);
                 pelvis.closeSubPath();
-                g.setColour(boneColour.withAlpha(.85f * (1.0f - flesh)));
+                g.setColour(boneColour.withAlpha(.85f * boneReveal));
                 g.strokePath(pelvis, juce::PathStrokeType(2.0f));
             }
             bone(130, 163, 124, 199, 2.5f);

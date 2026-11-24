@@ -124,6 +124,16 @@ int main(int argc, char** argv)
         humanize->setValue(value, juce::sendNotificationSync);
         if (!near(skeleton->humanize, value)) return 32;
     }
+    // Actual A4 step controls, not just their geometry: verify one step
+    // in each direction and exact restoration without modifying the preset.
+    if (!plus->onClick || !minus->onClick) return 37;
+    const double beforeA4 = a4Value->getValue();
+    const double stepA4 = a4Value->getInterval();
+    if (stepA4 <= 0.0) return 38;
+    plus->onClick();
+    if (!near(a4Value->getValue(), beforeA4 + stepA4)) return 39;
+    minus->onClick();
+    if (!near(a4Value->getValue(), beforeA4)) return 40;
     const juce::File outputDir = argc > 1
         ? juce::File::getCurrentWorkingDirectory().getChildFile(argv[1])
         : juce::File::getCurrentWorkingDirectory().getChildFile("reports/ui");
@@ -361,6 +371,12 @@ int main(int argc, char** argv)
             : (amount == 0.5 ? "skellytune-humanize-50" : "skellytune-humanize-100");
         if (!capturePose(name, .94, false)) return 34;
     }
+    // Capture the combined most crowded state at minimum supported scale.
+    editor->setSize(420, 408);
+    humanize->setValue(1.0, juce::sendNotificationSync);
+    formant->setValue(4.0, juce::sendNotificationSync);
+    if (!capturePose("skellytune-small-humanize-formant", .94, false)) return 41;
+    editor->setSize(700, 680);
     humanize->setValue(0.0, juce::sendNotificationSync);
     for (const double amount : {-4.0, 4.0}) {
         formant->setValue(amount, juce::sendNotificationSync);
