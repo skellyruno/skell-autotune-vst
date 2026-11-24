@@ -53,6 +53,21 @@ public:
       palette.accentBright = juce::Colour(0xffc5ef75);
       palette.heatWarm = palette.accentBright;
     }
+    // All four appearance choices now share a BLACK outer chassis.
+    // Accent/metal treatment still varies, with restrained near-black
+    // panel shades to retain meaningful visual theme differentiation.
+    palette.body = juce::Colours::black;
+    palette.bgDark = juce::Colours::black;
+    palette.bgDeep = juce::Colours::black;
+    palette.bgPanel = juce::Colour(0xff090b09);
+    palette.bgSection = juce::Colour(0xff111410);
+    palette.surface = theme == 0 ? juce::Colour(0xff0c100d)
+                    : theme == 1 ? juce::Colour(0xff101411)
+                    : theme == 2 ? juce::Colour(0xff071408)
+                                 : juce::Colour(0xff17150f);
+    // Previous theme 0/3 used dark label text on light surfaces.
+    // New near-black material requires bright labels across all themes.
+    palette.bodyText = palette.textBright;
     setColour(juce::Label::textColourId, palette.textBright);
     setColour(juce::ComboBox::textColourId, palette.textBright);
     setColour(juce::ComboBox::backgroundColourId, palette.bgDark);

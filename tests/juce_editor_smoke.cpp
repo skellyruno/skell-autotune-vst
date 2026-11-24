@@ -25,6 +25,7 @@ int main(int argc, char** argv)
     // Approved mapping: clockwise = faster, host retune 1 = instant,
     // UI readout 0 = instant / 100 = slow, DSP engine uses 1 - retune.
     juce::Slider* speed = nullptr;
+    juce::Slider* humanize = nullptr;
     juce::Slider* a4Value = nullptr;
     juce::TextButton* plus = nullptr;
     juce::TextButton* minus = nullptr;
@@ -40,6 +41,8 @@ int main(int argc, char** argv)
             skeleton = orb;
         if (child->getName() == "RETUNE SPEED")
             speed = dynamic_cast<juce::Slider*>(child);
+        if (child->getName() == "HUMANIZE")
+            humanize = dynamic_cast<juce::Slider*>(child);
         if (child->getName() == "PITCH REF")
             a4Value = dynamic_cast<juce::Slider*>(child);
         if (child->getName() == "A4 increase")
@@ -60,7 +63,7 @@ int main(int argc, char** argv)
     }
     auto* storedRetune = processor.getAPVTS().getParameter("retune");
     const auto near = [](double x, double y) { return std::abs(x - y) < 0.00001; };
-    if (!speed || !storedRetune
+    if (!speed || !humanize || !storedRetune
         || !near(storedRetune->getDefaultValue(), 1.0)
         || !near(speed->getMinimum(), 0.0) || !near(speed->getMaximum(), 1.0)
         || !near(speed->valueToProportionOfLength(0.0), 0.0)
@@ -114,7 +117,7 @@ int main(int argc, char** argv)
         {700, 680, 2, "design-theme2"},
         {1050, 1020, 3, "large-theme3"}
     }};
-    std::array<juce::Colour, 4> sampledBackgrounds{};
+    std::array<juce::Colour, 4> sampledPanelMaterials{};
     for (const auto& scene : scenes)
     {
         // The editor timer deliberately does not fire while hidden in CI.
@@ -132,6 +135,16 @@ int main(int argc, char** argv)
             return 5;
         }
         editor->setSize(scene.width, scene.height);
+        const int expectedKnob = juce::roundToInt(scene.width * 137.0 / 700.0);
+        if (std::abs(speed->getWidth() - expectedKnob) > 1
+            || std::abs(speed->getHeight() - expectedKnob) > 1
+            || std::abs(humanize->getWidth() - expectedKnob) > 1
+            || std::abs(humanize->getHeight() - expectedKnob) > 1)
+        {
+            std::cerr << "FAIL: 10%-smaller paired rotary geometry at "
+                      << scene.name << "\n";
+            return 28;
+        }
         if (plus->getX() <= a4Value->getRight()
             || minus->getX() <= a4Value->getRight()
             || plus->getBottom() >= minus->getY()
@@ -171,22 +184,30 @@ int main(int argc, char** argv)
             return 7;
         }
 
-        // Normalized location outside the central panels; different
-        // LookAndFeel themes must actually paint DIFFERENT body colours.
-        const int x = juce::jlimit(0, scene.width - 1,
-                                  juce::roundToInt(scene.width * 10.0 / 700.0));
-        const int y = juce::jlimit(0, scene.height - 1,
-                                  juce::roundToInt(scene.height * 225.0 / 680.0));
+        // The exterior is TRUE black across all four themes.
+        const int bgX = juce::roundToInt(scene.width * 10.0 / 700.0);
+        const int bgY = juce::roundToInt(scene.height * 225.0 / 680.0);
+        const auto outside = image.getPixelAt(bgX, bgY);
+        if (outside.getARGB() != juce::Colours::black.getARGB())
+        {
+            std::cerr << "FAIL: exterior background not pure black at "
+                      << scene.name << "\n";
+            return 8;
+        }
+        // Theme differentiation now belongs to near-black material panels,
+        // not the shared exterior. Sample between the rotary and the orb.
+        const int x = juce::roundToInt(scene.width * 202.0 / 700.0);
+        const int y = juce::roundToInt(scene.height * 160.0 / 680.0);
         const auto sample = image.getPixelAt(x, y);
         for (int earlier = 0; earlier < scene.theme; ++earlier)
-            if (sample.getARGB() == sampledBackgrounds[static_cast<size_t>(earlier)].getARGB())
+            if (sample.getARGB() ==
+                sampledPanelMaterials[static_cast<size_t>(earlier)].getARGB())
             {
-                std::cerr << "FAIL: scene theme " << scene.theme
-                          << " painted the same background as theme "
-                          << earlier << "\n";
-                return 8;
+                std::cerr << "FAIL: theme panel material not distinct at "
+                          << scene.name << "\n";
+                return 29;
             }
-        sampledBackgrounds[static_cast<size_t>(scene.theme)] = sample;
+        sampledPanelMaterials[static_cast<size_t>(scene.theme)] = sample;
 
         const auto file = outputDir.getChildFile(
             "skellytune-" + juce::String(scene.name) + ".png");

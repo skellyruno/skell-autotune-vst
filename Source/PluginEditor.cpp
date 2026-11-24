@@ -524,16 +524,11 @@ void HumHouseVocalTuneEditor::timerCallback() {
 void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   const float scale = scaleFactor();
   const auto &p = lnf.palette;
-  juce::ColourGradient body(p.surface, 0, 0, p.body, 0,
-                            static_cast<float>(kDesignH), false);
-  g.setGradientFill(body);
+  // Requested all-black background: solid #000000 in every theme.
+  // Retain physical finish ONLY inside the actual material panels.
+  g.setColour(juce::Colours::black);
   g.fillAll();
   g.addTransform(juce::AffineTransform::scale(scale));
-  // Cache brushed machining lines with the editor backdrop.
-  for (int y = 5; y < kDesignH; y += 8) {
-    g.setColour(p.metalHigh.withAlpha(.020f));
-    g.drawHorizontalLine(y, 6.0f, static_cast<float>(kDesignW - 6));
-  }
   auto text = [&](juce::String value, int x, int y, int w, int h, float size,
                   juce::Colour colour,
                   juce::Justification align = juce::Justification::centred) {
@@ -549,6 +544,17 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
                                fill.darker(.085f), bounds.getX(), bounds.getBottom(), false);
     g.setGradientFill(satin);
     g.fillRoundedRectangle(bounds, radius);
+    // Contain micro-brushing within the panel, never over black chassis.
+    {
+      juce::Graphics::ScopedSaveState clippedPanel(g);
+      g.reduceClipRegion(bounds.toNearestInt());
+      for (int y = juce::roundToInt(bounds.getY() + 6.0f);
+           y < juce::roundToInt(bounds.getBottom() - 3.0f); y += 9) {
+        g.setColour(p.metalHigh.withAlpha(.022f));
+        g.drawHorizontalLine(y, bounds.getX() + radius,
+                             bounds.getRight() - radius);
+      }
+    }
     g.setColour(p.metalHigh.withAlpha(.105f));
     g.drawLine(bounds.getX() + radius, bounds.getY() + 1.0f,
                bounds.getRight() - radius, bounds.getY() + 1.0f, .8f);
@@ -569,13 +575,20 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
     g.drawLine(point.x - 2, point.y + 2, point.x + 2, point.y - 2, 1);
   }
   panel({24, 16, 198, 48}, p.bgDark, 8);
-  // Single glyph run: no space between Skelly and Tune.
-  g.setFont(juce::Font(juce::FontOptions(20).withStyle("Bold")));
-  juce::ColourGradient logo(p.textBright, 72, 32, p.accentBright, 210, 32, false);
-  logo.addColour(.57, p.textBright);
-  logo.addColour(.62, p.accentBright);
+  // A single uppercase word; hard two-tone break at the SKELLY/TUNE
+  // glyph boundary, so TUNE is green without adding a space.
+  const juce::Font brandFont(juce::FontOptions(19.0f).withStyle("Bold"));
+  g.setFont(brandFont);
+  const float skellyWidth = brandFont.getStringWidthFloat("SKELLY");
+  const float fullWidth = brandFont.getStringWidthFloat("SKELLYTUNE");
+  const float colourSplit = fullWidth > 0.0f
+      ? juce::jlimit(.01f, .99f, skellyWidth / fullWidth) : .60f;
+  juce::ColourGradient logo(p.textBright, 72, 32,
+                            p.accentBright, 72 + fullWidth, 32, false);
+  logo.addColour(juce::jmax(0.0f, colourSplit - .002f), p.textBright);
+  logo.addColour(juce::jmin(1.0f, colourSplit + .002f), p.accentBright);
   g.setGradientFill(logo);
-  g.drawText("SkellyTune", 72, 23, 146, 26,
+  g.drawText("SKELLYTUNE", 72, 23, 148, 26,
              juce::Justification::centredLeft, false);
   text("PITCH CORRECTION", 73, 49, 156, 11, 9, p.textDim,
        juce::Justification::centredLeft);
@@ -715,8 +728,10 @@ void HumHouseVocalTuneEditor::resized() {
         juce::roundToInt(x * scale), juce::roundToInt(y * scale),
         juce::roundToInt(w * scale), juce::roundToInt(h * scale));
   };
-  speedKnob.setBounds(rect(40, 154, 152, 152));
-  humanizeKnob.setBounds(rect(508, 154, 152, 152));
+  // 152 * 0.90 = 136.8. Both analog knobs shrink 10% while retaining
+  // their original centers, UI value readouts and APVTS mapping.
+  speedKnob.setBounds(rect(47, 162, 137, 137));
+  humanizeKnob.setBounds(rect(516, 162, 137, 137));
   retuneValue.setBounds(rect(40, 307, 152, 32));
   humanizeValue.setBounds(rect(508, 307, 152, 32));
   orb.setBounds(rect(215, 95, 270, 270));
