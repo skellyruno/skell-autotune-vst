@@ -100,169 +100,70 @@ public:
   void drawRotarySlider(juce::Graphics &g, int x, int y, int w, int h,
                         float position, float start, float end,
                         juce::Slider &slider) override {
-    const float detailScale = scale * juce::jlimit(.45f, 1.0f,
-        static_cast<float>(juce::jmin(w, h)) / (137.0f * scale));
-    const float cx = x + w * .5f, cy = y + h * .5f, r = juce::jmin(w, h) * .46f;
-    const float glow =
-        slider.isEnabled()
-            ? std::clamp(.4f + illumination * .45f + flare * .3f, 0.0f, 1.0f)
-            : 0.0f;
-    juce::ColourGradient halo(palette.accent.withAlpha(.25f * glow), cx, cy,
-                              palette.accent.withAlpha(0.0f),
-                              cx + r + 5 * detailScale, cy, true);
-    g.setGradientFill(halo);
-    g.fillEllipse(cx - r - 5 * detailScale, cy - r - 5 * detailScale, 2 * r + 10 * detailScale,
-                  2 * r + 10 * detailScale);
-    g.setColour(juce::Colours::black.withAlpha(.20f));
-    g.fillEllipse(cx - r - 3, cy - r + 5, 2 * r + 6, 2 * r + 6);
-    juce::ColourGradient bezel(palette.metalHigh, cx - r, cy - r,
-                               palette.metalLow, cx + r, cy + r, false);
-    g.setGradientFill(bezel);
-    g.fillEllipse(cx - r, cy - r, 2 * r, 2 * r);
-    g.setColour(palette.bgDark);
-    g.fillEllipse(cx - r + 3 * detailScale, cy - r + 3 * detailScale, 2 * r - 6 * detailScale,
-                  2 * r - 6 * detailScale);
-    const float arcRadius = r * .88f;
-    juce::Path track;
-    track.addCentredArc(cx, cy, arcRadius, arcRadius, 0, start, end, true);
-    g.setColour(palette.accent.withAlpha(
-        slider.isEnabled() ? .14f + .18f * illumination + .24f * flare : 0.0f));
-    g.strokePath(track, juce::PathStrokeType(8 * detailScale));
-    g.setColour(slider.isEnabled() ? palette.accentDeep
-                                   : palette.textDim.darker(.7f));
-    g.strokePath(track, juce::PathStrokeType(4 * detailScale));
+    const bool small = static_cast<bool>(slider.getProperties().getWithDefault("blackDial", false));
     const bool bipolar = static_cast<bool>(slider.getProperties().getWithDefault("bipolarDial", false));
-    const float centreAngle = start + .5f * (end - start);
-    const float endAngle = start + position * (end - start);
-    const float beginArc = bipolar ? centreAngle : start;
-    juce::Path arc;
-    if (std::abs(endAngle - beginArc) > 1.0e-5f)
-      arc.addCentredArc(cx, cy, arcRadius, arcRadius, 0,
-                        juce::jmin(beginArc, endAngle), juce::jmax(beginArc, endAngle), true);
-    if (bipolar) {
-      g.setColour(palette.textBright.withAlpha(.8f));
-      g.drawLine(cx + std::sin(centreAngle) * r * .96f, cy - std::cos(centreAngle) * r * .96f,
-                 cx + std::sin(centreAngle) * r * 1.015f, cy - std::cos(centreAngle) * r * 1.015f,
-                 1.6f * detailScale);
-    }
-    g.setColour(palette.accent.withAlpha(slider.isEnabled() ? .18f + .18f * glow
-                                                            : 0.0f));
-    g.strokePath(arc,
-                 juce::PathStrokeType(10 * detailScale, juce::PathStrokeType::curved,
-                                      juce::PathStrokeType::rounded));
-    g.setColour(slider.isEnabled() ? palette.accentBright : palette.textDim);
-    g.strokePath(arc,
-                 juce::PathStrokeType(4 * detailScale, juce::PathStrokeType::curved,
-                                      juce::PathStrokeType::rounded));
-    const float face = r * .76f;
-    // Dark machined sidewall under the raised silver cap.
-    const float lip = r * .065f;
-    juce::ColourGradient collar(palette.metalLow.darker(.8f), cx, cy - face,
-                                juce::Colours::black, cx, cy + face + lip, false);
-    collar.addColour(.48, palette.metalLow.darker(.25f));
-    g.setGradientFill(collar);
-    g.fillEllipse(cx - face - lip, cy - face - lip * .30f,
-                  2 * (face + lip), 2 * (face + lip));
-    g.setColour(juce::Colours::black.withAlpha(.55f));
-    g.drawEllipse(cx - face - lip, cy - face - lip * .30f,
-                  2 * (face + lip), 2 * (face + lip), 1.4f * detailScale);
-    juce::ColourGradient metal(palette.metalHigh, cx - face * .6f, cy - face,
-                               palette.metalLow, cx + face * .6f, cy + face,
-                               false);
-    metal.addColour(.16, palette.metalHigh.brighter(.12f));
-    metal.addColour(.44, palette.metalHigh.darker(.36f));
-    metal.addColour(.53, palette.metalLow.brighter(.18f));
-    metal.addColour(.82, palette.metalLow.darker(.22f));
-    g.setGradientFill(metal);
-    g.fillEllipse(cx - face, cy - face, 2 * face, 2 * face);
-    // Fine circular lathe marks, rather than prominent straight spokes.
-    // The physical cap reads as machined metal even at the smallest scale.
-    for (int ring = 1; ring <= 12; ++ring) {
-      const float radius = face * (.22f + .058f * ring);
-      g.setColour((ring % 3 == 0 ? juce::Colours::black : juce::Colours::white)
-                      .withAlpha(ring % 3 == 0 ? .085f : .045f));
-      g.drawEllipse(cx - radius, cy - radius, 2 * radius, 2 * radius,
-                    .55f * detailScale);
-    }
-    juce::Path bevelHighlight;
-    bevelHighlight.addCentredArc(cx, cy, face * .975f, face * .975f, 0,
-                                 -1.48f, .44f, true);
-    g.setColour(juce::Colours::white.withAlpha(.46f));
-    g.strokePath(bevelHighlight, juce::PathStrokeType(1.2f * detailScale));
-    // Precision concentric lathe cuts and specular metal.
-    for (int ring = 0; ring < 4; ++ring) {
-      const float inset = (2.0f + 3.1f * ring) * detailScale;
-      if (2 * face - 2 * inset > 0.0f) {
-        g.setColour(ring % 2 == 0 ? juce::Colours::white.withAlpha(.055f)
-                                 : juce::Colours::black.withAlpha(.065f));
-        g.drawEllipse(cx - face + inset, cy - face + inset,
-                      2 * face - 2 * inset, 2 * face - 2 * inset, .65f * detailScale);
-      }
-    }
-    juce::Path glint;
-    glint.addCentredArc(cx - .8f * detailScale, cy - .8f * detailScale,
-                         face * .91f, face * .91f, 0, -.96f, .58f, true);
-    g.setColour(juce::Colours::white.withAlpha(.26f));
-    g.strokePath(glint, juce::PathStrokeType(1.5f * detailScale));
-    g.setColour(palette.metalHigh);
-    g.drawEllipse(cx - face, cy - face, 2 * face, 2 * face, 1.1f * detailScale);
-    // Fine grip cuts follow the machined rim without competing with the
-    // position marker.
-    for (int i = 0; i < 40; ++i) {
-      const float a = i * juce::MathConstants<float>::twoPi / 40;
-      g.setColour(juce::Colours::black.withAlpha(.52f));
-      g.drawLine(cx + std::sin(a) * face * .92f, cy - std::cos(a) * face * .92f,
-                 cx + std::sin(a) * face * 1.045f,
-                 cy - std::cos(a) * face * 1.045f, .8f * detailScale);
-      const float reflected = a + .02f;
-      g.setColour(juce::Colours::white.withAlpha(.16f));
-      g.drawLine(cx + std::sin(reflected) * face * .92f,
-                 cy - std::cos(reflected) * face * .92f,
-                 cx + std::sin(reflected) * face * 1.045f,
-                 cy - std::cos(reflected) * face * 1.045f, .6f * detailScale);
-    }
-    g.setColour(juce::Colours::black.withAlpha(.45f));
-    g.drawEllipse(cx - face + 2 * detailScale, cy - face + 2 * detailScale,
-                  2 * face - 4 * detailScale, 2 * face - 4 * detailScale, .7f * detailScale);
-    // Engraved detailScale ticks preserve the original rotation/automation.
-    for (int tick = 0; tick <= 10; ++tick) {
-      const float a = start + (tick / 10.0f) * (end - start);
-      const float inner = r * (tick % 5 == 0 ? .945f : .966f);
-      const float outer = r * .997f;
-      g.setColour(palette.metalHigh.withAlpha(tick % 5 == 0 ? .50f : .26f));
-      g.drawLine(cx + std::sin(a) * inner, cy - std::cos(a) * inner,
-                 cx + std::sin(a) * outer, cy - std::cos(a) * outer,
-                 (tick % 5 == 0 ? 1.2f : .65f) * detailScale);
-    }
+    const float cx = x + w * .5f, cy = y + h * .5f;
+    const float r = juce::jmin(w, h) * .455f;
+    if (r <= 0.0f) return;
+    const float unit = r / 62.0f;
     const float angle = start + position * (end - start);
-    g.setColour(juce::Colours::black.withAlpha(.45f));
-    g.drawLine(cx + std::sin(angle) * r * .745f + detailScale,
-               cy - std::cos(angle) * r * .745f + detailScale,
-               cx + std::sin(angle) * r * .945f + detailScale,
-               cy - std::cos(angle) * r * .945f + detailScale, 3.3f * detailScale);
-    g.setColour(palette.textBright);
-    g.drawLine(cx + std::sin(angle) * r * .76f, cy - std::cos(angle) * r * .76f,
-               cx + std::sin(angle) * r * .94f, cy - std::cos(angle) * r * .94f,
-               3 * detailScale);
-    const float hub = face * .2f;
-    g.setColour(palette.metalLow.withAlpha(.24f));
-    g.drawEllipse(cx - hub, cy - hub, hub * 2, hub * 2, .7f * detailScale);
-    g.setColour(juce::Colours::white.withAlpha(.2f));
-    g.drawEllipse(cx - hub + detailScale, cy - hub + detailScale, hub * 2 - 2 * detailScale,
-                  hub * 2 - 2 * detailScale, .6f * detailScale);
-    if (flare > .02f && slider.isEnabled()) {
-      juce::Path glint;
-      const float sweep =
-          std::fmod(lightPhase, juce::MathConstants<float>::twoPi);
-      glint.addCentredArc(cx, cy, r * .98f, r * .98f, 0, sweep, sweep + .8f,
-                          true);
-      g.setColour(palette.accentBright.withAlpha(flare * .75f));
-      g.strokePath(glint, juce::PathStrokeType(2 * detailScale));
+    const float centre = start + .5f * (end - start);
+    const auto active = slider.isEnabled() ? palette.accentBright : palette.textDim;
+    const auto ring = [&](float radius, float a, float b, juce::Colour colour, float thickness) {
+      if (b - a <= 1.0e-5f) return;
+      juce::Path path;
+      path.addCentredArc(cx, cy, radius, radius, 0.0f, a, b, true);
+      g.setColour(colour);
+      g.strokePath(path, juce::PathStrokeType(thickness,
+          juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    };
+    // Smooth turned-metal collar, matte face and one clear position index.
+    // No lathe rings, spokes, grip cuts, centre badge or decorative face marks.
+    g.setColour(juce::Colours::black.withAlpha(.7f));
+    g.fillEllipse(cx-r, cy-r+2*unit, 2*r, 2*r);
+    juce::ColourGradient bezel(juce::Colour(0xffa7aaa7), cx-r, cy-r,
+        juce::Colour(0xff181b19), cx+r, cy+r, false);
+    bezel.addColour(.48, juce::Colour(0xff4b4e4c));
+    g.setGradientFill(bezel);
+    g.fillEllipse(cx-r, cy-r, 2*r, 2*r);
+    const float inset = r * .92f;
+    g.setColour(juce::Colour(0xff080a09));
+    g.fillEllipse(cx-inset, cy-inset, 2*inset, 2*inset);
+    const float track = r * .84f;
+    ring(track, start, end, juce::Colour(0xff252b27), juce::jmax(1.0f, 3.3f*unit));
+    const float from = bipolar ? centre : start;
+    ring(track, juce::jmin(from,angle), juce::jmax(from,angle),
+         active.withAlpha(.22f + .14f*illumination), juce::jmax(1.5f, 7.0f*unit));
+    ring(track, juce::jmin(from,angle), juce::jmax(from,angle),
+         active, juce::jmax(1.0f, 2.5f*unit));
+    const float face = r * .73f;
+    juce::ColourGradient cap(small ? juce::Colour(0xff303332) : juce::Colour(0xffb0b3b0),
+        cx-face*.45f, cy-face, small ? juce::Colour(0xff050605) : juce::Colour(0xff464b48),
+        cx+face*.5f, cy+face, false);
+    cap.addColour(.50, small ? juce::Colour(0xff141715) : juce::Colour(0xff777d79));
+    g.setGradientFill(cap);
+    g.fillEllipse(cx-face, cy-face, 2*face, 2*face);
+    g.setColour(juce::Colours::black.withAlpha(.65f));
+    g.drawEllipse(cx-face, cy-face, 2*face, 2*face, juce::jmax(.65f,1.2f*unit));
+    ring(face*.98f, -1.55f, .35f, juce::Colours::white.withAlpha(small ? .21f : .49f),
+         juce::jmax(.6f,1.3f*unit));
+    if (bipolar) {
+      g.setColour(palette.textDim);
+      g.drawLine(cx+std::sin(centre)*r*.92f, cy-std::cos(centre)*r*.92f,
+                 cx+std::sin(centre)*r*.99f, cy-std::cos(centre)*r*.99f,
+                 juce::jmax(.7f,1.1f*unit));
     }
+    g.setColour(juce::Colours::black.withAlpha(.5f));
+    g.drawLine(cx+std::sin(angle)*face*.56f+unit, cy-std::cos(angle)*face*.56f+unit,
+               cx+std::sin(angle)*face*.89f+unit, cy-std::cos(angle)*face*.89f+unit,
+               juce::jmax(1.3f,3.5f*unit));
+    g.setColour(small ? active : juce::Colours::white);
+    g.drawLine(cx+std::sin(angle)*face*.56f, cy-std::cos(angle)*face*.56f,
+               cx+std::sin(angle)*face*.89f, cy-std::cos(angle)*face*.89f,
+               juce::jmax(1.0f,2.4f*unit));
     if (slider.isMouseOverOrDragging() || slider.hasKeyboardFocus(true)) {
-      g.setColour(palette.accent);
-      g.drawEllipse(cx - r - 2 * detailScale, cy - r - 2 * detailScale, 2 * r + 4 * detailScale,
-                    2 * r + 4 * detailScale, 1 * detailScale);
+      g.setColour(active.withAlpha(.8f));
+      g.drawEllipse(cx-r, cy-r, 2*r, 2*r, juce::jmax(.8f,1.4f*unit));
     }
   }
   juce::Button *createSliderButton(juce::Slider &, bool up) override {

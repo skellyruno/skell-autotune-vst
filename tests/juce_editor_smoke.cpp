@@ -117,8 +117,8 @@ int main(int argc, char** argv)
     for (const double value : {-4.0, 2.5, 0.0}) {
         formant->setValue(value, juce::sendNotificationSync);
         if (!near(storedFormant->load(), value)
-            || !formantNumber->getText().contains(value < 0 ? "DEEPER"
-                    : (value > 0 ? "BRIGHTER" : "NEUTRAL"))) return 31;
+            || formantNumber->getText() != ((value > 0 ? juce::String("+") : juce::String())
+                    + juce::String(value, 1) + " st")) return 31;
     }
     for (const double value : {1.0, .5, 0.0}) {
         humanize->setValue(value, juce::sendNotificationSync);
@@ -170,14 +170,17 @@ int main(int argc, char** argv)
         }
         const float layoutScale = scene.width / 700.0f;
         if (std::abs(skeleton->getWidth() - juce::roundToInt(256 * layoutScale)) > 1
-            || std::abs(formant->getWidth() - juce::roundToInt(70 * layoutScale)) > 1
-            || formant->getX() < skeleton->getRight()
+            || std::abs(formant->getWidth() - juce::roundToInt(36 * layoutScale)) > 1
+            || std::abs(formant->getBounds().getCentreX() - scene.width / 2) > 1
+            || formant->getY() < skeleton->getBottom()
+            || formant->getBottom() > juce::roundToInt(430 * layoutScale)
             || formant->getBounds().intersects(humanize->getBounds())
-            || formant->getBounds().getCentreY() <= humanize->getBounds().getCentreY()
-            || formant->getBounds().getCentreX() >= humanize->getBounds().getCentreX()
+            || humanize->getY() != speed->getY()
+            || humanizeNumber->getY() != speedNumber->getY()
+            || !static_cast<bool>(formant->getProperties().getWithDefault("blackDial", false))
             || std::abs(piano[0]->getHeight() - juce::roundToInt(134 * layoutScale)) > 1
             || std::abs(piano[1]->getHeight() - juce::roundToInt(88 * layoutScale)) > 1) {
-            std::cerr << "FAIL: globe, diagonal formant or piano geometry\n";
+            std::cerr << "FAIL: globe, centered Formant, restored Humanize or piano geometry\n";
             return 33;
         }
         if (std::abs(humanizeNumber->getBounds().getCentreX()

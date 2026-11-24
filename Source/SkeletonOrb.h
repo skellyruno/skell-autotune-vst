@@ -2,6 +2,7 @@
 #include <JuceHeader.h>
 #include "SkeletonMotion.h"
 #include <cmath>
+#include <array>
 
 class SkeletonOrb : public juce::Component {
   public:
@@ -59,7 +60,7 @@ class SkeletonOrb : public juce::Component {
                     if (step == 0) line.startNewSubPath(140 + 121 * x, 140 + 121 * y);
                     else line.lineTo(140 + 121 * x, 140 + 121 * y);
                 }
-                g.setColour(accent.withAlpha(.06f + .14f * depth));
+                g.setColour(accent.withAlpha(.035f + .075f * depth));
                 g.strokePath(line, juce::PathStrokeType(.8f));
             }
             if (!reducedMotion) for (int light = 0; light < 2; ++light) {
@@ -79,43 +80,65 @@ class SkeletonOrb : public juce::Component {
                 g.setColour(neon.withAlpha(depth * (.27f + .28f * activity)));
                 g.fillEllipse(sweepX - 2, sweepY - 2, 4, 4);
             }
-            // Sparse electrical discharges behind the bones, confined to glass.
+            // Forked electrical channels: deterministic, nonperiodic spatial
+            // offsets, tapered leaders, nested branches and a white-hot core.
+            // Crossfade between seeded shapes instead of full-screen flashes.
             const float current = reducedMotion ? 0.0f
                 : juce::jlimit(0.0f, 1.0f, activity * intensity);
             if (current > .10f) {
+                const float time = static_cast<float>(phase) * 1.5f;
+                const int frame = static_cast<int>(std::floor(time));
+                const float fraction = time - frame;
+                const float blend = fraction * fraction * (3.0f - 2.0f * fraction);
                 const int bolts = current > .72f ? 3 : (current > .37f ? 2 : 1);
                 for (int i = 0; i < bolts; ++i) {
-                    const float p = static_cast<float>(phase);
-                    const float x0 = i == 0 ? 69.0f : (i == 1 ? 207.0f : 192.0f);
-                    const float y0 = i == 0 ? 93.0f : (i == 1 ? 94.0f : 166.0f);
-                    const float direction = i == 1 ? -1.0f : 1.0f;
-                    juce::Path arc;
-                    arc.startNewSubPath(x0, y0);
-                    for (int segment = 1; segment <= 6; ++segment)
-                        arc.lineTo(x0 + direction * segment * 1.4f
-                                       + 8.0f * std::sin(p * 2.35f + i * 2.13f + segment * 2.17f),
-                                   y0 + segment * (i == 2 ? 9.0f : 12.0f));
-                    const float power = current * (.68f + .32f * std::sin(p * 2.8f + i * 2.1f));
-                    g.setColour(accent.withAlpha(.12f * power));
-                    g.strokePath(arc, juce::PathStrokeType(6.0f));
-                    g.setColour(accent.brighter(.3f).withAlpha(.42f * power));
-                    g.strokePath(arc, juce::PathStrokeType(2.0f));
-                    g.setColour(juce::Colours::white.withAlpha(.40f * power));
-                    g.strokePath(arc, juce::PathStrokeType(.65f));
-                    // One small, bounded branch gives the discharge a more
-                    // convincing electrical silhouette without strobing.
-                    const float forkY = y0 + (i == 2 ? 27.0f : 36.0f);
-                    const float forkX = x0 + direction * 4.2f
-                         + 8.0f * std::sin(p * 2.35f + i * 2.13f + 3 * 2.17f);
-                    juce::Path fork;
-                    fork.startNewSubPath(forkX, forkY);
-                    fork.lineTo(forkX - direction * 12.0f, forkY + 7.0f);
-                    fork.lineTo(forkX - direction * 7.0f, forkY + 16.0f);
-                    fork.lineTo(forkX - direction * 20.0f, forkY + 24.0f);
-                    g.setColour(accent.withAlpha(.25f * power));
-                    g.strokePath(fork, juce::PathStrokeType(1.8f));
-                    g.setColour(accent.brighter(.4f).withAlpha(.30f * power));
-                    g.strokePath(fork, juce::PathStrokeType(.6f));
+                    const auto from = i == 0 ? juce::Point<float>(54, 83)
+                        : (i == 1 ? juce::Point<float>(218, 75) : juce::Point<float>(213, 173));
+                    const auto to = i == 0 ? juce::Point<float>(84, 191)
+                        : (i == 1 ? juce::Point<float>(192, 164) : juce::Point<float>(177, 239));
+                    const auto jitter = [&](int n, int salt) {
+                        const auto seed = static_cast<unsigned>(n * 173 + i * 7919 + salt * 104729);
+                        auto mix = [](unsigned a) {
+                            a ^= a >> 16; a *= 0x7feb352du; a ^= a >> 15;
+                            a *= 0x846ca68bu; a ^= a >> 16;
+                            return static_cast<float>(a & 65535u) / 32767.5f - 1.0f;
+                        };
+                        const float a = mix(seed + static_cast<unsigned>(frame)*65537u);
+                        const float b = mix(seed + static_cast<unsigned>(frame+1)*65537u);
+                        return a + (b-a)*blend;
+                    };
+                    std::array<juce::Point<float>, 13> nodes{};
+                    juce::Path leader;
+                    for (int n = 0; n <= 12; ++n) {
+                        const float t = n / 12.0f;
+                        const float envelope = std::sin(t*juce::MathConstants<float>::pi);
+                        nodes[static_cast<size_t>(n)] = from + (to-from)*t
+                            + juce::Point<float>(jitter(n,1)*14.0f*envelope, jitter(n,2)*3.0f*envelope);
+                        if (n == 0) leader.startNewSubPath(nodes[0]);
+                        else leader.lineTo(nodes[static_cast<size_t>(n)]);
+                    }
+                    const float power = current * (.62f + .38f * std::abs(jitter(0, 3)));
+                    g.setColour(accent.withAlpha(.10f*power));
+                    g.strokePath(leader, juce::PathStrokeType(9.0f));
+                    g.setColour(accent.brighter(.45f).withAlpha(.28f*power));
+                    g.strokePath(leader, juce::PathStrokeType(3.4f));
+                    g.setColour(juce::Colours::white.interpolatedWith(accent,.20f).withAlpha(.88f*power));
+                    g.strokePath(leader, juce::PathStrokeType(1.15f));
+                    for (int branch = 0; branch < 3; ++branch) {
+                        const int index = 3 + branch * 3;
+                        auto point = nodes[static_cast<size_t>(index)];
+                        const float sign = ((i+branch)%2 == 0 ? -1.0f : 1.0f);
+                        for (int n = 1; n <= 5; ++n) {
+                            const auto next = point + juce::Point<float>(
+                                sign*(3.8f + 3.3f*jitter(n, branch+4)), 4.5f + 2.0f*jitter(n,branch+8));
+                            const float fade = 1.0f - n / 6.0f;
+                            g.setColour(accent.withAlpha(.22f*power*fade));
+                            g.drawLine(point.x,point.y,next.x,next.y,2.7f*fade+.4f);
+                            g.setColour(juce::Colours::white.interpolatedWith(accent,.45f).withAlpha(.72f*power*fade));
+                            g.drawLine(point.x,point.y,next.x,next.y,.85f*fade+.25f);
+                            point = next;
+                        }
+                    }
                 }
             }
             juce::ColourGradient innerHalo(accent.withAlpha(.025f + .075f * activity),
@@ -132,9 +155,11 @@ class SkeletonOrb : public juce::Component {
                                         .interpolatedWith(accent, .25f)
                                         .withAlpha(bypassed ? .3f : .85f + .15f * activity);
             const float h = juce::jlimit(0.0f, 1.0f, humanize);
-            const float flesh = h * h * (3.0f - 2.0f * h);
-            const auto skinLight = juce::Colour(0xffd8baa0).interpolatedWith(accent, .13f);
-            const auto skinShadow = juce::Colour(0xff574337).interpolatedWith(accent, .13f);
+            // Restore a readable skeleton through the whole Humanize range.
+            // Soft tissue builds continuously without completely erasing the bones.
+            const float flesh = .78f * h * h * (3.0f - 2.0f * h);
+            const auto skinLight = juce::Colour(0xffd2bc9e).interpolatedWith(accent, .08f);
+            const auto skinShadow = juce::Colour(0xff4b392e).interpolatedWith(accent, .08f);
             auto bone = [&](float x, float y, float xx, float yy, float width = 2.0f) {
                 const auto scatter = skellytune::motion::boneScatter(
                     x, y, xx, yy, width, activity, intensity, phase, reducedMotion);
@@ -151,7 +176,7 @@ class SkeletonOrb : public juce::Component {
                 const float ax = x + scatter.x * separation, ay = y + scatter.y * separation;
                 const float bx = xx + scatter.x * separation, by = yy + scatter.y * separation;
                 if (flesh > .001f) {
-                    const float muscle = (width > 1.5f ? 13.0f : 3.4f) * flesh;
+                    const float muscle = (width > 1.5f ? 11.0f : 2.8f) * flesh;
                     juce::Path limb;
                     limb.startNewSubPath(ax, ay);
                     limb.lineTo(bx, by);
@@ -168,14 +193,18 @@ class SkeletonOrb : public juce::Component {
                 g.setColour(boneColour.interpolatedWith(accent, .17f * drive)
                     .withMultipliedAlpha(1.0f - .94f * flesh));
                 g.drawLine(ax, ay, bx, by, width);
+                if (width > 1.5f && flesh < .65f) {
+                    g.setColour(boneColour.brighter(.24f).withAlpha(.46f*(1.0f-flesh)));
+                    g.drawLine(ax-.45f, ay, bx-.45f, by, .65f);
+                }
             };
             // The head bounces independently of the torso. Keeping the
             // face, jaw and teeth under one transform avoids detached eyes.
             auto head = skellytune::motion::headPose(
                 activity, motionLevel, phase, reducedMotion);
-            head.x *= 1.0f - .24f * flesh;
-            head.y *= 1.0f - .40f * flesh;
-            head.angle *= 1.0f - .20f * flesh;
+            head.x *= 1.0f - .12f * flesh;
+            head.y *= 1.0f - .18f * flesh;
+            head.angle *= 1.0f - .10f * flesh;
             {
                 juce::Graphics::ScopedSaveState headState(g);
                 g.addTransform(
@@ -194,6 +223,8 @@ class SkeletonOrb : public juce::Component {
             g.setGradientFill(juce::ColourGradient(boneColour.brighter(.2f), 126, 44, boneColour.darker(.5f),
                                                    155, 77, false));
             g.fillPath(skull);
+            g.setColour(boneColour.brighter(.25f).withAlpha(.55f));
+            g.strokePath(skull, juce::PathStrokeType(.7f));
             {
             g.setColour(juce::Colour(0xff092114));
             g.fillEllipse(128, 53, 9, 11);
@@ -367,9 +398,13 @@ class SkeletonOrb : public juce::Component {
             g.fillPath(reflection);
             juce::Path crescent;
             crescent.addCentredArc(140, 140, 112, 112, 0, -1.12f, -.25f, true);
-            g.setColour(juce::Colours::white.withAlpha(.30f));
+            g.setColour(juce::Colours::white.withAlpha(.48f));
             g.strokePath(crescent, juce::PathStrokeType(2.5f,
                 juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            juce::Path innerReflection;
+            innerReflection.addCentredArc(140, 140, 105, 105, 0, .38f, 1.12f, true);
+            g.setColour(accent.brighter(.35f).withAlpha(.16f));
+            g.strokePath(innerReflection, juce::PathStrokeType(1.4f));
             juce::Path lowerRim;
             lowerRim.addCentredArc(140, 140, 118, 118, 0, 2.0f, 3.8f, true);
             g.setColour(accent.withAlpha(.22f + .12f * activity));
@@ -391,7 +426,7 @@ class SkeletonOrb : public juce::Component {
         g.fillEllipse(5, 5, 270, 270);
         g.setColour(juce::Colour(0xff07100b));
         g.fillEllipse(11, 11, 258, 258);
-        juce::ColourGradient glass(juce::Colour(0xff346a46), 96, 74, juce::Colour(0xff010302), 238, 243,
+        juce::ColourGradient glass(juce::Colour(0xff42734e), 87, 67, juce::Colour(0xff010302), 238, 243,
                                    true);
         glass.addColour(.19, juce::Colour(0xff285b3c));
         glass.addColour(.40, juce::Colour(0xff163623));
@@ -440,7 +475,7 @@ class SkeletonOrb : public juce::Component {
                     else
                         line.lineTo(point);
                 }
-                g.setColour(accent.withAlpha(.138f));
+                g.setColour(accent.withAlpha(.07f));
                 g.strokePath(line, juce::PathStrokeType(.8f));
             }
         }
@@ -452,7 +487,7 @@ class SkeletonOrb : public juce::Component {
         reflectiveRim.addCentredArc(140, 140, 123, 123, 0, -1.75f, -.22f, true);
         g.setColour(juce::Colours::white.withAlpha(.28f));
         g.strokePath(reflectiveRim, juce::PathStrokeType(2.1f));
-        juce::ColourGradient reflection(juce::Colours::white.withAlpha(.31f), 65, 42,
+        juce::ColourGradient reflection(juce::Colours::white.withAlpha(.17f), 65, 42,
                                         juce::Colours::white.withAlpha(0.0f), 111, 110, false);
         g.setGradientFill(reflection);
         juce::Path shine;
