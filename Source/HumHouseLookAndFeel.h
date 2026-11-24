@@ -59,12 +59,15 @@ public:
     palette.body = juce::Colours::black;
     palette.bgDark = juce::Colours::black;
     palette.bgDeep = juce::Colours::black;
-    palette.bgPanel = juce::Colour(0xff090b09);
-    palette.bgSection = juce::Colour(0xff111410);
-    palette.surface = theme == 0 ? juce::Colour(0xff0c100d)
-                    : theme == 1 ? juce::Colour(0xff101411)
-                    : theme == 2 ? juce::Colour(0xff071408)
-                                 : juce::Colour(0xff17150f);
+    // Real screenshot review: the first pass still tinted entire panels
+    // green/brown. Keep all structural surfaces achromatic near-black;
+    // reserve theme hues for accents, metal trim, orb and lit controls.
+    palette.bgPanel = juce::Colour(0xff090909);
+    palette.bgSection = juce::Colour(0xff111111);
+    palette.surface = theme == 0 ? juce::Colour(0xff111111)
+                    : theme == 1 ? juce::Colour(0xff0c0c0c)
+                    : theme == 2 ? juce::Colour(0xff080808)
+                                 : juce::Colour(0xff171717);
     // Previous theme 0/3 used dark label text on light surfaces.
     // New near-black material requires bright labels across all themes.
     palette.bodyText = palette.textBright;

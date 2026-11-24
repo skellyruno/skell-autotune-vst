@@ -31,3 +31,13 @@ Full Windows VST3, pluginval strictness 5, offline 53 DSP regression tests,
 visual inspection and screenshot correction are still required on
 this exact head. Real FL Studio and actual G/A vocal A/B remain
 unverified; do not alter production parameters or distribute publicly.
+
+## Screenshot inspection correction
+
+The initial exact-head screenshots passed their tests, but manual inspection
+showed that the centered main panel in vivid green theme 2 and warm theme 3
+was tinted green/brown. To satisfy the user's request for an **all-black
+background**, all structural panel fills are now neutral near-black gray,
+with subtle luminance differences preserving the four material styles.
+Colored rim accents, orbit lightning, metal finishes and controls remain.
+The new exact-head Windows screenshots need another manual inspection.
