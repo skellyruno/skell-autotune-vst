@@ -26,6 +26,7 @@ int main(int argc, char** argv)
     // UI readout 0 = instant / 100 = slow, DSP engine uses 1 - retune.
     juce::Slider* speed = nullptr;
     juce::Slider* humanize = nullptr;
+    juce::Slider* formant = nullptr;
     juce::Slider* a4Value = nullptr;
     juce::TextButton* plus = nullptr;
     juce::TextButton* minus = nullptr;
@@ -43,6 +44,8 @@ int main(int argc, char** argv)
             speed = dynamic_cast<juce::Slider*>(child);
         if (child->getName() == "HUMANIZE")
             humanize = dynamic_cast<juce::Slider*>(child);
+        if (child->getName() == "FORMANT SHIFT")
+            formant = dynamic_cast<juce::Slider*>(child);
         if (child->getName() == "PITCH REF")
             a4Value = dynamic_cast<juce::Slider*>(child);
         if (child->getName() == "A4 increase")
@@ -63,7 +66,7 @@ int main(int argc, char** argv)
     }
     auto* storedRetune = processor.getAPVTS().getParameter("retune");
     const auto near = [](double x, double y) { return std::abs(x - y) < 0.00001; };
-    if (!speed || !humanize || !storedRetune
+    if (!speed || !humanize || !formant || !storedRetune
         || !near(storedRetune->getDefaultValue(), 1.0)
         || !near(speed->getMinimum(), 0.0) || !near(speed->getMaximum(), 1.0)
         || !near(speed->valueToProportionOfLength(0.0), 0.0)
@@ -101,6 +104,18 @@ int main(int argc, char** argv)
     }
     speed->setValue(1.0, juce::sendNotificationSync);
 
+    auto* storedFormant = processor.getAPVTS().getRawParameterValue("formantShift");
+    if (!storedFormant || !near(formant->getMinimum(), -4.0)
+        || !near(formant->getMaximum(), 4.0) || !near(storedFormant->load(), 0.0))
+        return 30;
+    for (const double value : {-4.0, 2.5, 0.0}) {
+        formant->setValue(value, juce::sendNotificationSync);
+        if (!near(storedFormant->load(), value)) return 31;
+    }
+    for (const double value : {1.0, .5, 0.0}) {
+        humanize->setValue(value, juce::sendNotificationSync);
+        if (!near(skeleton->humanize, value)) return 32;
+    }
     const juce::File outputDir = argc > 1
         ? juce::File::getCurrentWorkingDirectory().getChildFile(argv[1])
         : juce::File::getCurrentWorkingDirectory().getChildFile("reports/ui");
@@ -145,6 +160,18 @@ int main(int argc, char** argv)
                       << scene.name << "\n";
             return 28;
         }
+        const float layoutScale = scene.width / 700.0f;
+        if (std::abs(skeleton->getWidth() - juce::roundToInt(256 * layoutScale)) > 1
+            || std::abs(formant->getWidth() - juce::roundToInt(70 * layoutScale)) > 1
+            || formant->getX() < skeleton->getRight()
+            || formant->getBounds().intersects(humanize->getBounds())
+            || formant->getBounds().getCentreY() <= humanize->getBounds().getCentreY()
+            || formant->getBounds().getCentreX() >= humanize->getBounds().getCentreX()
+            || std::abs(piano[0]->getHeight() - juce::roundToInt(134 * layoutScale)) > 1
+            || std::abs(piano[1]->getHeight() - juce::roundToInt(88 * layoutScale)) > 1) {
+            std::cerr << "FAIL: globe, diagonal formant or piano geometry\n";
+            return 33;
+        }
         if (plus->getX() <= a4Value->getRight()
             || minus->getX() <= a4Value->getRight()
             || plus->getBottom() >= minus->getY()
@@ -155,7 +182,7 @@ int main(int argc, char** argv)
         }
         if (!piano[0] || !piano[1] || piano[0]->getHeight() <= 0
             || piano[1]->getHeight() <= 0
-            || piano[0]->getHeight() >= scene.height / 5
+            || piano[0]->getHeight() > juce::roundToInt(scene.height * .21f)
             || piano[1]->getHeight() >= piano[0]->getHeight()
             || speedNumber->getHeight() <= speed->getHeight() / 6)
         {
@@ -230,7 +257,7 @@ int main(int argc, char** argv)
                   << sample.getARGB() << std::dec << ")\n";
     }
     // A genuine native-JUCE snapshot with injected target/activity state.
-    // Used solely to inspect the tuned-note badge and persistent skull,
+    // Used solely to inspect the persistent skull without a note badge,
     // not as evidence of actual audio processing.
     for (int attempt = 0; attempt < 4 && processor.getUiTheme() != 2; ++attempt)
         cycleTheme->onClick();
@@ -240,7 +267,6 @@ int main(int argc, char** argv)
         return 18;
     }
     editor->setSize(700, 680);
-    skeleton->targetNote = 64;
     skeleton->activity = .80f;
     skeleton->motionLevel = .75f;
     skeleton->phase = .31;
@@ -308,6 +334,13 @@ int main(int argc, char** argv)
         std::cerr << "FAIL: real JUCE bounce/still screenshots unavailable\n";
         return 22;
     }
+    for (const double amount : {0.0, 0.5, 1.0}) {
+        humanize->setValue(amount, juce::sendNotificationSync);
+        const char* name = amount == 0.0 ? "skellytune-humanize-00"
+            : (amount == 0.5 ? "skellytune-humanize-50" : "skellytune-humanize-100");
+        if (!capturePose(name, .94, false)) return 34;
+    }
+    humanize->setValue(0.0, juce::sendNotificationSync);
     const auto high = skellytune::motion::headPose(.80f, .75f, .94, false);
     const auto low = skellytune::motion::headPose(.80f, .75f, 2.06, false);
     if (std::abs(high.y - low.y) < 4.0f

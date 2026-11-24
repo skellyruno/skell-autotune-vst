@@ -39,18 +39,18 @@ class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor, private juce:
     double lastAnimationTick = 0;
     double lastOrbRepaint = 0;
     juce::Image backdrop;
-    std::array<juce::Image, 42> runeSprites;
+    std::array<juce::Image, 72> runeSprites;
     void paintBackdrop(juce::Graphics &);
     int appearanceTheme = -1;
     void applyAppearance();
 
     // Knobs
-    juce::Slider speedKnob, humanizeKnob, referenceFreqKnob;
+    juce::Slider speedKnob, humanizeKnob, formantKnob, referenceFreqKnob;
 
     // Labels for knobs
     juce::Label referenceFreqLabel;
     juce::TextButton referenceDown{"-"}, referenceUp{"+"};
-    juce::Label retuneValue, humanizeValue;
+    juce::Label retuneValue, humanizeValue, formantValue;
 
     // Scale selector (western scales plus optional 24-TET and Maqam modes)
     juce::ComboBox scaleBox;
@@ -73,7 +73,7 @@ class HumHouseVocalTuneEditor : public juce::AudioProcessorEditor, private juce:
     using ComboAttach = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     std::unique_ptr<SliderAttach> speedAtt;
-    std::unique_ptr<SliderAttach> humanizeAtt, referenceFreqAtt;
+    std::unique_ptr<SliderAttach> humanizeAtt, formantAtt, referenceFreqAtt;
     std::unique_ptr<ButtonAttach> enableAtt;
     std::unique_ptr<ComboAttach> rootNoteAtt;
     int lastDisplayedVoice = -1;

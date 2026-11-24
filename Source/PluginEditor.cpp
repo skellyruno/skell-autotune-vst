@@ -80,7 +80,10 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
             "instant (hard tune), 100 = "
             "slow and natural.");
   setupKnob(humanizeKnob, "HUMANIZE",
-            "Eases off correction on sustained notes.");
+            "Eases off correction on sustained notes; the skeleton grows flesh.");
+  setupKnob(formantKnob, "FORMANT SHIFT",
+            "Vocal-tract colour: negative = deeper, positive = brighter. Double-click for neutral.");
+  formantKnob.setDoubleClickReturnValue(true, 0.0);
 
   setupKnob(referenceFreqKnob, "PITCH REF",
             "What frequency the note A4 is tuned to. 440 Hz is the standard.");
@@ -103,6 +106,17 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
 
   speedAtt = std::make_unique<SliderAttach>(apvts, "retune", speedKnob);
   humanizeAtt = std::make_unique<SliderAttach>(apvts, "humanize", humanizeKnob);
+  formantAtt = std::make_unique<SliderAttach>(apvts, "formantShift", formantKnob);
+  formantValue.setName("Formant shift number");
+  formantValue.setJustificationType(juce::Justification::centred);
+  formantValue.setInterceptsMouseClicks(false, false);
+  addAndMakeVisible(formantValue);
+  formantKnob.onValueChange = [this] {
+    const double value = formantKnob.getValue();
+    formantValue.setText((value > 0.05 ? juce::String("+") : juce::String())
+                       + juce::String(value, 1) + " st", juce::dontSendNotification);
+  };
+  formantKnob.onValueChange();
   referenceFreqAtt =
       std::make_unique<SliderAttach>(apvts, "referenceFreq", referenceFreqKnob);
   for (auto* step : {&referenceDown, &referenceUp}) {
@@ -132,6 +146,8 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   humanizeKnob.onValueChange = [this] {
     humanizeValue.setText(juce::String(juce::roundToInt(100 * humanizeKnob.getValue())),
                           juce::dontSendNotification);
+    orb.humanize = static_cast<float>(humanizeKnob.getValue());
+    orb.repaint();
   };
   speedKnob.onValueChange();
   humanizeKnob.onValueChange();
@@ -379,6 +395,7 @@ void HumHouseVocalTuneEditor::applyAppearance() {
     value->setColour(juce::Label::textColourId,
                      appearanceTheme == 0 || appearanceTheme == 3
                          ? lnf.palette.bodyText : lnf.palette.textValue);
+  formantValue.setColour(juce::Label::textColourId, lnf.palette.bodyText);
   orb.accent = lnf.palette.accentBright;
   orb.metalHigh = lnf.palette.metalHigh;
   orb.metalLow = lnf.palette.metalLow;
@@ -408,8 +425,8 @@ void HumHouseVocalTuneEditor::timerCallback() {
   const bool powerChanged = powered != lastPowered;
   if (powerChanged) {
     lastPowered = powered;
-    for (auto *control : std::array<juce::Component *, 10>{
-             &speedKnob, &humanizeKnob, &referenceFreqKnob, &rangeBox,
+    for (auto *control : std::array<juce::Component *, 11>{
+             &speedKnob, &humanizeKnob, &formantKnob, &referenceFreqKnob, &rangeBox,
              &rootNoteBox, &scaleBox, &appearanceButton, &settingsButton,
              &referenceDown, &referenceUp})
       control->setEnabled(powered);
@@ -467,7 +484,6 @@ void HumHouseVocalTuneEditor::timerCallback() {
   const bool motion = powered && !proc.getReducedMotion();
   const bool motionChanged = orb.reducedMotion == motion;
   orb.bypassed = !powered;
-  orb.targetNote = displayTargetMidi;
   orb.reducedMotion = !motion;
   const float active = motion && displayInputLevel > .002f
                            ? std::sqrt(juce::jlimit(0.0f, 1.0f, displayInputLevel * 3.5f))
@@ -502,6 +518,7 @@ void HumHouseVocalTuneEditor::timerCallback() {
     lnf.lightPhase = static_cast<float>(orb.phase);
     speedKnob.repaint();
     humanizeKnob.repaint();
+    formantKnob.repaint();
   }
 
   for (int i = 0; i < 12; ++i) {
@@ -595,7 +612,8 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
 
   panel({24, 84, 652, 286}, p.surface, 12);
   text("RETUNE", 36, 124, 160, 22, 16, p.bodyText);
-  text("HUMANIZE", 504, 124, 160, 22, 16, p.bodyText);
+  text("HUMANIZE", 512, 108, 160, 22, 16, p.bodyText);
+  text("FORMANT", 554, 313, 110, 17, 12, p.bodyText);
   text("KEY", 386, 8, 52, 14, 11, p.bodyText, juce::Justification::centredLeft);
   text("SCALE", 450, 8, 154, 14, 11, p.bodyText,
        juce::Justification::centredLeft);
@@ -613,7 +631,7 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
          9, p.textDim);
   }
   text("ALLOWED NOTES", 30, 460, 300, 18, 11, p.bodyText.withAlpha(.9f), juce::Justification::centredLeft);
-  panel({24, 496, 652, 146}, p.bgDark, 8);
+  panel({24, 496, 652, 158}, p.bgDark, 8);
 }
 
 void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
@@ -646,7 +664,9 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
     juce::Graphics::ScopedSaveState runeState(g);
     g.reduceClipRegion({64, 411, 595, 31});
     for (int i = 0; i < static_cast<int>(runeSprites.size()); ++i) {
-      const float slot = i / 42.0f;
+      constexpr int columns = 36;
+      const int column = i % columns, row = i / columns;
+      const float slot = static_cast<float>(column) / columns;
       float cluster = 0.0f;
       for (int j = 0; j < 3; ++j) {
         const float head = travel * (.025f + .014f * j) + j / 3.0f;
@@ -654,8 +674,10 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
         cluster = std::max(cluster, std::max(0.0f, 1.0f - distance * 13.0f));
       }
       const float pulse = std::max(0.0f, std::sin(travel * .83f + i * 2.399963f));
-      g.setOpacity(.28f + (.10f + .45f * energy) * cluster + .22f * energy * pulse * pulse);
-      g.drawImageAt(runeSprites[static_cast<size_t>(i)], 66 + i * 14, 413 + (i % 3) * 3);
+      g.setOpacity(juce::jlimit(0.0f, 1.0f,
+          .43f + (.12f + .36f * energy) * cluster + .18f * energy * pulse * pulse));
+      g.drawImageAt(runeSprites[static_cast<size_t>(i)],
+                    66 + column * 16 + row * 5, 412 + row * 14 + (column % 2));
     }
   }
   if (historyFrames == 0) return;
@@ -731,10 +753,12 @@ void HumHouseVocalTuneEditor::resized() {
   // 152 * 0.90 = 136.8. Both analog knobs shrink 10% while retaining
   // their original centers, UI value readouts and APVTS mapping.
   speedKnob.setBounds(rect(47, 162, 137, 137));
-  humanizeKnob.setBounds(rect(516, 162, 137, 137));
+  humanizeKnob.setBounds(rect(525, 132, 137, 137));
   retuneValue.setBounds(rect(40, 307, 152, 32));
-  humanizeValue.setBounds(rect(508, 307, 152, 32));
-  orb.setBounds(rect(215, 95, 270, 270));
+  humanizeValue.setBounds(rect(555, 273, 110, 29));
+  formantKnob.setBounds(rect(484, 282, 70, 70));
+  formantValue.setBounds(rect(555, 331, 110, 21));
+  orb.setBounds(rect(222, 102, 256, 256));
   rootNoteBox.setBounds(rect(382, 26, 62, 30));
   scaleBox.setBounds(rect(450, 26, 154, 30));
   referenceFreqKnob.setBounds(rect(527, 387, 108, 25));
@@ -754,12 +778,12 @@ void HumHouseVocalTuneEditor::resized() {
   for (int i = 0; i < 7; ++i)
     noteButtons[static_cast<size_t>(natural[i])].setBounds(
         edge(i), juce::roundToInt(507 * scale), edge(i + 1) - edge(i) - 1,
-        juce::roundToInt(122 * scale));
+        juce::roundToInt(134 * scale));
   for (int i = 0; i < 5; ++i) {
     auto &key = noteButtons[static_cast<size_t>(sharps[i])];
     key.setBounds(edge(positions[i] + 1) - juce::roundToInt(24 * scale),
                   juce::roundToInt(507 * scale), juce::roundToInt(48 * scale),
-                  juce::roundToInt(80 * scale));
+                  juce::roundToInt(88 * scale));
     key.toFront(false);
   }
 }

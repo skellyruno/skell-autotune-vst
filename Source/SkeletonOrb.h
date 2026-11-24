@@ -8,7 +8,7 @@ class SkeletonOrb : public juce::Component {
     SkeletonOrb() { setInterceptsMouseClicks(false, false); }
     juce::Colour accent{0xff86dc50}, metalHigh{0xffdeded3}, metalLow{0xff777b6e};
     float activity = 0;
-    int targetNote = -1;
+    float humanize = 0.0f; // visual morph only
     float motionLevel = 0;
     double phase = 0;
     double sweepPhase = 0;
@@ -117,6 +117,10 @@ class SkeletonOrb : public juce::Component {
             const auto boneColour = juce::Colour(0xffdbe8cc)
                                         .interpolatedWith(accent, .25f)
                                         .withAlpha(bypassed ? .3f : .85f + .15f * activity);
+            const float h = juce::jlimit(0.0f, 1.0f, humanize);
+            const float flesh = h * h * (3.0f - 2.0f * h);
+            const auto skinLight = juce::Colour(0xffd8baa0).interpolatedWith(accent, .13f);
+            const auto skinShadow = juce::Colour(0xff574337).interpolatedWith(accent, .13f);
             auto bone = [&](float x, float y, float xx, float yy, float width = 2.0f) {
                 const auto scatter = skellytune::motion::boneScatter(
                     x, y, xx, yy, width, activity, intensity, phase, reducedMotion);
@@ -128,33 +132,24 @@ class SkeletonOrb : public juce::Component {
                     g.setColour(boneColour.withAlpha(.11f * drive));
                     g.drawLine(x, y, xx, yy, width * .75f);
                 }
-                g.setColour(boneColour.interpolatedWith(accent, .17f * drive));
-                g.drawLine(x + scatter.x, y + scatter.y,
-                           xx + scatter.x, yy + scatter.y, width);
-            };
-            // Keep the skeleton visible while singing. Only the note badge changes.
-            if (targetNote >= 0) {
-                const int pitchClass = targetNote % 12;
-                if (pitchClass != shapedPitchClass) {
-                    shapedPitchClass = pitchClass;
-                    static constexpr const char* names[]{"C", "C#", "D", "D#", "E", "F",
-                                                          "F#", "G", "G#", "A", "A#", "B"};
-                    juce::GlyphArrangement glyphs;
-                    glyphs.addLineOfText(juce::Font(juce::FontOptions(90.f).withStyle("Bold")),
-                                         names[pitchClass], 0, 0);
-                    noteOutline.clear();
-                    glyphs.createPath(noteOutline);
-                    // Keep the full badge inside the 122px glass clipping circle.
-                    // The old bottom-right location was partially cut by the rim.
-                    noteOutline.scaleToFit(198, 166, 34, 33, true);
+                const float ax = x + scatter.x, ay = y + scatter.y;
+                const float bx = xx + scatter.x, by = yy + scatter.y;
+                if (flesh > .001f) {
+                    const float muscle = (width > 1.5f ? 9.0f : 3.4f) * flesh;
+                    juce::Path limb;
+                    limb.startNewSubPath(ax, ay);
+                    limb.lineTo(bx, by);
+                    g.setColour(skinShadow.withAlpha(.93f * flesh));
+                    g.strokePath(limb, juce::PathStrokeType(width + muscle,
+                        juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    g.setColour(skinLight.withAlpha(.87f * flesh));
+                    g.strokePath(limb, juce::PathStrokeType(width + muscle * .63f,
+                        juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
                 }
-                g.setColour(juce::Colour(0xff07130c).withAlpha(.80f));
-                g.fillRoundedRectangle(194, 163, 42, 40, 8);
-                g.setColour(accent.withAlpha(.42f + .22f * activity));
-                g.drawRoundedRectangle(194, 163, 42, 40, 8, 1.1f);
-                g.setColour(boneColour.withAlpha(.88f));
-                g.fillPath(noteOutline);
-            }
+                g.setColour(boneColour.interpolatedWith(accent, .17f * drive)
+                    .withMultipliedAlpha(1.0f - .94f * flesh));
+                g.drawLine(ax, ay, bx, by, width);
+            };
             // The head bounces independently of the torso. Keeping the
             // face, jaw and teeth under one transform avoids detached eyes.
             const auto head = skellytune::motion::headPose(
@@ -197,10 +192,59 @@ class SkeletonOrb : public juce::Component {
             g.drawLine(128, 73, 152, 73, 1.6f);
             for (int i = 0; i < 5; ++i)
                 g.drawLine(132 + i * 4, 71, 132 + i * 4, 77, 1.0f);
+            if (flesh > .001f) {
+                juce::Path face;
+                face.startNewSubPath(140, 39);
+                face.cubicTo(158, 39, 163, 52, 157, 64);
+                face.cubicTo(154, 74, 149, 80, 140, 82);
+                face.cubicTo(130, 80, 126, 74, 123, 64);
+                face.cubicTo(117, 52, 122, 39, 140, 39);
+                face.closeSubPath();
+                juce::ColourGradient skin(skinLight.withAlpha(flesh), 128, 44,
+                    skinShadow.withAlpha(flesh), 158, 77, false);
+                skin.addColour(.48, skinLight.darker(.18f).withAlpha(flesh));
+                g.setGradientFill(skin);
+                g.fillPath(face);
+                g.setColour(skinShadow.darker(.28f).withAlpha(.9f * flesh));
+                g.fillEllipse(128.5f, 55, 7, 3.6f);
+                g.fillEllipse(144.5f, 55, 7, 3.6f);
+                g.drawLine(140, 59, 137.7f, 66, 1.3f);
+                g.drawLine(137.7f, 66, 141.7f, 66, 1.1f);
+                g.drawLine(134, 73, 146, 73, 1.2f);
+                g.setColour(skinLight.brighter(.18f).withAlpha(.65f * flesh));
+                g.drawLine(139, 57, 139, 64, 1.0f);
+            }
             } // headState restores torso transform
+            if (flesh > .001f) {
+                juce::Path torso;
+                torso.startNewSubPath(131, 84);
+                torso.cubicTo(126, 91, 111, 88, 108, 101);
+                torso.cubicTo(108, 116, 120, 130, 122, 146);
+                torso.cubicTo(119, 157, 122, 170, 131, 172);
+                torso.lineTo(149, 172);
+                torso.cubicTo(158, 169, 161, 157, 158, 146);
+                torso.cubicTo(160, 130, 172, 116, 172, 101);
+                torso.cubicTo(169, 88, 154, 91, 149, 84);
+                torso.closeSubPath();
+                juce::ColourGradient muscle(skinLight.withAlpha(.96f * flesh), 123, 94,
+                    skinShadow.withAlpha(.96f * flesh), 164, 166, false);
+                muscle.addColour(.54, skinLight.darker(.24f).withAlpha(.96f * flesh));
+                g.setGradientFill(muscle);
+                g.fillPath(torso);
+                g.setColour(skinShadow.withAlpha(.45f * flesh));
+                g.drawLine(140, 100, 140, 142, 1.4f);
+                g.setColour(skinLight.brighter(.14f).withAlpha(.31f * flesh));
+                g.drawLine(122, 106, 130, 128, 2.0f);
+            }
             // A pair of flexible neck connectors follows the head offset
             // while all other vertebrae stay attached to the torso.
-            g.setColour(boneColour.withAlpha(.78f));
+            if (flesh > .001f) {
+                g.setColour(skinShadow.withAlpha(.90f * flesh));
+                g.drawLine(140.0f + head.x, 78.0f + head.y, 140, 92, 12.0f * flesh);
+                g.setColour(skinLight.withAlpha(.87f * flesh));
+                g.drawLine(140.0f + head.x, 78.0f + head.y, 140, 92, 8.0f * flesh);
+            }
+            g.setColour(boneColour.withAlpha(.78f * (1.0f - .92f * flesh)));
             g.drawLine(136.0f + head.x, 77.0f + head.y,
                        137.0f, 89.0f, 1.2f);
             g.drawLine(144.0f + head.x, 77.0f + head.y,
@@ -229,7 +273,7 @@ class SkeletonOrb : public juce::Component {
                     arch.cubicTo(140 + d * reach, y + 8 + breathe,
                                  140 + d * 10, y + 10,
                                  140, y + 8);
-                    g.setColour(boneColour.withAlpha(.84f + .12f * activity));
+                    g.setColour(boneColour.withAlpha((.84f + .12f * activity) * (1.0f - .94f * flesh)));
                     g.strokePath(arch, juce::PathStrokeType(1.35f));
                 }
             }
@@ -255,7 +299,7 @@ class SkeletonOrb : public juce::Component {
             bone(124, 199, 119 - kick, 231 - .6f * kick);
             bone(150, 163, 156, 199);
             bone(156, 199, 161, 231);
-            if (activity < .2f)
+            if (activity < .2f && flesh < .7f)
             for (auto point : {juce::Point<float>(102, 139 + sway), juce::Point<float>(178, 139 - sway),
                                juce::Point<float>(124, 199), juce::Point<float>(156, 199)})
                 g.drawEllipse(point.x - 3, point.y - 3, 6, 6, 1.2f);
@@ -264,14 +308,30 @@ class SkeletonOrb : public juce::Component {
             bone(161, 231, 172, 237);
             bone(172, 237, 155, 237);
         }
+        // Front-surface reflection above the character.
+        {
+            juce::Graphics::ScopedSaveState frontGlass(g);
+            juce::Path clip;
+            clip.addEllipse(18, 18, 244, 244);
+            g.reduceClipRegion(clip);
+            juce::ColourGradient glint(juce::Colours::white.withAlpha(.21f), 67, 39,
+                                        juce::Colours::white.withAlpha(0.0f), 125, 113, false);
+            g.setGradientFill(glint);
+            juce::Path reflection;
+            reflection.addEllipse(45, 39, 110, 34);
+            reflection.applyTransform(juce::AffineTransform::rotation(-.60f, 100, 56));
+            g.fillPath(reflection);
+            juce::Path lowerRim;
+            lowerRim.addCentredArc(140, 140, 118, 118, 0, 2.0f, 3.8f, true);
+            g.setColour(accent.withAlpha(.22f + .12f * activity));
+            g.strokePath(lowerRim, juce::PathStrokeType(2.0f));
+        }
     }
 
     void resized() override { shell = {}; }
 
   private:
     juce::Image shell;
-    int shapedPitchClass = -1;
-    juce::Path noteOutline;
     juce::Colour cachedAccent, cachedHigh, cachedLow;
 
     void paintShell(juce::Graphics &g) {
@@ -284,8 +344,10 @@ class SkeletonOrb : public juce::Component {
         g.fillEllipse(11, 11, 258, 258);
         juce::ColourGradient glass(juce::Colour(0xff346a46), 96, 74, juce::Colour(0xff010302), 238, 243,
                                    true);
-        glass.addColour(.36, juce::Colour(0xff153723));
-        glass.addColour(.68, juce::Colour(0xff081b10));
+        glass.addColour(.19, juce::Colour(0xff285b3c));
+        glass.addColour(.40, juce::Colour(0xff163623));
+        glass.addColour(.72, juce::Colour(0xff07190f));
+        glass.addColour(.93, juce::Colour(0xff020704));
         g.setGradientFill(glass);
         g.fillEllipse(18, 18, 244, 244);
         // Cached refractive layers increase spherical depth at low GPU cost.
@@ -297,6 +359,15 @@ class SkeletonOrb : public juce::Component {
                                     juce::Colours::black.withAlpha(.27f), 252, 242, true);
         g.setGradientFill(shadow);
         g.fillEllipse(20, 20, 240, 240);
+        juce::ColourGradient occlusion(juce::Colours::black.withAlpha(0.0f), 140, 140,
+                                      juce::Colours::black.withAlpha(.72f), 262, 140, true);
+        occlusion.addColour(.68, juce::Colours::black.withAlpha(.05f));
+        g.setGradientFill(occlusion);
+        g.fillEllipse(18, 18, 244, 244);
+        juce::ColourGradient bounce(accent.withAlpha(.18f), 160, 228,
+                                    accent.withAlpha(0.0f), 160, 158, true);
+        g.setGradientFill(bounce);
+        g.fillEllipse(92, 158, 136, 94);
         juce::Path clip;
         clip.addEllipse(18, 18, 244, 244);
         {
