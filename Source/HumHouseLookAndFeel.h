@@ -117,6 +117,29 @@ public:
       g.strokePath(path, juce::PathStrokeType(thickness,
           juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     };
+    if (small) {
+      // Recessed matte black cap within the panel's mounting pocket.
+      const float face = r * .83f;
+      juce::ColourGradient insetFace(juce::Colour(0xff292c2a), cx, cy-face,
+          juce::Colour(0xff070908), cx, cy+face, false);
+      insetFace.addColour(.55, juce::Colour(0xff131614));
+      g.setGradientFill(insetFace);
+      g.fillEllipse(cx-face, cy-face, 2*face, 2*face);
+      g.setColour(juce::Colour(0xff3b403d));
+      g.drawEllipse(cx-face, cy-face, 2*face, 2*face, .65f);
+      ring(r*.94f, start, end, juce::Colour(0xff242924), .65f);
+      ring(r*.94f, juce::jmin(centre,angle), juce::jmax(centre,angle),
+          active.withAlpha(.66f), .95f);
+      g.setColour(active.withAlpha(.9f));
+      g.drawLine(cx+std::sin(angle)*face*.42f, cy-std::cos(angle)*face*.42f,
+                 cx+std::sin(angle)*face*.87f, cy-std::cos(angle)*face*.87f,
+                 juce::jmax(.8f,1.35f*scale));
+      if (slider.isMouseOverOrDragging() || slider.hasKeyboardFocus(true)) {
+        g.setColour(active.withAlpha(.6f));
+        g.drawEllipse(cx-r, cy-r, 2*r, 2*r, .8f);
+      }
+      return;
+    }
     // Smooth turned-metal collar, matte face and one clear position index.
     // No lathe rings, spokes, grip cuts, centre badge or decorative face marks.
     g.setColour(juce::Colours::black.withAlpha(.7f));
@@ -236,7 +259,7 @@ public:
       g.setGradientFill(darkFace);
       g.fillRoundedRectangle(b, 3 * scale);
       g.setColour((hover || button.hasKeyboardFocus(true))
-                  ? palette.accentBright : juce::Colour(0xff596059));
+                  ? palette.accentBright : juce::Colour(0xff363d38));
       g.drawRoundedRectangle(b, 3 * scale, .85f * scale);
       if (down) {
         g.setColour(juce::Colours::black.withAlpha(.24f));
@@ -353,11 +376,14 @@ public:
   void drawButtonText(juce::Graphics &g, juce::TextButton &button, bool,
                       bool) override {
     if (static_cast<bool>(button.getProperties().getWithDefault("a4StackedStep", false))) {
-      g.setColour(button.isEnabled() ? juce::Colour(0xffedf2e9)
-                                     : juce::Colour(0xff777f78));
-      g.setFont(juce::Font(juce::FontOptions(13 * scale).withStyle("Bold")));
-      g.drawText(button.getButtonText(), button.getLocalBounds(),
-                 juce::Justification::centred, false);
+      // Center actual strokes, not font glyph metrics, at every scale.
+      const auto c = button.getLocalBounds().toFloat().getCentre();
+      const float arm = 3.0f * scale;
+      g.setColour(button.isEnabled() ? juce::Colour(0xffc7d0c8)
+                                     : juce::Colour(0xff626962));
+      g.drawLine(c.x-arm, c.y, c.x+arm, c.y, juce::jmax(.8f,1.15f*scale));
+      if (button.getButtonText() == "+")
+        g.drawLine(c.x, c.y-arm, c.x, c.y+arm, juce::jmax(.8f,1.15f*scale));
       return;
     }
     const int key =

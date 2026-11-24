@@ -470,7 +470,7 @@ void HumHouseVocalTuneEditor::timerCallback() {
     heatmapDetected[slot] = displayDetectedHz;
     heatmapTarget[slot] = displayTargetHz;
     heatmapWriteIdx = (heatmapWriteIdx + 1) % kHeatmapWidth;
-    repaint(juce::Rectangle<float>(24, 386, 652, 58).transformedBy(juce::AffineTransform::scale(scaleFactor()))
+    repaint(juce::Rectangle<float>(24, 386, 652, 48).transformedBy(juce::AffineTransform::scale(scaleFactor()))
                 .getSmallestIntegerContainer());
   }
 
@@ -514,7 +514,7 @@ void HumHouseVocalTuneEditor::timerCallback() {
       now - lastOrbRepaint >= (orb.activity > 0.015f ? 30.0 : 65.0))) {
     lastOrbRepaint = now;
     orb.repaint();
-    repaint(juce::Rectangle<float>(64, 410, 595, 32)
+    repaint(juce::Rectangle<float>(50, 408, 604, 24)
                 .transformedBy(juce::AffineTransform::scale(scaleFactor()))
                 .getSmallestIntegerContainer());
   }
@@ -629,19 +629,29 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
        juce::Justification::centredLeft);
   text("INPUT TYPE", 234, 8, 140, 14, 11, p.bodyText,
        juce::Justification::centredLeft);
-  // Narrow instrument readout with a central Formant dial and two rune banks.
-  panel({60, 380, 580, 64}, p.bgDark, 9);
-  text("ORIGINAL", 88, 383, 64, 24, 10, p.heatCold);
-  text("TARGET", 196, 383, 60, 24, 10, p.heatWarm);
-  text("FORMANT", 308, 381, 84, 12, 9, p.bodyText);
-  text("A4", 462, 383, 30, 24, 10, p.textDim);
+  // Full-width rectangular instrument strip; 48px high instead of 64.
+  panel({24, 386, 652, 48}, p.bgDark, 3);
+  text("ORIGINAL", 51, 387, 66, 20, 10, p.heatCold);
+  text("TARGET", 164, 387, 60, 20, 10, p.heatWarm);
+  text("FORMANT", 274, 387, 56, 15, 9, p.bodyText);
+  text("A4", 481, 387, 30, 20, 10, p.textDim);
+  // Black recessed mounting pocket, no raised housing. The dial remains
+  // centered in the strip and its left/right markers are engraved strokes.
+  g.setColour(juce::Colours::black);
+  g.fillEllipse(331, 391, 38, 38);
+  g.setColour(p.metalLow.withAlpha(.40f));
+  g.drawEllipse(331, 391, 38, 38, .75f);
+  g.setColour(p.textDim.withAlpha(.88f));
+  g.drawLine(319, 413, 325, 413, 1.15f);
+  g.drawLine(375, 413, 381, 413, 1.15f);
+  g.drawLine(378, 410, 378, 416, 1.15f);
   for (int midi : {36, 84}) {
-    const float y = 436 - (midi - 36) * 18 / 48.0f;
-    g.setColour(p.accentDeep.withAlpha(.45f));
-    g.drawLine(88, y, 307, y, .7f);
-    g.drawLine(393, y, 622, y, .7f);
-    text("C" + juce::String(midi / 12 - 1), 65, static_cast<int>(y) - 6,
-         22, 12, 9, p.textDim);
+    const float y = 429 - (midi - 36) * 14 / 48.0f;
+    g.setColour(p.accentDeep.withAlpha(.40f));
+    g.drawLine(50, y, 268, y, .65f);
+    g.drawLine(432, y, 654, y, .65f);
+    text("C" + juce::String(midi / 12 - 1), 29, static_cast<int>(y) - 5,
+         20, 10, 8, p.textDim);
   }
   text("ALLOWED NOTES", 30, 460, 300, 18, 11, p.bodyText.withAlpha(.9f), juce::Justification::centredLeft);
   panel({24, 496, 652, 158}, p.bgDark, 8);
@@ -667,16 +677,16 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
     g.setColour(colour);
     g.setFont(juce::Font(juce::FontOptions(12.0f).withStyle("Bold")));
     g.drawText(kNoteNames[midi % 12] + juce::String(midi / 12 - 1),
-               x, 383, 34, 24, juce::Justification::centred);
+               x, 387, 34, 20, juce::Justification::centred);
   };
-  drawNote(displayDetectedMidi, 153, p.heatCold);
-  drawNote(displayTargetMidi, 258, p.heatWarm);
-  if (g.getClipBounds().intersects(juce::Rectangle<int>(64, 410, 595, 32))) {
+  drawNote(displayDetectedMidi, 118, p.heatCold);
+  drawNote(displayTargetMidi, 230, p.heatWarm);
+  if (g.getClipBounds().intersects(juce::Rectangle<int>(50, 408, 604, 24))) {
     const float travel = orb.reducedMotion ? 0.0f : static_cast<float>(orb.phase);
     const float energy = orb.reducedMotion ? 0.0f : orb.activity;
     juce::Graphics::ScopedSaveState runeState(g);
-    g.reduceClipRegion(juce::Rectangle<int>(88, 411, 219, 31).getUnion(juce::Rectangle<int>(393, 411, 229, 31)));
-    g.excludeClipRegion({307, 411, 86, 31});
+    g.reduceClipRegion({50, 408, 604, 24});
+    g.excludeClipRegion({268, 408, 164, 24});
     for (int i = 0; i < static_cast<int>(runeSprites.size()); ++i) {
       constexpr int columns = 36;
       const int column = i % columns, row = i / columns;
@@ -691,24 +701,24 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
       g.setOpacity(juce::jlimit(0.0f, 1.0f,
           .43f + (.12f + .36f * energy) * cluster + .18f * energy * pulse * pulse));
       const int bankColumn = column % 18;
-      const int x = (column < 18 ? 88 : 393) + bankColumn * 12;
+      const int x = (column < 18 ? 50 : 432) + bankColumn * 12;
       const auto& glyph = runeSprites[static_cast<size_t>(i)];
       const float size = static_cast<float>(juce::jmin(10, glyph.getWidth()));
       g.drawImage(glyph, juce::Rectangle<float>(static_cast<float>(x),
-          412.0f + row * 14 + (column % 2), size, size));
+          408.0f + row * 11 + (column % 2), size, size));
     }
   }
   if (historyFrames == 0) return;
   const auto pitchY = [](float hz) {
     const float midi = 69 + 12 * std::log2(juce::jmax(1.0f, hz) / 440.0f);
-    return juce::jlimit(418.0f, 436.0f, 436 - (midi - 36) * 18 / 48);
+    return juce::jlimit(415.0f, 429.0f, 429 - (midi - 36) * 14 / 48);
   };
   juce::Path sung, target;
   bool sungOpen = false, targetOpen = false;
   for (int i = 0; i < kHeatmapWidth; ++i) {
     const auto index =
         static_cast<size_t>((heatmapWriteIdx + i) % kHeatmapWidth);
-    const float x = 88 + i * 534.0f / (kHeatmapWidth - 1);
+    const float x = 50 + i * 604.0f / (kHeatmapWidth - 1);
     const float original = heatmapDetected[index],
                 corrected = heatmapTarget[index];
     if (original >= 35) {
@@ -729,8 +739,8 @@ void HumHouseVocalTuneEditor::paint(juce::Graphics &g) {
       targetOpen = false;
   }
   juce::Graphics::ScopedSaveState traceClip(g);
-  g.reduceClipRegion({88, 411, 534, 31});
-  g.excludeClipRegion({307, 411, 86, 31});
+  g.reduceClipRegion({50, 408, 604, 24});
+  g.excludeClipRegion({268, 408, 164, 24});
   // Draw the wider target first so both colours remain visible where notes agree.
   g.setColour(p.heatWarm.withAlpha(.88f));
   g.strokePath(target, juce::PathStrokeType(3.1f));
@@ -758,7 +768,7 @@ void HumHouseVocalTuneEditor::paintOverChildren(juce::Graphics &g) {
     g.fillAll();
     g.setColour(juce::Colour(0xff778079));
     g.setFont(juce::Font(juce::FontOptions(12.0f)));
-    g.drawText("POWER OFF", 60, 380, 580, 64, juce::Justification::centred);
+    g.drawText("POWER OFF", 24, 386, 652, 48, juce::Justification::centred);
   }
 }
 
@@ -777,14 +787,14 @@ void HumHouseVocalTuneEditor::resized() {
   humanizeKnob.setBounds(rect(516, 162, 137, 137));
   retuneValue.setBounds(rect(40, 307, 152, 32));
   humanizeValue.setBounds(rect(508, 307, 152, 32));
-  formantKnob.setBounds(rect(332, 393, 36, 36));
-  formantValue.setBounds(rect(310, 428, 80, 15));
+  formantKnob.setBounds(rect(333, 393, 34, 34));
+  formantValue.setBounds(rect(385, 387, 44, 18));
   orb.setBounds(rect(222, 102, 256, 256));
   rootNoteBox.setBounds(rect(382, 26, 62, 30));
   scaleBox.setBounds(rect(450, 26, 154, 30));
-  referenceFreqKnob.setBounds(rect(493, 383, 104, 25));
-  referenceUp.setBounds(rect(605, 381, 25, 15));   // + above
-  referenceDown.setBounds(rect(605, 398, 25, 15)); // - below
+  referenceFreqKnob.setBounds(rect(514, 387, 108, 21));
+  referenceUp.setBounds(rect(637, 388, 28, 12));   // + above
+  referenceDown.setBounds(rect(637, 402, 28, 12)); // - below
   referenceFreqLabel.setVisible(false);
   rootNoteLabel.setVisible(false);
   appearanceButton.setBounds(rect(30, 22, 36, 38));

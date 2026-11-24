@@ -170,10 +170,13 @@ int main(int argc, char** argv)
         }
         const float layoutScale = scene.width / 700.0f;
         if (std::abs(skeleton->getWidth() - juce::roundToInt(256 * layoutScale)) > 1
-            || std::abs(formant->getWidth() - juce::roundToInt(36 * layoutScale)) > 1
+            || std::abs(formant->getWidth() - juce::roundToInt(34 * layoutScale)) > 1
             || std::abs(formant->getBounds().getCentreX() - scene.width / 2) > 1
             || formant->getY() < skeleton->getBottom()
-            || formant->getBottom() > juce::roundToInt(430 * layoutScale)
+            || formant->getY() < juce::roundToInt(386 * layoutScale)
+            || formant->getBottom() > juce::roundToInt(434 * layoutScale)
+            || !juce::Rectangle<int>(juce::roundToInt(24*layoutScale), juce::roundToInt(386*layoutScale),
+                   juce::roundToInt(652*layoutScale), juce::roundToInt(48*layoutScale)).contains(formantNumber->getBounds())
             || formant->getBounds().intersects(humanize->getBounds())
             || humanize->getY() != speed->getY()
             || humanizeNumber->getY() != speedNumber->getY()
