@@ -33,6 +33,7 @@ int main(int argc, char** argv)
     juce::Button* cycleTheme = nullptr;
     juce::Label* speedNumber = nullptr;
     juce::Label* humanizeNumber = nullptr;
+    juce::Label* formantNumber = nullptr;
     SkeletonOrb* skeleton = nullptr;
     std::array<juce::Button*, 12> piano{};
     for (int i = 0; i < editor->getNumChildComponents(); ++i)
@@ -58,6 +59,8 @@ int main(int argc, char** argv)
             speedNumber = dynamic_cast<juce::Label*>(child);
         if (child->getName() == "Humanize number")
             humanizeNumber = dynamic_cast<juce::Label*>(child);
+        if (child->getName() == "Formant shift number")
+            formantNumber = dynamic_cast<juce::Label*>(child);
         static const juce::StringArray names{"C", "C#", "D", "D#", "E", "F",
                                               "F#", "G", "G#", "A", "A#", "B"};
         for (int key = 0; key < 12; ++key)
@@ -105,12 +108,17 @@ int main(int argc, char** argv)
     speed->setValue(1.0, juce::sendNotificationSync);
 
     auto* storedFormant = processor.getAPVTS().getRawParameterValue("formantShift");
-    if (!storedFormant || !near(formant->getMinimum(), -4.0)
-        || !near(formant->getMaximum(), 4.0) || !near(storedFormant->load(), 0.0))
+    if (!storedFormant || !formantNumber || !near(formant->getMinimum(), -4.0)
+        || !near(formant->getMaximum(), 4.0) || !near(storedFormant->load(), 0.0)
+        || !near(formant->valueToProportionOfLength(-4.0), 0.0)
+        || !near(formant->valueToProportionOfLength(0.0), 0.5)
+        || !near(formant->valueToProportionOfLength(4.0), 1.0))
         return 30;
     for (const double value : {-4.0, 2.5, 0.0}) {
         formant->setValue(value, juce::sendNotificationSync);
-        if (!near(storedFormant->load(), value)) return 31;
+        if (!near(storedFormant->load(), value)
+            || !formantNumber->getText().contains(value < 0 ? "DEEPER"
+                    : (value > 0 ? "BRIGHTER" : "NEUTRAL"))) return 31;
     }
     for (const double value : {1.0, .5, 0.0}) {
         humanize->setValue(value, juce::sendNotificationSync);
@@ -348,6 +356,13 @@ int main(int argc, char** argv)
         if (!capturePose(name, .94, false)) return 34;
     }
     humanize->setValue(0.0, juce::sendNotificationSync);
+    for (const double amount : {-4.0, 4.0}) {
+        formant->setValue(amount, juce::sendNotificationSync);
+        if (!capturePose(amount < 0 ? "skellytune-formant-deeper"
+                                   : "skellytune-formant-brighter", .94, false))
+            return 36;
+    }
+    formant->setValue(0.0, juce::sendNotificationSync);
     const auto high = skellytune::motion::headPose(.80f, .75f, .94, false);
     const auto low = skellytune::motion::headPose(.80f, .75f, 2.06, false);
     if (std::abs(high.y - low.y) < 4.0f

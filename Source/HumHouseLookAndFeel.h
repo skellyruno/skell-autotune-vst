@@ -175,14 +175,20 @@ public:
     metal.addColour(.82, palette.metalLow.darker(.22f));
     g.setGradientFill(metal);
     g.fillEllipse(cx - face, cy - face, 2 * face, 2 * face);
-    for (int i = 0; i < 18; ++i) {
-      const float angle = i * juce::MathConstants<float>::twoPi / 18;
-      g.setColour(juce::Colours::white.withAlpha(i % 2 == 0 ? .05f : .015f));
-      g.drawLine(cx + std::sin(angle) * face * .24f,
-                 cy - std::cos(angle) * face * .24f,
-                 cx + std::sin(angle) * face * .96f,
-                 cy - std::cos(angle) * face * .96f, .7f * detailScale);
+    // Fine circular lathe marks, rather than prominent straight spokes.
+    // The physical cap reads as machined metal even at the smallest scale.
+    for (int ring = 1; ring <= 12; ++ring) {
+      const float radius = face * (.22f + .058f * ring);
+      g.setColour((ring % 3 == 0 ? juce::Colours::black : juce::Colours::white)
+                      .withAlpha(ring % 3 == 0 ? .085f : .045f));
+      g.drawEllipse(cx - radius, cy - radius, 2 * radius, 2 * radius,
+                    .55f * detailScale);
     }
+    juce::Path bevelHighlight;
+    bevelHighlight.addCentredArc(cx, cy, face * .975f, face * .975f, 0,
+                                 -1.48f, .44f, true);
+    g.setColour(juce::Colours::white.withAlpha(.46f));
+    g.strokePath(bevelHighlight, juce::PathStrokeType(1.2f * detailScale));
     // Precision concentric lathe cuts and specular metal.
     for (int ring = 0; ring < 4; ++ring) {
       const float inset = (2.0f + 3.1f * ring) * detailScale;
@@ -205,9 +211,15 @@ public:
     for (int i = 0; i < 40; ++i) {
       const float a = i * juce::MathConstants<float>::twoPi / 40;
       g.setColour(juce::Colours::black.withAlpha(.52f));
-      g.drawLine(cx + std::sin(a) * face * .94f, cy - std::cos(a) * face * .94f,
-                 cx + std::sin(a) * face * .985f,
-                 cy - std::cos(a) * face * .985f, .8f * detailScale);
+      g.drawLine(cx + std::sin(a) * face * .92f, cy - std::cos(a) * face * .92f,
+                 cx + std::sin(a) * face * 1.045f,
+                 cy - std::cos(a) * face * 1.045f, .8f * detailScale);
+      const float reflected = a + .02f;
+      g.setColour(juce::Colours::white.withAlpha(.16f));
+      g.drawLine(cx + std::sin(reflected) * face * .92f,
+                 cy - std::cos(reflected) * face * .92f,
+                 cx + std::sin(reflected) * face * 1.045f,
+                 cy - std::cos(reflected) * face * 1.045f, .6f * detailScale);
     }
     g.setColour(juce::Colours::black.withAlpha(.45f));
     g.drawEllipse(cx - face + 2 * detailScale, cy - face + 2 * detailScale,

@@ -86,6 +86,7 @@ if(SKELLYTUNE_DSP_TESTS_ONLY)
         live_spectral_stereo_regression
         harmonic_evidence_regression
         cycle_formant_energy_regression
+        formant_direction_regression
         source_epoch_regression
         mode_rate_matrix_regression
         spectral_evaluator_regression

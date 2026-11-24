@@ -82,8 +82,13 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   setupKnob(humanizeKnob, "HUMANIZE",
             "Eases off correction on sustained notes; the skeleton grows flesh.");
   setupKnob(formantKnob, "FORMANT SHIFT",
-            "Vocal-tract colour: negative = deeper, positive = brighter. Double-click for neutral.");
+            "Shift vocal resonance independently of the tuned note. "
+            "Turn left / down for deeper, darker tone; right / up for higher, brighter tone. "
+            "0 st is neutral; double-click to reset. Formant Preserve is a separate setting.");
   formantKnob.setDoubleClickReturnValue(true, 0.0);
+  formantKnob.setMouseDragSensitivity(150);
+  formantKnob.setNumDecimalPlacesToDisplay(1);
+  formantKnob.setTitle("Formant shift: deeper to brighter");
   formantKnob.getProperties().set("bipolarDial", true);
 
   setupKnob(referenceFreqKnob, "PITCH REF",
@@ -114,8 +119,11 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   addAndMakeVisible(formantValue);
   formantKnob.onValueChange = [this] {
     const double value = formantKnob.getValue();
-    formantValue.setText((value > 0.05 ? juce::String("+") : juce::String())
-                       + juce::String(value, 1) + " st", juce::dontSendNotification);
+    const juce::String character = value < -0.05 ? "DEEPER"
+        : (value > 0.05 ? "BRIGHTER" : "NEUTRAL");
+    const auto amount = (value > 0.05 ? juce::String("+") : juce::String())
+                       + juce::String(value, 1) + " st";
+    formantValue.setText(amount + "  " + character, juce::dontSendNotification);
   };
   formantKnob.onValueChange();
   referenceFreqAtt =
@@ -566,9 +574,12 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
     {
       juce::Graphics::ScopedSaveState clippedPanel(g);
       g.reduceClipRegion(bounds.toNearestInt());
-      for (int y = juce::roundToInt(bounds.getY() + 6.0f);
-           y < juce::roundToInt(bounds.getBottom() - 3.0f); y += 9) {
-        g.setColour(p.metalHigh.withAlpha(.022f));
+      // Fine, irregular brushed-metal tooling rather than broad grid lines.
+      // Cached once in the backdrop, never on the audio thread.
+      for (int y = juce::roundToInt(bounds.getY() + 5.0f);
+           y < juce::roundToInt(bounds.getBottom() - 3.0f); y += 3) {
+        const float shade = .009f + .009f * ((y % 7) / 6.0f);
+        g.setColour(p.metalHigh.withAlpha(shade));
         g.drawHorizontalLine(y, bounds.getX() + radius,
                              bounds.getRight() - radius);
       }
@@ -614,7 +625,13 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   panel({24, 84, 652, 286}, p.surface, 12);
   text("RETUNE", 36, 124, 160, 22, 16, p.bodyText);
   text("HUMANIZE", 514, 108, 159, 22, 16, p.bodyText);
-  text("FORMANT", 554, 313, 110, 17, 12, p.bodyText);
+  // Formant has its own compact engraved instrument scale, with ample
+  // clearance from the adjacent Humanize readout and the orb.
+  text("FORMANT", 554, 307, 110, 18, 12, p.bodyText);
+  text("−", 480, 346, 13, 15, 11, p.textDim);
+  text("+", 545, 346, 13, 15, 11, p.textDim);
+  g.setColour(p.metalHigh.withAlpha(.12f));
+  g.drawHorizontalLine(328, 564, 654);
   text("KEY", 386, 8, 52, 14, 11, p.bodyText, juce::Justification::centredLeft);
   text("SCALE", 450, 8, 154, 14, 11, p.bodyText,
        juce::Justification::centredLeft);
@@ -758,7 +775,7 @@ void HumHouseVocalTuneEditor::resized() {
   retuneValue.setBounds(rect(40, 307, 152, 32));
   humanizeValue.setBounds(rect(525, 273, 137, 29));
   formantKnob.setBounds(rect(484, 282, 70, 70));
-  formantValue.setBounds(rect(555, 331, 110, 21));
+  formantValue.setBounds(rect(552, 331, 116, 23));
   orb.setBounds(rect(222, 102, 256, 256));
   rootNoteBox.setBounds(rect(382, 26, 62, 30));
   scaleBox.setBounds(rect(450, 26, 154, 30));

@@ -102,6 +102,20 @@ class SkeletonOrb : public juce::Component {
                     g.strokePath(arc, juce::PathStrokeType(2.0f));
                     g.setColour(juce::Colours::white.withAlpha(.40f * power));
                     g.strokePath(arc, juce::PathStrokeType(.65f));
+                    // One small, bounded branch gives the discharge a more
+                    // convincing electrical silhouette without strobing.
+                    const float forkY = y0 + (i == 2 ? 27.0f : 36.0f);
+                    const float forkX = x0 + direction * 4.2f
+                         + 8.0f * std::sin(p * 2.35f + i * 2.13f + 3 * 2.17f);
+                    juce::Path fork;
+                    fork.startNewSubPath(forkX, forkY);
+                    fork.lineTo(forkX - direction * 12.0f, forkY + 7.0f);
+                    fork.lineTo(forkX - direction * 7.0f, forkY + 16.0f);
+                    fork.lineTo(forkX - direction * 20.0f, forkY + 24.0f);
+                    g.setColour(accent.withAlpha(.25f * power));
+                    g.strokePath(fork, juce::PathStrokeType(1.8f));
+                    g.setColour(accent.brighter(.4f).withAlpha(.30f * power));
+                    g.strokePath(fork, juce::PathStrokeType(.6f));
                 }
             }
             juce::ColourGradient innerHalo(accent.withAlpha(.025f + .075f * activity),
@@ -342,13 +356,20 @@ class SkeletonOrb : public juce::Component {
             juce::Path clip;
             clip.addEllipse(18, 18, 244, 244);
             g.reduceClipRegion(clip);
-            juce::ColourGradient glint(juce::Colours::white.withAlpha(.21f), 67, 39,
-                                        juce::Colours::white.withAlpha(0.0f), 125, 113, false);
+            // The old broad oval looked painted onto the glass. A tapered
+            // upper specular crescent and a soft interior glint imply curvature.
+            juce::ColourGradient glint(juce::Colours::white.withAlpha(.13f), 66, 35,
+                                        juce::Colours::white.withAlpha(0.0f), 126, 108, false);
             g.setGradientFill(glint);
             juce::Path reflection;
-            reflection.addEllipse(45, 39, 110, 34);
+            reflection.addEllipse(48, 40, 101, 28);
             reflection.applyTransform(juce::AffineTransform::rotation(-.60f, 100, 56));
             g.fillPath(reflection);
+            juce::Path crescent;
+            crescent.addCentredArc(140, 140, 112, 112, 0, -1.12f, -.25f, true);
+            g.setColour(juce::Colours::white.withAlpha(.30f));
+            g.strokePath(crescent, juce::PathStrokeType(2.5f,
+                juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
             juce::Path lowerRim;
             lowerRim.addCentredArc(140, 140, 118, 118, 0, 2.0f, 3.8f, true);
             g.setColour(accent.withAlpha(.22f + .12f * activity));
