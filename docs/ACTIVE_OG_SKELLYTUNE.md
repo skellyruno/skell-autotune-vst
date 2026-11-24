@@ -86,3 +86,21 @@ than rewritten as if they described the current 52-test candidate.
 The current exact-head `f39a51e` passed [CI #45093669638](https://github.com/skellyruno/skell-autotune-vst/actions/runs/45093669638): 52/52 DSP cases, Windows VST3 target, 17/17 pluginval tests at strictness 5, strict packaging and native JUCE themed/active-state snapshots. The active-state screenshot was manually inspected: chest ribs have continuous curves and the skeleton remains intact. This does not establish FL Studio host performance or real vocal quality.
 
 An informational CI step now executes the already-existing `realtime_stress_benchmark` (previously only compiled) and uploads a synthetic callback CSV. Matrix: 44.1 kHz/127-sample Standard; 48 kHz/128-sample Standard/Low Latency with formants off/on; 96 kHz/512-sample Low Latency. The signal is generated harmonics with fast ±pitch motion, 25ms formant automation, and a 0.5s warmup; `duty`, `p99_deadline_fraction`, float peaks and missed deadlines are measured on a shared Ubuntu runner. **Synthetic CI percentages are noisy and not direct measurements of user DAW CPU or real dry vocals.** Do not infer a speedup from those values without before/after runs on the same host. Exact-head new run pending.
+
+
+## 2026-11-23 — owner-authorized Windows VST3 engineering download
+
+Owner requested removal of the preview-binary artifact restriction for
+installing and testing OG SkellyTune. The upload guard now additionally
+allows this public repository's own PR **#10** from branch
+`fix/skellytune-og-trusted-motion-20261122`. All other public PRs
+and forks remain blocked; official releases continue to require legal,
+commercial and identity approval, which is still pending. This is a
+**testing-only** preview and not an approved sale/public release.
+
+The Windows workflow still builds, runs native editor smoke, validates
+pluginval strictness 5, and packages a checksum-verifiable AMD64 VST3
+ZIP. The offline DSP regression must also pass before the downloaded
+exact-head artifact is shared. Artifacts in this PUBLIC repository can
+be accessible to others for up to 30 days. Do not claim FL Studio
+roundtrip or real vocal listening from CI alone.

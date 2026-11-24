@@ -129,8 +129,10 @@ jobs:
           --bundle build/HumHouseVocalTune_artefacts/Release/VST3/SkellyTune.vst3
           --output artifacts/SkellyTune-Windows-x64.zip
 
+      # Owner requested downloadable engineering test build for PR #10.
+      # Unrelated public PRs/forks remain blocked; releases need approval.
       - name: Upload verified Windows VST3 preview
-        if: github.repository_visibility == 'private' || github.event_name == 'release'
+        if: github.repository_visibility == 'private' || github.event_name == 'release' || (github.event_name == 'pull_request' && github.event.pull_request.number == 10 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/skellytune-og-trusted-motion-20261122')
         uses: actions/upload-artifact@v6
         with:
           name: SkellyTune-Windows-VST3
