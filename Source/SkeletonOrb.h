@@ -128,21 +128,26 @@ class SkeletonOrb : public juce::Component {
                     : juce::jlimit(0.0f, 1.0f, activity * intensity);
                 // A faint anchored bone outline keeps the figure identifiable
                 // while the brighter complete stroke scatters independently.
-                if (drive > .20f && width > 1.5f) {
-                    g.setColour(boneColour.withAlpha(.11f * drive));
+                if (drive > .20f && width > 1.5f && flesh < .99f) {
+                    g.setColour(boneColour.withAlpha(.11f * drive * (1.0f - flesh)));
                     g.drawLine(x, y, xx, yy, width * .75f);
                 }
-                const float ax = x + scatter.x, ay = y + scatter.y;
-                const float bx = xx + scatter.x, by = yy + scatter.y;
+                // Bare bones scatter exactly as before; flesh reconnects the joints.
+                const float separation = (1.0f - flesh) * (1.0f - flesh);
+                const float ax = x + scatter.x * separation, ay = y + scatter.y * separation;
+                const float bx = xx + scatter.x * separation, by = yy + scatter.y * separation;
                 if (flesh > .001f) {
-                    const float muscle = (width > 1.5f ? 9.0f : 3.4f) * flesh;
+                    const float muscle = (width > 1.5f ? 13.0f : 3.4f) * flesh;
                     juce::Path limb;
                     limb.startNewSubPath(ax, ay);
                     limb.lineTo(bx, by);
                     g.setColour(skinShadow.withAlpha(.93f * flesh));
                     g.strokePath(limb, juce::PathStrokeType(width + muscle,
                         juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                    g.setColour(skinLight.withAlpha(.87f * flesh));
+                    juce::ColourGradient skinVolume(skinLight.withAlpha(.96f * flesh), ax - 5.0f, ay,
+                        skinShadow.withAlpha(.96f * flesh), ax + 9.0f, ay, false);
+                    skinVolume.addColour(.36, skinLight.withAlpha(.96f * flesh));
+                    g.setGradientFill(skinVolume);
                     g.strokePath(limb, juce::PathStrokeType(width + muscle * .63f,
                         juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
                 }
@@ -152,8 +157,11 @@ class SkeletonOrb : public juce::Component {
             };
             // The head bounces independently of the torso. Keeping the
             // face, jaw and teeth under one transform avoids detached eyes.
-            const auto head = skellytune::motion::headPose(
+            auto head = skellytune::motion::headPose(
                 activity, motionLevel, phase, reducedMotion);
+            head.x *= 1.0f - .24f * flesh;
+            head.y *= 1.0f - .40f * flesh;
+            head.angle *= 1.0f - .20f * flesh;
             {
                 juce::Graphics::ScopedSaveState headState(g);
                 g.addTransform(
@@ -249,10 +257,20 @@ class SkeletonOrb : public juce::Component {
                        137.0f, 89.0f, 1.2f);
             g.drawLine(144.0f + head.x, 77.0f + head.y,
                        143.0f, 90.0f, 1.2f);
-            for (int i = 0; i < 12; ++i)
-                bone(137, 81 + i * 5, 143, 83 + i * 5, 1.2f);
-            bone(140, 89, 113, 97);
-            bone(140, 89, 167, 97);
+            // Keep internal bones under the morph instead of growing skin
+            // tubes across the surface of the already-covered torso.
+            if (flesh < .001f) {
+                for (int i = 0; i < 12; ++i)
+                    bone(137, 81 + i * 5, 143, 83 + i * 5, 1.2f);
+                bone(140, 89, 113, 97);
+                bone(140, 89, 167, 97);
+            } else {
+                g.setColour(boneColour.withAlpha(.85f * (1.0f - flesh)));
+                for (int i = 0; i < 12; ++i)
+                    g.drawLine(137, 81 + i * 5, 143, 83 + i * 5, 1.2f);
+                g.drawLine(140, 89, 113, 97, 2.0f);
+                g.drawLine(140, 89, 167, 97, 2.0f);
+            }
             // Five smoothly connected ribs per side. The old rib cage
             // formed 70 separately moved line segments each frame, making
             // the chest look like a stack of jagged zigzags even after
@@ -290,11 +308,21 @@ class SkeletonOrb : public juce::Component {
                 bone(97 + i * 2 - wrist, 177 - wrist, 91 + i * 3 - wrist, 190 - 1.3f * wrist, 1);
                 bone(183 - i * 2, 177, 189 - i * 3, 190, 1);
             }
-            bone(124, 146, 156, 146);
-            bone(156, 146, 150, 165);
-            bone(150, 165, 140, 159);
-            bone(140, 159, 130, 165);
-            bone(130, 165, 124, 146);
+            if (flesh < .001f) {
+                bone(124, 146, 156, 146);
+                bone(156, 146, 150, 165);
+                bone(150, 165, 140, 159);
+                bone(140, 159, 130, 165);
+                bone(130, 165, 124, 146);
+            } else {
+                juce::Path pelvis;
+                pelvis.startNewSubPath(124, 146);
+                pelvis.lineTo(156, 146); pelvis.lineTo(150, 165);
+                pelvis.lineTo(140, 159); pelvis.lineTo(130, 165);
+                pelvis.closeSubPath();
+                g.setColour(boneColour.withAlpha(.85f * (1.0f - flesh)));
+                g.strokePath(pelvis, juce::PathStrokeType(2.0f));
+            }
             bone(130, 163, 124, 199);
             bone(124, 199, 119 - kick, 231 - .6f * kick);
             bone(150, 163, 156, 199);

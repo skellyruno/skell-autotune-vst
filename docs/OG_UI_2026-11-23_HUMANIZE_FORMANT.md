@@ -13,3 +13,7 @@ No new APVTS IDs, DSP source, latency, state or identity changes.
 Native smoke exercises actual formant/visual Humanize values, geometry
 at four sizes, and 0/50/100 flesh captures. Build, visual inspection,
 pluginval and actual FL Studio/real-vocal validation remain separate gates.
+
+## Screenshot-driven follow-up
+
+Opened all 12 dc58de5 screenshots. High Humanize appeared disconnected with raised spine/pelvic tubes; its readout was off-center and Formant lit half the ring at neutral. Reconnect fleshed joints progressively, keep original bare-bone scatter and head bounce, hide internal bones under skin, use directional skin shading, center Humanize, use a bipolar Formant arc, and deepen the hardware collar/metal shading. No synthesis/parameter/latency changes. Rebuild and inspect exact-head images before approval.

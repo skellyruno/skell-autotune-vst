@@ -131,9 +131,20 @@ public:
     g.setColour(slider.isEnabled() ? palette.accentDeep
                                    : palette.textDim.darker(.7f));
     g.strokePath(track, juce::PathStrokeType(4 * detailScale));
+    const bool bipolar = static_cast<bool>(slider.getProperties().getWithDefault("bipolarDial", false));
+    const float centreAngle = start + .5f * (end - start);
+    const float endAngle = start + position * (end - start);
+    const float beginArc = bipolar ? centreAngle : start;
     juce::Path arc;
-    arc.addCentredArc(cx, cy, arcRadius, arcRadius, 0, start,
-                      start + position * (end - start), true);
+    if (std::abs(endAngle - beginArc) > 1.0e-5f)
+      arc.addCentredArc(cx, cy, arcRadius, arcRadius, 0,
+                        juce::jmin(beginArc, endAngle), juce::jmax(beginArc, endAngle), true);
+    if (bipolar) {
+      g.setColour(palette.textBright.withAlpha(.8f));
+      g.drawLine(cx + std::sin(centreAngle) * r * .96f, cy - std::cos(centreAngle) * r * .96f,
+                 cx + std::sin(centreAngle) * r * 1.015f, cy - std::cos(centreAngle) * r * 1.015f,
+                 1.6f * detailScale);
+    }
     g.setColour(palette.accent.withAlpha(slider.isEnabled() ? .18f + .18f * glow
                                                             : 0.0f));
     g.strokePath(arc,
@@ -143,17 +154,25 @@ public:
     g.strokePath(arc,
                  juce::PathStrokeType(4 * detailScale, juce::PathStrokeType::curved,
                                       juce::PathStrokeType::rounded));
-    const float face = r * .78f;
+    const float face = r * .76f;
     // Dark machined sidewall under the raised silver cap.
-    const float lip = r * .036f;
-    g.setColour(juce::Colours::black.withAlpha(.76f));
-    g.fillEllipse(cx - face - lip, cy - face - lip, 2 * (face + lip), 2 * (face + lip));
+    const float lip = r * .065f;
+    juce::ColourGradient collar(palette.metalLow.darker(.8f), cx, cy - face,
+                                juce::Colours::black, cx, cy + face + lip, false);
+    collar.addColour(.48, palette.metalLow.darker(.25f));
+    g.setGradientFill(collar);
+    g.fillEllipse(cx - face - lip, cy - face - lip * .30f,
+                  2 * (face + lip), 2 * (face + lip));
+    g.setColour(juce::Colours::black.withAlpha(.55f));
+    g.drawEllipse(cx - face - lip, cy - face - lip * .30f,
+                  2 * (face + lip), 2 * (face + lip), 1.4f * detailScale);
     juce::ColourGradient metal(palette.metalHigh, cx - face * .6f, cy - face,
                                palette.metalLow, cx + face * .6f, cy + face,
                                false);
-    metal.addColour(.16, palette.metalHigh.brighter(.10f));
-    metal.addColour(.46, palette.metalHigh.darker(.14f));
-    metal.addColour(.82, palette.metalLow.brighter(.10f));
+    metal.addColour(.16, palette.metalHigh.brighter(.12f));
+    metal.addColour(.44, palette.metalHigh.darker(.36f));
+    metal.addColour(.53, palette.metalLow.brighter(.18f));
+    metal.addColour(.82, palette.metalLow.darker(.22f));
     g.setGradientFill(metal);
     g.fillEllipse(cx - face, cy - face, 2 * face, 2 * face);
     for (int i = 0; i < 18; ++i) {
@@ -185,7 +204,7 @@ public:
     // position marker.
     for (int i = 0; i < 40; ++i) {
       const float a = i * juce::MathConstants<float>::twoPi / 40;
-      g.setColour(palette.metalLow.withAlpha(.45f));
+      g.setColour(juce::Colours::black.withAlpha(.52f));
       g.drawLine(cx + std::sin(a) * face * .94f, cy - std::cos(a) * face * .94f,
                  cx + std::sin(a) * face * .985f,
                  cy - std::cos(a) * face * .985f, .8f * detailScale);

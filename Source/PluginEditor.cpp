@@ -84,6 +84,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
   setupKnob(formantKnob, "FORMANT SHIFT",
             "Vocal-tract colour: negative = deeper, positive = brighter. Double-click for neutral.");
   formantKnob.setDoubleClickReturnValue(true, 0.0);
+  formantKnob.getProperties().set("bipolarDial", true);
 
   setupKnob(referenceFreqKnob, "PITCH REF",
             "What frequency the note A4 is tuned to. 440 Hz is the standard.");
@@ -395,7 +396,7 @@ void HumHouseVocalTuneEditor::applyAppearance() {
     value->setColour(juce::Label::textColourId,
                      appearanceTheme == 0 || appearanceTheme == 3
                          ? lnf.palette.bodyText : lnf.palette.textValue);
-  formantValue.setColour(juce::Label::textColourId, lnf.palette.bodyText);
+  formantValue.setColour(juce::Label::textColourId, lnf.palette.textValue);
   orb.accent = lnf.palette.accentBright;
   orb.metalHigh = lnf.palette.metalHigh;
   orb.metalLow = lnf.palette.metalLow;
@@ -612,7 +613,7 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
 
   panel({24, 84, 652, 286}, p.surface, 12);
   text("RETUNE", 36, 124, 160, 22, 16, p.bodyText);
-  text("HUMANIZE", 512, 108, 160, 22, 16, p.bodyText);
+  text("HUMANIZE", 514, 108, 159, 22, 16, p.bodyText);
   text("FORMANT", 554, 313, 110, 17, 12, p.bodyText);
   text("KEY", 386, 8, 52, 14, 11, p.bodyText, juce::Justification::centredLeft);
   text("SCALE", 450, 8, 154, 14, 11, p.bodyText,
@@ -755,7 +756,7 @@ void HumHouseVocalTuneEditor::resized() {
   speedKnob.setBounds(rect(47, 162, 137, 137));
   humanizeKnob.setBounds(rect(525, 132, 137, 137));
   retuneValue.setBounds(rect(40, 307, 152, 32));
-  humanizeValue.setBounds(rect(555, 273, 110, 29));
+  humanizeValue.setBounds(rect(525, 273, 137, 29));
   formantKnob.setBounds(rect(484, 282, 70, 70));
   formantValue.setBounds(rect(555, 331, 110, 21));
   orb.setBounds(rect(222, 102, 256, 256));

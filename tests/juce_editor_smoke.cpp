@@ -172,6 +172,13 @@ int main(int argc, char** argv)
             std::cerr << "FAIL: globe, diagonal formant or piano geometry\n";
             return 33;
         }
+        if (std::abs(humanizeNumber->getBounds().getCentreX()
+                    - humanize->getBounds().getCentreX()) > 1
+            || !static_cast<bool>(formant->getProperties().getWithDefault("bipolarDial", false)))
+        {
+            std::cerr << "FAIL: Humanize alignment or Formant bipolar reference\n";
+            return 35;
+        }
         if (plus->getX() <= a4Value->getRight()
             || minus->getX() <= a4Value->getRight()
             || plus->getBottom() >= minus->getY()
