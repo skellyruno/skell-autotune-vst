@@ -628,7 +628,8 @@ void HumHouseVocalTuneEditor::paintBackdrop(juce::Graphics &g) {
   // Formant has its own compact engraved instrument scale, with ample
   // clearance from the adjacent Humanize readout and the orb.
   text("FORMANT", 554, 307, 110, 18, 12, p.bodyText);
-  text("−", 480, 346, 13, 15, 11, p.textDim);
+  // Explicit Unicode code point avoids MSVC narrow-string encoding mojibake.
+  text(juce::String::charToString(0x2212), 480, 346, 13, 15, 11, p.textDim);
   text("+", 545, 346, 13, 15, 11, p.textDim);
   g.setColour(p.metalHigh.withAlpha(.12f));
   g.drawHorizontalLine(328, 564, 654);
