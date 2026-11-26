@@ -555,13 +555,13 @@ private:
 
     static constexpr int kMedianSize = 3;
     static constexpr float kFastJumpCents = 400.0f;
-    static constexpr float kFastWindowPeriods = 1.2f;   // Low Latency analysis window, in periods
+    static constexpr float kFastWindowPeriods = 0.95f;   // Low Latency analysis window, in periods
     bool fastResponse = false, jumpPending = false;
 #ifndef SKELLYTUNE_LL_FAST_HOP
 #define SKELLYTUNE_LL_FAST_HOP 0
 #endif
     bool fastHop = SKELLYTUNE_LL_FAST_HOP != 0;
-    static constexpr double kFastHopHz = 500.0;          // fast hop: ~2 ms
+    static constexpr double kFastHopHz = 650.0;          // fast hop: ~1.5 ms
     static constexpr int kFastMinHop = 16;
     int jumpHeldHops = 0;
     int onsetStride = 1, onsetPhase = 0;                 // first estimates after silence keep the 4 ms cadence

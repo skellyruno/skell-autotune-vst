@@ -113,7 +113,7 @@ public:
             for(int bit=kLiveFFT/4;bit>0;bit>>=1) {reversed=(reversed<<1)|(input&1);input>>=1;}
             liveBitReversal[i]=static_cast<uint16_t>(reversed);
         }
-        liveBlendStep=1.0/std::max(1.0,sr*0.002);
+        liveBlendStep = 1.0 / std::max(1.0, sr * (lowLatencyExperiment ? 0.0016 : 0.002));
         // A phase-continuous clock still creates sharp slope changes at target updates.
         // Standard uses a 0.25-ms slew to soften that curvature; the explicit live
         // mode retains its established 0.15-ms response. Neither changes transport delay.
@@ -209,6 +209,7 @@ public:
         if (lowLatencyExperiment == on)
             return;
         lowLatencyExperiment = on;
+        liveBlendStep = 1.0 / std::max(1.0, sr * (on ? 0.0016 : 0.002));
         liveFrequencyCoefficient = on ? liveLowFrequencyCoefficient : liveStandardFrequencyCoefficient;
         updateLatency();
         reset();
@@ -910,7 +911,25 @@ private:
             const auto* c=stageReal+half-1;
             const auto* s=stageImag+half-1;
             for(int start=0;start<count;start+=length) {
-                for(int k=0;k<half;++k) {
+                int k = 0;
+#if defined(__SSE2__) || defined(_M_X64)
+                for (; k + 4 <= half; k += 4) {
+                    const int a = start + k, b = a + half;
+                    const auto cosine = _mm_loadu_ps(c + k);
+                    const auto sine = _mm_loadu_ps(s + k);
+                    const auto br = _mm_loadu_ps(real + b);
+                    const auto bi = _mm_loadu_ps(imag + b);
+                    const auto re = _mm_sub_ps(_mm_mul_ps(cosine, br), _mm_mul_ps(sine, bi));
+                    const auto im = _mm_add_ps(_mm_mul_ps(cosine, bi), _mm_mul_ps(sine, br));
+                    const auto ar = _mm_loadu_ps(real + a);
+                    const auto ai = _mm_loadu_ps(imag + a);
+                    _mm_storeu_ps(real + a, _mm_add_ps(ar, re));
+                    _mm_storeu_ps(imag + a, _mm_add_ps(ai, im));
+                    _mm_storeu_ps(real + b, _mm_sub_ps(ar, re));
+                    _mm_storeu_ps(imag + b, _mm_sub_ps(ai, im));
+                }
+#endif
+                for (; k < half; ++k) {
                     const int a=start+k,b=a+half;
                     const float re=c[k]*real[b]-s[k]*imag[b];
                     const float im=c[k]*imag[b]+s[k]*real[b];
@@ -967,8 +986,9 @@ private:
         // Keep diagnostics on the reference route so their work/coverage
         // accounting remains unchanged. This gate is model geometry, not a
         // signal-level heuristic; non-neutral colour/formant models fall back.
-        const bool directCycle = !detailedDiagnostics
-            && std::abs(hop * rate - period) <= 1e-12 * period;
+        // Diagnostic counters observe the selected synthesis route; enabling
+        // them must never change the audio algorithm or sample values.
+        const bool directCycle = std::abs(hop * rate - period) <= 1e-12 * period;
         for (int i = 0; i < size; ++i)
         {
             const double phase = static_cast<double> (i) / size;
@@ -1479,10 +1499,18 @@ private:
         livePhase += liveFrequency / sr;
         livePhase -= std::floor (livePhase);
         liveSpectrumBlend = std::min (1.0, liveSpectrumBlend + liveBlendStep);
-        const float coefficient = dryMixTarget > dryMix ? dryReleaseCoeff : dryAttackCoeff;
-        dryMix = dryMixTarget + (dryMix - dryMixTarget) * coefficient;
-        if (std::abs (dryMix - dryMixTarget) < 1e-6f)
-            dryMix = dryMixTarget;
+        // Until a recorded cycle exists there is no wet signal to blend.
+        // Hold aligned dry through that gap, then use the usual wet attack.
+        const float availableTarget = liveSpectrumValid ? dryMixTarget : 1.0f;
+        if (!liveSpectrumValid)
+            dryMix = 1.0f;
+        else
+        {
+            const float coefficient = availableTarget > dryMix ? dryReleaseCoeff : dryAttackCoeff;
+            dryMix = availableTarget + (dryMix - availableTarget) * coefficient;
+            if (std::abs (dryMix - availableTarget) < 1e-6f)
+                dryMix = availableTarget;
+        }
         const int64_t time = outRead - latency;
         const float dry = time >= 0 && time < inCount ? inRing[static_cast<size_t> (time & inMask)] : 0;
         // Bound only handoff compensation using the available crest

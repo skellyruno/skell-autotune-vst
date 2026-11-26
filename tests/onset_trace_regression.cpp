@@ -47,7 +47,10 @@ static Result render(int block, bool attack)
 int main()
 {
     const auto a=render(64,true), b=render(511,true), c=render(64,false);
-    bool good=a.latency==92 && b.latency==a.latency && a.hops.size()==b.hops.size();
+    // The active Low Latency budget is 2.2 ms: ceil(48 kHz * 2.2 ms) = 106.
+    // Keep the assertion tied to the current advertised transport contract.
+    constexpr int expectedLatency = 106;
+    bool good=a.latency==expectedLatency && b.latency==a.latency && a.hops.size()==b.hops.size();
     double maxWaveformDiff=0;
     for(size_t i=0;i<a.audio.size();++i)
         maxWaveformDiff=std::max(maxWaveformDiff,double(std::abs(a.audio[i]-b.audio[i])));
@@ -71,7 +74,8 @@ int main()
     good &= maxWaveformDiff < .0001 && badTraces==0 && onsetCount>0
          && firstAccepted>=48000 && firstWithoutAttack>=48000
          && firstAccepted + 192 <= firstWithoutAttack;
-    std::printf("onset trace: maxDiff=%.8f onset=%d firstWithAttack=%d firstNoAttack=%d gainMax=%.2f errors=%d -> %s\n",
+    std::printf("onset trace: latency=%d/%d expected=%d hops=%zu/%zu maxDiff=%.8f onset=%d firstWithAttack=%d firstNoAttack=%d gainMax=%.2f errors=%d -> %s\\n",
+        a.latency,b.latency,expectedLatency,a.hops.size(),b.hops.size(),
         maxWaveformDiff,onsetCount,firstAccepted,firstWithoutAttack,maxGain,badTraces,
         good?"PASS":"FAIL");
     return good?0:1;

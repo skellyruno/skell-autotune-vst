@@ -1,6 +1,7 @@
 #include "NoteTransition.h"
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 int main()
 {
@@ -56,5 +57,74 @@ int main()
     expect(vetoed==62.f,"recent source turn vetoes forecast crossing");
     const float afterVeto=t.choose(62.91f,63.21f,62.f,64.f,.50f,hop,false);
     expect(afterVeto==62.f,"confidence dropout holds accepted target after veto");
+
+    // Reproduced failure: two untrusted detector hops moving toward a
+    // boundary made the NEXT trusted hop look like confirmed acceleration.
+    // The old motion history wrongly forecast D -> E (62 -> 64) immediately.
+    t.reset();
+    t.choose(62.55f,62.55f,62.f,62.f,.99f,hop,false);
+    t.choose(62.68f,62.93f,62.f,62.f,.40f,hop,false);
+    t.choose(62.79f,63.08f,62.f,62.f,.40f,hop,false);
+    const float afterWeakRamp=t.choose(62.90f,63.21f,62.f,64.f,.99f,hop,false);
+    expect(afterWeakRamp==62.f,
+           "untrusted pitch ramp cannot invent confirmed note-crossing motion");
+    expect(t.choose(63.00f,63.25f,62.f,64.f,.99f,hop,false)==62.f,
+           "first trusted follow-up still needs motion confirmation");
+    expect(t.choose(63.10f,63.31f,62.f,64.f,.99f,hop,false)==64.f,
+           "three consecutive trusted moving hops still forecast promptly");
+    t.reset();
+    t.setReferenceStride(2);
+    t.choose(62.55f,62.55f,62.f,62.f,.99f,.002,false);
+    t.choose(62.65f,62.65f,62.f,62.f,.99f,.002,false);
+    t.choose(62.75f,62.95f,62.f,62.f,.99f,.002,false);
+    t.choose(62.82f,63.11f,62.f,62.f,.99f,.002,false);
+    expect(t.choose(62.91f,63.23f,62.f,64.f,.99f,.002,false)==64.f,
+           "2ms detector hop preserves genuine 4ms motion evidence");
+    // A 2 ms -> 4 ms detector-cadence switch used to interpret earlier 2 ms
+    // deltas as fresh 4 ms motion, and could predict the upper note one hop
+    // before any observation at the new cadence.
+    t.reset();
+    t.setReferenceStride(2);
+    for (const float observed : {62.50f, 62.62f, 62.74f, 62.86f, 62.94f})
+        t.choose(observed, observed, 62.f, 62.f, .99f, .002, false);
+    t.setReferenceStride(1);
+    const float afterCadenceChange = t.choose(63.00f, 63.24f, 62.f, 64.f, .99f, .004, false);
+    expect(afterCadenceChange == 62.f,
+           "2ms to 4ms cadence change discards stale velocity evidence");
+    t.choose(63.04f, 63.26f, 62.f, 64.f, .99f, .004, false);
+    expect(t.choose(63.08f, 63.29f, 62.f, 64.f, .99f, .004, false) == 64.f,
+           "verified 4ms trajectory can forecast again after cadence change");
+
+    // Invalid detector values also break motion continuity. The old path
+    // returned a fallback note but left pre-gap velocity fully trusted.
+    t.reset();
+    t.setReferenceStride(1);
+    t.choose(62.55f, 62.55f, 62.f, 62.f, .99f, .004, false);
+    t.choose(62.75f, 62.90f, 62.f, 62.f, .99f, .004, false);
+    const float invalid = std::numeric_limits<float>::quiet_NaN();
+    expect(t.choose(invalid, invalid, 62.f, 62.f, .99f, .004, false) == 62.f,
+           "invalid detector estimate returns measured target");
+    expect(t.choose(62.93f, 63.21f, 62.f, 64.f, .99f, .004, false) == 62.f,
+           "first reliable estimate after invalid gap does not forecast early");
+    // Regression: invalid confidence/pitch/time must not replace a
+    // previously accepted target. Old source returned measuredTarget=64
+    // immediately even though it only had evidence for accepted note 62.
+    t.reset();
+    t.choose(62.55f, 62.55f, 62.f, 62.f, .99f, .004, false);
+    expect(t.choose(invalid, 65.f, 64.f, 64.f, .99f, .004, false) == 62.f,
+           "invalid observed pitch cannot force unverified target jump");
+    expect(t.choose(62.9f, invalid, 64.f, 64.f, .99f, .004, false) == 62.f,
+           "invalid forecast cannot change last accepted target");
+    expect(t.choose(62.9f, 63.2f, 64.f, 64.f, invalid, .004, false) == 62.f,
+           "invalid confidence cannot change last accepted target");
+    expect(t.choose(62.9f, 63.2f, 64.f, 64.f, .99f,
+                    std::numeric_limits<double>::quiet_NaN(), false) == 62.f,
+           "invalid elapsed hop cannot change last accepted target");
+    expect(t.choose(64.2f, 64.2f, 64.f, 64.f, .99f, .004, false) == 64.f,
+           "next confident note responds immediately");
+    t.reset();
+    expect(std::isfinite(t.choose(invalid, invalid, invalid, invalid, invalid,
+                                  std::numeric_limits<double>::quiet_NaN(), false)),
+           "invalid startup observations do not emit NaN");
     return ok ? 0 : 1;
 }

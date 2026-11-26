@@ -36,7 +36,7 @@ public:
     static constexpr int   kNumRanges    = 6;
     static constexpr float kRangeMinHz[kNumRanges] = { 70.0f, 80.0f, 100.0f, 130.0f, 180.0f, 40.0f };
     static constexpr int   kDefaultRange = 1;
-    static constexpr double kExperimentalLowLatencyMs = 1.9;
+    static constexpr double kExperimentalLowLatencyMs = 2.2;
 
     void prepare (double sampleRate, int blockSize)
     {
@@ -161,7 +161,7 @@ public:
     }
 
     // Experimental fixed-delay resynthesis. The existing period-bound path remains
-    // the default; when enabled, the shifters use a fixed 1.9 ms processing budget.
+    // the default; when enabled, the shifters use a fixed 2.2 ms processing budget.
     // This budget is not a claim about end-to-end DAW latency.
     // EXPERIMENTAL: Low Latency re-measures pitch every ~2 ms instead of ~4 ms (default off, or build
     // with -DSKELLYTUNE_LL_FAST_HOP=1). Takes effect only while Low Latency is on.
@@ -194,7 +194,7 @@ public:
     // singer's fundamental. A 180 Hz Fastest floor cannot detect an E3 (165 Hz),
     // and silently routes it to delayed dry audio. Catch Low Notes deliberately
     // widens the analysis AND resynthesis period budget to 80 Hz. Standard mode
-    // therefore reports its true, longer delay; the 1.9-ms experimental transport
+    // therefore reports its true, longer delay; the 2.2-ms experimental transport
     // budget is unchanged. Call from the real-time thread: no allocation/locks.
     void setRangeProtection (bool on)
     {
@@ -475,51 +475,58 @@ private:
             return observedMidi;
         }
 
-        // Velocity is measured over a 4 ms reference stride (one hop at the normal rate), so the
-        // jitter gate and the jump limit below keep their meaning when Low Latency re-measures faster.
-        const int stride = std::clamp(static_cast<int>(std::lround(0.004 * sr / hop)), 1, kPitchMotionHistory - 1);
+        // A 16 ms causal secant averages local YIN period jitter. Its time
+        // centroid is half a span behind the newest observation, so include
+        // that half-span in the forecast horizon.
+        const int stride = std::clamp(static_cast<int>(std::lround(0.004 * sr / hop)),
+                                      1, 4);
+        constexpr int kForecastSpan = 4;
         pitchMotionHistory[static_cast<size_t>(pitchMotionHistoryCount % kPitchMotionHistory)] = observedMidi;
         ++pitchMotionHistoryCount;
-
         if (!pitchMotionHasPrevious)
         {
             previousObservedMidi = observedMidi;
             pitchMotionHasPrevious = true;
             return observedMidi;
         }
-        if (pitchMotionHistoryCount <= stride)
+        if (pitchMotionHistoryCount <= kForecastSpan * stride)
             return observedMidi;
 
-        const float strideStartMidi = pitchMotionHistory[static_cast<size_t>(
-            (pitchMotionHistoryCount - 1 - stride) % kPitchMotionHistory)];
-        const double deltaCents = (static_cast<double>(observedMidi)
-                                   - static_cast<double>(strideStartMidi)) * 100.0;
-        previousObservedMidi = observedMidi;
-
-        // Do not extrapolate a discrete note jump or likely octave correction.
-        // A 1.75-semitone frame-to-frame step is well outside normal vibrato and
-        // short glides at this hop rate; seed the tracker again after the jump.
-        if (std::abs(deltaCents) > 175.0)
+        const auto historyAt = [this](int ageHops) noexcept {
+            return pitchMotionHistory[static_cast<size_t>(
+                (pitchMotionHistoryCount - 1 - ageHops) % kPitchMotionHistory)];
+        };
+        for (int interval = 1; interval <= kForecastSpan; ++interval)
         {
-            return observedMidi;
+            const double stepCents = (static_cast<double>(historyAt((interval - 1) * stride))
+                                    - static_cast<double>(historyAt(interval * stride))) * 100.0;
+            if (std::abs(stepCents) > 175.0)
+            {
+                previousObservedMidi = observedMidi;
+                return observedMidi;
+            }
         }
 
-        const double dt = static_cast<double>(hop) * stride / sr;
+        const double deltaCents = (static_cast<double>(observedMidi)
+                                 - static_cast<double>(historyAt(kForecastSpan * stride))) * 100.0;
+        const double dt = static_cast<double>(hop) * stride * kForecastSpan / sr;
         if (dt <= 0.0)
             return observedMidi;
-
         const double measuredVelocity = std::clamp(deltaCents / dt, -6000.0, 6000.0);
-        // Ignore detector jitter on held notes. A real expressive glide typically
-        // exceeds this threshold over a single 4 ms analysis hop. Confidence scales
-        // the forecast smoothly instead of adding another hard voicing gate.
+        previousObservedMidi = observedMidi;
+
         if (std::abs(deltaCents) < 1.5 || std::abs(measuredVelocity) < 350.0)
             return observedMidi;
 
         const double confidenceWeight = std::clamp((static_cast<double>(confidence) - 0.55) / 0.35,
                                                    0.0, 1.0);
         const double estimateAge = detector.getPitchEstimateAgeSeconds(observedHz);
+        // Higher-register short windows are more phase-sensitive: use a shorter
+        // horizon there, while bass and midrange retain the full half-span correction.
+        const double horizonScale = observedHz >= 205.0f ? 0.25 : 0.50;
+        const double horizon = (estimateAge + 0.5 * dt) * horizonScale;
         const double predictionCents = std::clamp(
-            measuredVelocity * estimateAge * confidenceWeight, -85.0, 85.0);
+            measuredVelocity * horizon * confidenceWeight, -85.0, 85.0);
         return observedMidi + static_cast<float>(predictionCents / 100.0);
     }
 
@@ -1095,7 +1102,7 @@ private:
     bool hasDecisionSourceMidi = false;
     float previousDecisionSourceMidi = 0.0f;
     float  previousObservedMidi = 0.0f;
-    static constexpr int kPitchMotionHistory = 5;
+    static constexpr int kPitchMotionHistory = 17;
     float  pitchMotionHistory[kPitchMotionHistory] = {};
     int    pitchMotionHistoryCount = 0;
     double smoothedHumanize = 0.0;

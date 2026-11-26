@@ -46,7 +46,25 @@ int main()
     {
         const auto a=render(sr,false),b=render(sr,true);
         assert(a.size()==b.size());
-        for(size_t i=0;i<a.size();++i) assert(a[i]==b[i]);
-        std::printf("%.0f Hz: offline cancellation tracing leaves audio bit-identical\n",sr);
+        size_t firstMismatch = a.size();
+        double maxDifference = 0.0;
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            const double difference = std::abs(static_cast<double>(a[i]) - static_cast<double>(b[i]));
+            if (difference != 0.0)
+            {
+                if (firstMismatch == a.size())
+                    firstMismatch = i;
+                maxDifference = std::max(maxDifference, difference);
+            }
+        }
+        if (firstMismatch != a.size())
+        {
+            std::fprintf(stderr,
+                "%.0f Hz: diagnostics changed audio at sample %zu: %.9g vs %.9g (max diff %.9g)\\n",
+                sr, firstMismatch, a[firstMismatch], b[firstMismatch], maxDifference);
+            return 1;
+        }
+        std::printf("%.0f Hz: offline cancellation tracing leaves audio bit-identical\\n",sr);
     }
 }

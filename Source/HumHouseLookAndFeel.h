@@ -53,6 +53,24 @@ public:
       palette.accentBright = juce::Colour(0xffc5ef75);
       palette.heatWarm = palette.accentBright;
     }
+    // All four appearance choices now share a BLACK outer chassis.
+    // Accent/metal treatment still varies, with restrained near-black
+    // panel shades to retain meaningful visual theme differentiation.
+    palette.body = juce::Colours::black;
+    palette.bgDark = juce::Colours::black;
+    palette.bgDeep = juce::Colours::black;
+    // Real screenshot review: the first pass still tinted entire panels
+    // green/brown. Keep all structural surfaces achromatic near-black;
+    // reserve theme hues for accents, metal trim, orb and lit controls.
+    palette.bgPanel = juce::Colour(0xff090909);
+    palette.bgSection = juce::Colour(0xff111111);
+    palette.surface = theme == 0 ? juce::Colour(0xff111111)
+                    : theme == 1 ? juce::Colour(0xff0c0c0c)
+                    : theme == 2 ? juce::Colour(0xff080808)
+                                 : juce::Colour(0xff171717);
+    // Previous theme 0/3 used dark label text on light surfaces.
+    // New near-black material requires bright labels across all themes.
+    palette.bodyText = palette.textBright;
     setColour(juce::Label::textColourId, palette.textBright);
     setColour(juce::ComboBox::textColourId, palette.textBright);
     setColour(juce::ComboBox::backgroundColourId, palette.bgDark);
@@ -66,125 +84,120 @@ public:
     setColour(juce::TooltipWindow::textColourId, palette.textBright);
     setColour(juce::TooltipWindow::outlineColourId, palette.edge);
   }
+  void drawLinearSlider(juce::Graphics &g, int x, int y, int w, int h,
+                        float position, float minimum, float maximum,
+                        juce::Slider::SliderStyle style, juce::Slider &slider) override {
+    if (static_cast<bool>(slider.getProperties().getWithDefault("referenceReadout", false))) {
+      g.setColour(palette.textValue);
+      g.setFont(juce::Font(juce::FontOptions(15 * scale)));
+      g.drawText(slider.getTextFromValue(slider.getValue()), x, y, w, h,
+                 juce::Justification::centred, false);
+      return;
+    }
+    LookAndFeel_V4::drawLinearSlider(g, x, y, w, h, position, minimum,
+                                     maximum, style, slider);
+  }
   void drawRotarySlider(juce::Graphics &g, int x, int y, int w, int h,
                         float position, float start, float end,
                         juce::Slider &slider) override {
-    const float cx = x + w * .5f, cy = y + h * .5f, r = juce::jmin(w, h) * .46f;
-    const float glow =
-        slider.isEnabled()
-            ? std::clamp(.4f + illumination * .45f + flare * .3f, 0.0f, 1.0f)
-            : 0.0f;
-    juce::ColourGradient halo(palette.accent.withAlpha(.25f * glow), cx, cy,
-                              palette.accent.withAlpha(0.0f),
-                              cx + r + 5 * scale, cy, true);
-    g.setGradientFill(halo);
-    g.fillEllipse(cx - r - 5 * scale, cy - r - 5 * scale, 2 * r + 10 * scale,
-                  2 * r + 10 * scale);
-    g.setColour(juce::Colours::black.withAlpha(.20f));
-    g.fillEllipse(cx - r - 3, cy - r + 5, 2 * r + 6, 2 * r + 6);
-    juce::ColourGradient bezel(palette.metalHigh, cx - r, cy - r,
-                               palette.metalLow, cx + r, cy + r, false);
-    g.setGradientFill(bezel);
-    g.fillEllipse(cx - r, cy - r, 2 * r, 2 * r);
-    g.setColour(palette.bgDark);
-    g.fillEllipse(cx - r + 3 * scale, cy - r + 3 * scale, 2 * r - 6 * scale,
-                  2 * r - 6 * scale);
-    const float arcRadius = r * .88f;
-    juce::Path track;
-    track.addCentredArc(cx, cy, arcRadius, arcRadius, 0, start, end, true);
-    g.setColour(palette.accent.withAlpha(
-        slider.isEnabled() ? .14f + .18f * illumination + .24f * flare : 0.0f));
-    g.strokePath(track, juce::PathStrokeType(8 * scale));
-    g.setColour(slider.isEnabled() ? palette.accentDeep
-                                   : palette.textDim.darker(.7f));
-    g.strokePath(track, juce::PathStrokeType(4 * scale));
-    juce::Path arc;
-    arc.addCentredArc(cx, cy, arcRadius, arcRadius, 0, start,
-                      start + position * (end - start), true);
-    g.setColour(palette.accent.withAlpha(slider.isEnabled() ? .18f + .18f * glow
-                                                            : 0.0f));
-    g.strokePath(arc,
-                 juce::PathStrokeType(10 * scale, juce::PathStrokeType::curved,
-                                      juce::PathStrokeType::rounded));
-    g.setColour(slider.isEnabled() ? palette.accentBright : palette.textDim);
-    g.strokePath(arc,
-                 juce::PathStrokeType(4 * scale, juce::PathStrokeType::curved,
-                                      juce::PathStrokeType::rounded));
-    const float face = r * .78f;
-    juce::ColourGradient metal(palette.metalHigh, cx - face * .6f, cy - face,
-                               palette.metalLow, cx + face * .6f, cy + face,
-                               false);
-    metal.addColour(.47, palette.metalHigh.darker(.13f));
-    g.setGradientFill(metal);
-    g.fillEllipse(cx - face, cy - face, 2 * face, 2 * face);
-    for (int i = 0; i < 72; ++i) {
-      const float angle = i * juce::MathConstants<float>::twoPi / 72;
-      g.setColour(juce::Colours::white.withAlpha(i % 2 == 0 ? .05f : .015f));
-      g.drawLine(cx + std::sin(angle) * face * .24f,
-                 cy - std::cos(angle) * face * .24f,
-                 cx + std::sin(angle) * face * .96f,
-                 cy - std::cos(angle) * face * .96f, .7f * scale);
-    }
-    g.setColour(palette.metalHigh);
-    g.drawEllipse(cx - face, cy - face, 2 * face, 2 * face, 1.1f * scale);
-    // Fine grip cuts follow the machined rim without competing with the
-    // position marker.
-    for (int i = 0; i < 64; ++i) {
-      const float a = i * juce::MathConstants<float>::twoPi / 64;
-      g.setColour(palette.metalLow.withAlpha(.45f));
-      g.drawLine(cx + std::sin(a) * face * .94f, cy - std::cos(a) * face * .94f,
-                 cx + std::sin(a) * face * .985f,
-                 cy - std::cos(a) * face * .985f, .8f * scale);
-    }
-    g.setColour(juce::Colours::black.withAlpha(.45f));
-    g.drawEllipse(cx - face + 2 * scale, cy - face + 2 * scale,
-                  2 * face - 4 * scale, 2 * face - 4 * scale, .7f * scale);
+    const bool small = static_cast<bool>(slider.getProperties().getWithDefault("blackDial", false));
+    const bool bipolar = static_cast<bool>(slider.getProperties().getWithDefault("bipolarDial", false));
+    const float cx = x + w * .5f, cy = y + h * .5f;
+    const float r = juce::jmin(w, h) * .455f;
+    if (r <= 0.0f) return;
+    const float unit = r / 62.0f;
     const float angle = start + position * (end - start);
-    g.setColour(palette.textBright);
-    g.drawLine(cx + std::sin(angle) * r * .76f, cy - std::cos(angle) * r * .76f,
-               cx + std::sin(angle) * r * .94f, cy - std::cos(angle) * r * .94f,
-               3 * scale);
-    if (!static_cast<bool>(
-            slider.getProperties().getWithDefault("showDragValue", false))) {
-      const float hub = face * .2f;
-      g.setColour(palette.metalLow.withAlpha(.24f));
-      g.drawEllipse(cx - hub, cy - hub, hub * 2, hub * 2, .7f * scale);
-      g.setColour(juce::Colours::white.withAlpha(.2f));
-      g.drawEllipse(cx - hub + scale, cy - hub + scale, hub * 2 - 2 * scale,
-                    hub * 2 - 2 * scale, .6f * scale);
+    const float centre = start + .5f * (end - start);
+    const auto active = slider.isEnabled() ? palette.accentBright : palette.textDim;
+    const auto ring = [&](float radius, float a, float b, juce::Colour colour, float thickness) {
+      if (b - a <= 1.0e-5f) return;
+      juce::Path path;
+      path.addCentredArc(cx, cy, radius, radius, 0.0f, a, b, true);
+      g.setColour(colour);
+      g.strokePath(path, juce::PathStrokeType(thickness,
+          juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    };
+    if (small) {
+      // Recessed matte black cap within the panel's mounting pocket.
+      const float face = r * .83f;
+      juce::ColourGradient insetFace(juce::Colour(0xff292c2a), cx, cy-face,
+          juce::Colour(0xff070908), cx, cy+face, false);
+      insetFace.addColour(.55, juce::Colour(0xff131614));
+      g.setGradientFill(insetFace);
+      g.fillEllipse(cx-face, cy-face, 2*face, 2*face);
+      g.setColour(juce::Colour(0xff3b403d));
+      g.drawEllipse(cx-face, cy-face, 2*face, 2*face, .65f);
+      ring(r*.94f, start, end, juce::Colour(0xff242924), .65f);
+      ring(r*.94f, juce::jmin(centre,angle), juce::jmax(centre,angle),
+          active.withAlpha(.66f), .95f);
+      g.setColour(active.withAlpha(.9f));
+      g.drawLine(cx+std::sin(angle)*face*.42f, cy-std::cos(angle)*face*.42f,
+                 cx+std::sin(angle)*face*.87f, cy-std::cos(angle)*face*.87f,
+                 juce::jmax(.8f,1.35f*scale));
+      if (slider.isMouseOverOrDragging() || slider.hasKeyboardFocus(true)) {
+        g.setColour(active.withAlpha(.6f));
+        g.drawEllipse(cx-r, cy-r, 2*r, 2*r, .8f);
+      }
+      return;
     }
-    if (static_cast<bool>(
-            slider.getProperties().getWithDefault("showDragValue", false)) &&
-        slider.isEnabled()) {
-      const bool flipped = static_cast<bool>(
-          slider.getProperties().getWithDefault("displayFlip", false));
-      const double value =
-          (flipped ? 1 - slider.getValue() : slider.getValue()) *
-          static_cast<double>(
-              slider.getProperties().getWithDefault("displayScale", 1.0));
-      const juce::String text =
-          juce::String(juce::roundToInt(value)) + slider.getTextValueSuffix();
-      g.setColour(juce::Colour(0xff17201a));
-      g.setFont(juce::Font(juce::FontOptions(26 * scale).withStyle("Bold")));
-      g.drawText(text,
-                 juce::Rectangle<float>(cx - face, cy - 20 * scale, 2 * face,
-                                        40 * scale)
-                     .toNearestInt(),
-                 juce::Justification::centred, false);
+    // Smooth turned-metal collar, matte face and one clear position index.
+    // No lathe rings, spokes, grip cuts, centre badge or decorative face marks.
+    g.setColour(juce::Colours::black.withAlpha(.7f));
+    g.fillEllipse(cx-r, cy-r+2*unit, 2*r, 2*r);
+    juce::ColourGradient bezel(juce::Colour(0xffa7aaa7), cx-r, cy-r,
+        juce::Colour(0xff181b19), cx+r, cy+r, false);
+    bezel.addColour(.48, juce::Colour(0xff4b4e4c));
+    g.setGradientFill(bezel);
+    g.fillEllipse(cx-r, cy-r, 2*r, 2*r);
+    const float inset = r * .92f;
+    g.setColour(juce::Colour(0xff080a09));
+    g.fillEllipse(cx-inset, cy-inset, 2*inset, 2*inset);
+    const float track = r * .84f;
+    ring(track, start, end, juce::Colour(0xff252b27), juce::jmax(1.0f, 3.3f*unit));
+    const float from = bipolar ? centre : start;
+    ring(track, juce::jmin(from,angle), juce::jmax(from,angle),
+         active.withAlpha(.22f + .14f*illumination), juce::jmax(1.5f, 7.0f*unit));
+    ring(track, juce::jmin(from,angle), juce::jmax(from,angle),
+         active, juce::jmax(1.0f, 2.5f*unit));
+    const float face = r * .73f;
+    // A narrow bevel adds depth without decorating the cap.
+    juce::ColourGradient bevel(juce::Colour(0xffd3d6d3), cx-face, cy-face,
+        juce::Colour(0xff333936), cx+face, cy+face, false);
+    bevel.addColour(.5, juce::Colour(0xff747a76));
+    g.setGradientFill(bevel);
+    g.fillEllipse(cx-face, cy-face, 2*face, 2*face);
+    const float capR = face*.955f;
+    juce::ColourGradient cap(juce::Colour(0xffaeb4b1), cx-face*.33f, cy-face,
+        juce::Colour(0xff535a56), cx+face*.45f, cy+face, false);
+    cap.addColour(.22, juce::Colour(0xff969e99));
+    cap.addColour(.70, juce::Colour(0xff666e69));
+    g.setGradientFill(cap);
+    g.fillEllipse(cx-capR, cy-capR, 2*capR, 2*capR);
+    juce::ColourGradient specular(juce::Colours::white.withAlpha(.085f), cx-capR*.35f, cy-capR*.65f,
+        juce::Colours::white.withAlpha(0.0f), cx+capR*.66f, cy+capR*.55f, true);
+    g.setGradientFill(specular);
+    g.fillEllipse(cx-capR,cy-capR,2*capR,2*capR);
+    g.setColour(juce::Colours::black.withAlpha(.65f));
+    g.drawEllipse(cx-face, cy-face, 2*face, 2*face, juce::jmax(.65f,1.2f*unit));
+    ring(face*.98f, -1.55f, .35f, juce::Colours::white.withAlpha(.40f),
+         juce::jmax(.6f,1.3f*unit));
+    if (bipolar) {
+      g.setColour(palette.textDim);
+      g.drawLine(cx+std::sin(centre)*r*.92f, cy-std::cos(centre)*r*.92f,
+                 cx+std::sin(centre)*r*.99f, cy-std::cos(centre)*r*.99f,
+                 juce::jmax(.7f,1.1f*unit));
     }
-    if (flare > .02f && slider.isEnabled()) {
-      juce::Path glint;
-      const float sweep =
-          std::fmod(lightPhase, juce::MathConstants<float>::twoPi);
-      glint.addCentredArc(cx, cy, r * .98f, r * .98f, 0, sweep, sweep + .8f,
-                          true);
-      g.setColour(palette.accentBright.withAlpha(flare * .75f));
-      g.strokePath(glint, juce::PathStrokeType(2 * scale));
-    }
+    g.setColour(juce::Colours::black.withAlpha(.5f));
+    g.drawLine(cx+std::sin(angle)*face*.56f+unit, cy-std::cos(angle)*face*.56f+unit,
+               cx+std::sin(angle)*face*.89f+unit, cy-std::cos(angle)*face*.89f+unit,
+               juce::jmax(1.3f,3.5f*unit));
+    g.setColour(juce::Colours::white);
+    g.drawLine(cx+std::sin(angle)*face*.56f, cy-std::cos(angle)*face*.56f,
+               cx+std::sin(angle)*face*.89f, cy-std::cos(angle)*face*.89f,
+               juce::jmax(1.0f,2.4f*unit));
     if (slider.isMouseOverOrDragging() || slider.hasKeyboardFocus(true)) {
-      g.setColour(palette.accent);
-      g.drawEllipse(cx - r - 2 * scale, cy - r - 2 * scale, 2 * r + 4 * scale,
-                    2 * r + 4 * scale, 1 * scale);
+      g.setColour(active.withAlpha(.8f));
+      g.drawEllipse(cx-r, cy-r, 2*r, 2*r, juce::jmax(.8f,1.4f*unit));
     }
   }
   juce::Button *createSliderButton(juce::Slider &, bool up) override {
@@ -250,6 +263,21 @@ public:
   void drawButtonBackground(juce::Graphics &g, juce::Button &button,
                             const juce::Colour &, bool hover,
                             bool down) override {
+    if (static_cast<bool>(button.getProperties().getWithDefault("a4StackedStep", false))) {
+      auto b = button.getLocalBounds().toFloat().reduced(.65f * scale);
+      juce::ColourGradient darkFace(juce::Colour(0xff242a26), b.getX(), b.getY(),
+                                    juce::Colour(0xff040706), b.getX(), b.getBottom(), false);
+      g.setGradientFill(darkFace);
+      g.fillRoundedRectangle(b, 3 * scale);
+      g.setColour((hover || button.hasKeyboardFocus(true))
+                  ? palette.accentBright : juce::Colour(0xff363d38));
+      g.drawRoundedRectangle(b, 3 * scale, .85f * scale);
+      if (down) {
+        g.setColour(juce::Colours::black.withAlpha(.24f));
+        g.fillRoundedRectangle(b.reduced(scale), 2 * scale);
+      }
+      return;
+    }
     if (static_cast<bool>(
             button.getProperties().getWithDefault("settingsGear", false))) {
       const auto b = button.getLocalBounds().toFloat();
@@ -268,7 +296,7 @@ public:
       }
       gear.closeSubPath();
       if (hover || button.hasKeyboardFocus(true)) {
-        g.setColour(palette.bodyText.withAlpha(.08f));
+        g.setColour(palette.bodyText.withAlpha(.14f));
         g.fillRoundedRectangle(b.reduced(scale), 5 * scale);
       }
       g.setColour(palette.bodyText);
@@ -325,8 +353,8 @@ public:
     juce::Colour bottom =
         black ? juce::Colour(0xff101713) : juce::Colour(0xffd2d5cd);
     if (target && button.isEnabled()) {
-      top = top.interpolatedWith(palette.accentBright, .34f);
-      bottom = bottom.interpolatedWith(palette.accent, .58f);
+      top = top.interpolatedWith(palette.accentBright, .46f);
+      bottom = bottom.interpolatedWith(palette.accent, .70f);
     }
     if (down)
       bottom = bottom.darker(.12f);
@@ -345,31 +373,40 @@ public:
     g.drawRoundedRectangle(face.reduced(.5f * scale), 3 * scale, scale);
     if (hover || button.hasKeyboardFocus(true)) {
       g.setColour(palette.accent.withAlpha(.85f));
-      g.drawRoundedRectangle(face.reduced(scale), 3 * scale, 1.3f * scale);
+      g.drawRoundedRectangle(face.reduced(scale), 3 * scale, 1.6f * scale);
     }
     if (key != 0) {
-      const float y = face.getBottom() - 27 * scale;
+      const float y = face.getBottom() - 30 * scale;
       g.setColour(allowed ? (black ? palette.accentBright : palette.accentDim)
-                          : (black ? juce::Colour(0xff435147)
-                                   : juce::Colour(0xffa4ada1)));
-      g.fillRoundedRectangle(face.getCentreX() - 5 * scale, y, 10 * scale,
-                             2.5f * scale, scale);
+                          : (black ? juce::Colour(0xff68796d)
+                                   : juce::Colour(0xff758574)));
+      g.fillRoundedRectangle(face.getCentreX() - 7 * scale, y, 14 * scale,
+                             3.2f * scale, 1.5f * scale);
     }
   }
   void drawButtonText(juce::Graphics &g, juce::TextButton &button, bool,
                       bool) override {
+    if (static_cast<bool>(button.getProperties().getWithDefault("a4StackedStep", false))) {
+      // Center actual strokes, not font glyph metrics, at every scale.
+      const auto c = button.getLocalBounds().toFloat().getCentre();
+      const float arm = 3.0f * scale;
+      g.setColour(button.isEnabled() ? juce::Colour(0xffc7d0c8)
+                                     : juce::Colour(0xff626962));
+      g.drawLine(c.x-arm, c.y, c.x+arm, c.y, juce::jmax(.8f,1.15f*scale));
+      if (button.getButtonText() == "+")
+        g.drawLine(c.x, c.y-arm, c.x, c.y+arm, juce::jmax(.8f,1.15f*scale));
+      return;
+    }
     const int key =
         static_cast<int>(button.getProperties().getWithDefault("pianoKey", 0));
-    const bool target = static_cast<bool>(
-        button.getProperties().getWithDefault("target", false));
-    g.setColour(key == 2 && !(target && button.isEnabled())
-                    ? palette.textBright
+    g.setColour(key == 2
+                    ? juce::Colours::white
                     : juce::Colour(0xff253029));
     g.setFont(juce::Font(
-        juce::FontOptions((key == 0 ? 12 : 13) * scale).withStyle("Bold")));
+        juce::FontOptions((key == 0 ? 13 : 15) * scale).withStyle("Bold")));
     auto b = button.getLocalBounds();
     if (key != 0)
-      b = b.removeFromBottom(juce::roundToInt(23 * scale));
+      b = b.removeFromBottom(juce::roundToInt(26 * scale));
     g.drawText(button.getButtonText(), b, juce::Justification::centred, false);
   }
   void drawComboBox(juce::Graphics &g, int w, int h, bool, int, int, int, int,
@@ -383,23 +420,23 @@ public:
     const float x = w - 14 * scale, y = h * .5f;
     p.addTriangle(x - 4 * scale, y - 2 * scale, x + 4 * scale, y - 2 * scale, x,
                   y + 3 * scale);
-    g.setColour(palette.accent);
+    g.setColour(box.isEnabled() ? palette.accent : palette.textDim);
     g.fillPath(p);
   }
   juce::Font getPopupMenuFont() override {
-    return juce::Font(juce::FontOptions(13 * scale));
+    return juce::Font(juce::FontOptions(juce::jmax(10.f, 12 * scale)));
   }
   void getIdealPopupMenuItemSize(const juce::String &, bool separator, int,
                                  int &width, int &height) override {
-    width = juce::roundToInt(224 * scale);
-    height = juce::roundToInt((separator ? 10 : 30) * scale);
+    width = juce::roundToInt(190 * scale);
+    height = separator ? 4 : juce::jmax(18, juce::roundToInt(29 * scale));
   }
   void drawPopupMenuBackground(juce::Graphics &g, int w, int h) override {
-    g.fillAll(palette.bgDark);
+    g.fillAll(palette.surface);
     auto b = juce::Rectangle<float>(1, 1, w - 2.f, h - 2.f);
-    g.setColour(palette.bgPanel);
+    g.setColour(palette.surface);
     g.fillRoundedRectangle(b, 8 * scale);
-    g.setColour(palette.textDim.withAlpha(.25f));
+    g.setColour(palette.edge);
     g.drawRoundedRectangle(b, 8 * scale, scale);
   }
   void drawPopupMenuSectionHeader(juce::Graphics &g,
@@ -423,11 +460,12 @@ public:
       return;
     }
     if (highlight && active) {
-      g.setColour(juce::Colours::white.withAlpha(.07f));
+      g.setColour(palette.accent.withAlpha(.16f));
       g.fillRoundedRectangle(b, 5 * scale);
     }
-    g.setColour(palette.textBright.withAlpha(active ? 1.f : .4f));
-    g.setFont(getPopupMenuFont());
+    g.setColour((ticked ? palette.bodyText.interpolatedWith(palette.accentDim, .45f)
+                        : palette.bodyText).withAlpha(active ? 1.f : .4f));
+    g.setFont(ticked ? getPopupMenuFont().boldened() : getPopupMenuFont());
     g.drawText(text,
                b.withTrimmedLeft(9 * scale)
                    .withTrimmedRight(35 * scale)
@@ -436,31 +474,33 @@ public:
     auto check = juce::Rectangle<float>(b.getRight() - 25 * scale,
                                         b.getCentreY() - 8 * scale, 16 * scale,
                                         16 * scale);
-    g.setColour(palette.textDim.withAlpha(.35f));
-    g.drawRoundedRectangle(check, 3 * scale, scale);
-    if (ticked) {
-      juce::Path mark;
-      mark.startNewSubPath(check.getX() + 3 * scale, check.getCentreY());
-      mark.lineTo(check.getX() + 7 * scale, check.getBottom() - 4 * scale);
-      mark.lineTo(check.getRight() - 3 * scale, check.getY() + 4 * scale);
-      g.setColour(palette.accentBright);
-      g.strokePath(mark, juce::PathStrokeType(1.8f * scale));
-    }
     if (submenu) {
       g.setColour(palette.textDim);
       g.drawText(">", check.toNearestInt(), juce::Justification::centred,
                  false);
+    } else if (ticked) {
+      juce::Path tick;
+      tick.startNewSubPath(check.getX() + 2 * scale, check.getCentreY());
+      tick.lineTo(check.getCentreX() - scale, check.getBottom() - 4 * scale);
+      tick.lineTo(check.getRight() - 2 * scale, check.getY() + 4 * scale);
+      g.setColour(palette.accentBright);
+      g.strokePath(tick, juce::PathStrokeType(1.8f * scale));
     }
   }
   juce::Font getComboBoxFont(juce::ComboBox &) override {
-    return juce::Font(juce::FontOptions(12 * scale));
+    return juce::Font(juce::FontOptions(13 * scale));
   }
   void positionComboBoxText(juce::ComboBox &box, juce::Label &label) override {
-    label.setBounds(12 * scale, 1, box.getWidth() - 30 * scale,
+    const bool key = static_cast<bool>(box.getProperties().getWithDefault("keyReadout", false));
+    const auto inset = juce::roundToInt((key ? 6 : 12) * scale);
+    const auto arrow = juce::roundToInt(18 * scale);
+    label.setBounds(inset, 1, juce::jmax(1, box.getWidth() - inset - arrow),
                     box.getHeight() - 2);
     label.setFont(getComboBoxFont(box));
   }
   juce::Font getLabelFont(juce::Label &label) override {
+    if (static_cast<bool>(label.getProperties().getWithDefault("majorReadout", false)))
+      return juce::Font(juce::FontOptions(21 * scale).withStyle("Bold"));
     return juce::Font(juce::FontOptions(
         dynamic_cast<juce::Slider *>(label.getParentComponent()) ? 13 * scale
                                                                  : 12 * scale));

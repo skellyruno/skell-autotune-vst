@@ -36,12 +36,13 @@ int main(int argc,char**argv) {
     std::vector<float> output(input.size());
     humtune::AutoTuneEngine engine;
     engine.setRangeProtection(argc >= 12 && std::stoi(argv[11]) != 0);
-    engine.setVoiceRange(range); engine.setRootNote(argc >= 9 ? std::stoi(argv[8]) : 0); engine.setScaleType(0);
+    engine.setVoiceRange(range); engine.setRootNote(argc >= 9 ? std::stoi(argv[8]) : 0); engine.setScaleType(argc >= 14 ? std::stoi(argv[13]) : 0);
+    if (argc >= 16) engine.setGlideMilliseconds(std::stof(argv[15]));
     engine.setAmount(1.0f); engine.setRetuneSpeed(0.0f); engine.setHumanize(0.0f);
     // Match the requested SkellyTune default: Note Stabilizer OFF. Dedicated
     // note-lock regressions explicitly enable it when testing that behavior.
     engine.setNoteStabilizer(false); engine.setFormantPreserve(argc >= 10 ? std::stoi(argv[9]) != 0 : true);
-    engine.setLowLatencyMode(lowLatency != 0); engine.setEnabled(true); engine.prepare(sr,blockSize);
+    engine.setLowLatencyMode(lowLatency != 0); engine.setLowLatencyFastHop(argc >= 15 && std::stoi(argv[14]) != 0); engine.setEnabled(true); engine.prepare(sr,blockSize);
     // The allocation-capable vector belongs exclusively to this OFFLINE renderer.
     // Plugin builds leave AutoTuneEngine's audio-thread callback disconnected.
     std::vector<humtune::AutoTuneEngine::HopTrace> hopTraces;
