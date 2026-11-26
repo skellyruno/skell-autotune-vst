@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ClassicEngine.h"
+#include "MetaTune25Engine.h"
 #include "GainRamp.h"
 #include <JuceHeader.h>
 #include <SkellCore/WorldLink.h>
@@ -54,7 +54,7 @@ public:
     humtune::KeyEstimator::Estimate getAutoKeyEstimate() const { return engine.getAutoKeyEstimate(); }
     humtune::KeyEstimator::Estimate applyAutoKeyEstimate();
 
-    // Classic uses the same 12-semitone mask as the piano. Fractional-scale
+    // MetaTune 2.5 uses the same 12-semitone mask as the piano. Fractional-scale
     // definitions retain their stored IDs but are projected to semitones.
     static bool isNoteInScale (int scaleType, int root, int note)
     {
@@ -136,7 +136,7 @@ private:
     // Receiver is always available, but sender must click SEND TO TUNE.
     skellcore::world::WorldLink skellKeyLink_{"skell.tune", "SkellyTune"};
     std::uint64_t lastAppliedSkellKey_ = 0;
-    humtune::ClassicEngine engine;
+    humtune::MetaTune25Engine engine;
     humtune::GainRamp inputGainRamp,outputGainRamp;
 
     std::atomic<float> inputLevel  { 0.0f };

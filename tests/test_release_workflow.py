@@ -41,26 +41,16 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIsNotNone(publish)
         self.assertRegex(publish.group(1), r"(?m)^\s+needs:\s*\[build,\s*dsp-regression\]\s*$")
 
-    def test_public_prs_withhold_product_artifacts_except_owner_approved_pr10_preview(self):
+    def test_meta25_linked_source_review_blocks_distribution(self):
         upload = re.search(
             r"(?ms)^      - name: Upload verified Windows VST3 preview\n(.*?)(?=^      - name:|^  publish:)",
             WORKFLOW,
         )
         self.assertIsNotNone(upload)
-        authorized = (
-            "github.repository_visibility == 'private' || "
-            "github.event_name == 'release' || "
-            "(github.event_name == 'pull_request' && "
-            "github.event.pull_request.number == 10 && "
-            "github.event.pull_request.head.repo.full_name == github.repository && "
-            "github.event.pull_request.head.ref == "
-            "'fix/skellytune-og-trusted-motion-20261122')"
-        )
-        self.assertIn("        if: " + authorized + "\n", upload.group(1))
-        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", authorized)
-        self.assertIn("github.event.pull_request.number == 10", authorized)
-        self.assertIn("github.event.pull_request.head.ref == ", authorized)
-        self.assertIn("python scripts/package_vst3.py --identity release/identity.json --check-release-approval", WORKFLOW)
+        self.assertIn("if: ${{ false }}", upload.group(1))
+        self.assertIn("Block public release until MetaTune linked-source licensing is approved", WORKFLOW)
+        publish = re.search(r"(?ms)^  publish:\n(.*)\Z", WORKFLOW)
+        self.assertIn("if: ${{ false }}", publish.group(1))
 
     def test_superseded_cancellation_excludes_protected_refs(self):
         self.assertIn("github.event_name == 'pull_request'", WORKFLOW)

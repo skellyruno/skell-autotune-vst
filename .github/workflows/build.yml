@@ -15,17 +15,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'main' && github.event.pull_request.head.ref != 'master' && github.event.pull_request.head.ref != 'production' && !startsWith(github.event.pull_request.head.ref, 'release/') && github.event.pull_request.base.ref != 'production' && !startsWith(github.event.pull_request.base.ref, 'release/') }}
 
 jobs:
-  classic-regression:
-    name: Active Classic DSP regression
+  meta25-regression:
+    name: Active MetaTune 2.5 DSP regression
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - run: cmake -S . -B build-classic -DSKELLYTUNE_CLASSIC_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
-      - run: cmake --build build-classic --parallel 2
-      - run: ctest --test-dir build-classic --output-on-failure
+      - run: cmake -S . -B build-meta25 -DSKELLYTUNE_META25_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build-meta25 --parallel 2
+      - run: ctest --test-dir build-meta25 --output-on-failure
   dsp-regression:
     name: Offline DSP regression (Release)
     runs-on: ubuntu-latest
@@ -94,6 +94,10 @@ jobs:
         if: github.event_name == 'release'
         run: python scripts/package_vst3.py --identity release/identity.json --check-release-approval
 
+      - name: Block public release until MetaTune linked-source licensing is approved
+        if: github.event_name == 'release'
+        run: exit 1
+
       - name: Configure Windows x64
         run: cmake -S . -B build -A x64
 
@@ -146,7 +150,7 @@ jobs:
       # Owner requested downloadable engineering test build for PR #10.
       # Unrelated public PRs/forks remain blocked; releases need approval.
       - name: Upload verified Windows VST3 preview
-        if: github.repository_visibility == 'private' || github.event_name == 'release' || (github.event_name == 'pull_request' && github.event.pull_request.number == 10 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/skellytune-og-trusted-motion-20261122')
+        if: ${{ false }} # AGPL linked-source distribution review required
         uses: actions/upload-artifact@v6
         with:
           name: SkellyTune-Windows-VST3
@@ -156,7 +160,7 @@ jobs:
 
   publish:
     name: Attach owner-approved release assets
-    if: github.event_name == 'release'
+    if: ${{ false }} # research-only MetaTune integration; release blocked
     needs: [build, dsp-regression]
     runs-on: ubuntu-latest
     permissions:

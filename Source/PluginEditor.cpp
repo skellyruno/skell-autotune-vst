@@ -286,7 +286,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
     applyAppearance();
   };
   settingsButton.setName("Settings");
-  settingsButton.setTooltip("Classic native formants, Low Latency and motion settings. Nonzero formant shift adds 1024 samples of latency.");
+  settingsButton.setTooltip("MetaTune 2.5, Low Latency and motion settings. Formant shift adds no fixed audio delay.");
   settingsButton.getProperties().set("settingsGear", true);
   addAndMakeVisible(settingsButton);
   settingsButton.onClick = [this] {
@@ -304,7 +304,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
             parameter->endChangeGesture();
           }, lnf.palette.bodyText, scaleFactor()));
     };
-    menu.addItem(11, "Classic: native formants", false, true);
+    menu.addItem(11, "MetaTune 2.5: native formants", false, true);
     addParameter(1, "Low Latency", "lowLatencyMode");
     menu.addCustomItem(3, std::make_unique<SettingsRow>("Reduce motion", proc.getReducedMotion(),
         [safe] {

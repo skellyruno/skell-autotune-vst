@@ -94,8 +94,8 @@ HumHouseVocalTuneProcessor::createParameterLayout()
 
     // Voice range: the lowest note the tuner follows. Lower notes need more delay.
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::ClassicEngine::kNumRanges - 1,
-        humtune::ClassicEngine::kDefaultRange));
+        juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::MetaTune25Engine::kNumRanges - 1,
+        humtune::MetaTune25Engine::kDefaultRange));
 
     // Default ON: selected high-voice ranges must not silently discard the
     // fundamental of a low/mid voice. Users can turn it OFF for the original
@@ -352,7 +352,7 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // Process autotune
     engine.process(buffer.getArrayOfWritePointers(), buffer.getNumChannels(), buffer.getNumSamples());
 
-    // Publish the actual prepared Classic/formant latency after processing.
+    // Publish the actual native MetaTune 2.5 latency after processing.
     if (engine.getLatencySamples() != reportedLatency)
     {
         reportedLatency = engine.getLatencySamples();
