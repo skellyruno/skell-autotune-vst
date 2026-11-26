@@ -1,6 +1,6 @@
 #pragma once
 
-#include "AutoTuneEngine.h"
+#include "ClassicEngine.h"
 #include "GainRamp.h"
 #include <JuceHeader.h>
 #include <SkellCore/WorldLink.h>
@@ -54,8 +54,8 @@ public:
     humtune::KeyEstimator::Estimate getAutoKeyEstimate() const { return engine.getAutoKeyEstimate(); }
     humtune::KeyEstimator::Estimate applyAutoKeyEstimate();
 
-    // The scale selector and piano-key mask share one source of truth. Microtonal
-    // scales highlight approximate semitone keys while the DSP follows exact intervals.
+    // Classic uses the same 12-semitone mask as the piano. Fractional-scale
+    // definitions retain their stored IDs but are projected to semitones.
     static bool isNoteInScale (int scaleType, int root, int note)
     {
         const auto mask = humtune::ScaleQuantizer::approximateMask(scaleType, root);
@@ -136,7 +136,7 @@ private:
     // Receiver is always available, but sender must click SEND TO TUNE.
     skellcore::world::WorldLink skellKeyLink_{"skell.tune", "SkellyTune"};
     std::uint64_t lastAppliedSkellKey_ = 0;
-    humtune::AutoTuneEngine engine;
+    humtune::ClassicEngine engine;
     humtune::GainRamp inputGainRamp,outputGainRamp;
 
     std::atomic<float> inputLevel  { 0.0f };

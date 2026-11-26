@@ -15,6 +15,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'main' && github.event.pull_request.head.ref != 'master' && github.event.pull_request.head.ref != 'production' && !startsWith(github.event.pull_request.head.ref, 'release/') && github.event.pull_request.base.ref != 'production' && !startsWith(github.event.pull_request.base.ref, 'release/') }}
 
 jobs:
+  classic-regression:
+    name: Active Classic DSP regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - run: cmake -S . -B build-classic -DSKELLYTUNE_CLASSIC_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build-classic --parallel 2
+      - run: ctest --test-dir build-classic --output-on-failure
   dsp-regression:
     name: Offline DSP regression (Release)
     runs-on: ubuntu-latest

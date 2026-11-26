@@ -286,7 +286,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
     applyAppearance();
   };
   settingsButton.setName("Settings");
-  settingsButton.setTooltip("Formant, Low Latency and motion settings.");
+  settingsButton.setTooltip("Classic native formants, Low Latency and motion settings. Nonzero formant shift adds 1024 samples of latency.");
   settingsButton.getProperties().set("settingsGear", true);
   addAndMakeVisible(settingsButton);
   settingsButton.onClick = [this] {
@@ -304,7 +304,7 @@ HumHouseVocalTuneEditor::HumHouseVocalTuneEditor(HumHouseVocalTuneProcessor &p)
             parameter->endChangeGesture();
           }, lnf.palette.bodyText, scaleFactor()));
     };
-    addParameter(11, "Formant", "formantPreserve");
+    menu.addItem(11, "Classic: native formants", false, true);
     addParameter(1, "Low Latency", "lowLatencyMode");
     menu.addCustomItem(3, std::make_unique<SettingsRow>("Reduce motion", proc.getReducedMotion(),
         [safe] {

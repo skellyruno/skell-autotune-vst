@@ -94,8 +94,8 @@ HumHouseVocalTuneProcessor::createParameterLayout()
 
     // Voice range: the lowest note the tuner follows. Lower notes need more delay.
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::AutoTuneEngine::kNumRanges - 1,
-        humtune::AutoTuneEngine::kDefaultRange));
+        juce::ParameterID{"range", 1}, "Voice Range", 0, humtune::ClassicEngine::kNumRanges - 1,
+        humtune::ClassicEngine::kDefaultRange));
 
     // Default ON: selected high-voice ranges must not silently discard the
     // fundamental of a low/mid voice. Users can turn it OFF for the original
@@ -107,7 +107,7 @@ HumHouseVocalTuneProcessor::createParameterLayout()
         juce::ParameterID{"enabled", 1}, "Enabled", true));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"lowLatencyMode", 1}, "Low Latency (Experimental)", true));
+        juce::ParameterID{"lowLatencyMode", 1}, "Low Latency", true));
 
     // Hidden from the current editor but retained so older sessions/automation remain valid.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -267,8 +267,8 @@ void HumHouseVocalTuneProcessor::prepareToPlay (double sampleRate, int samplesPe
 {
     engine.setRangeProtection(parameterRefs.rangeProtection->load(std::memory_order_relaxed) > 0.5f);
     engine.setVoiceRange(static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed)));
-    engine.setLowLatencyFastHop(true);
     engine.setLowLatencyMode(parameterRefs.lowLatencyMode->load(std::memory_order_relaxed) > 0.5f);
+    engine.setFormantShiftSemitones(parameterRefs.formantShift->load(std::memory_order_relaxed));
     engine.prepare(sampleRate, samplesPerBlock);
     inputGainRamp.prepare(sampleRate,juce::Decibels::decibelsToGain(parameterRefs.inputGain->load(std::memory_order_relaxed)));
     outputGainRamp.prepare(sampleRate,juce::Decibels::decibelsToGain(parameterRefs.outputGain->load(std::memory_order_relaxed)));
@@ -295,7 +295,6 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const int scale        = extension > 0 ? extension + 2 : legacyScale;
     const float refFreq    = parameterRefs.referenceFreq->load(std::memory_order_relaxed);
     const bool stab        = parameterRefs.noteStabilizer->load(std::memory_order_relaxed) > 0.5f;
-    const bool formant     = parameterRefs.formantPreserve->load(std::memory_order_relaxed) > 0.5f;
     const float formantShift = parameterRefs.formantShift->load(std::memory_order_relaxed);
     const int range        = static_cast<int>(parameterRefs.range->load(std::memory_order_relaxed));
     const bool rangeProtection = parameterRefs.rangeProtection->load(std::memory_order_relaxed) > 0.5f;
@@ -322,20 +321,11 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     engine.setGlideMilliseconds(glideMs);
     engine.setReferenceFreq(refFreq);
     engine.setNoteStabilizer(stab);
-    engine.setFormantPreserve(formant);
     engine.setFormantShiftSemitones(formantShift);
     engine.setRangeProtection(rangeProtection);
     engine.setVoiceRange(range);
     engine.setLowLatencyMode(lowLatency);
     engine.setEnabled(on);
-
-    // The delay depends on the Voice Range: tell the host when it changes
-    if (engine.getLatencySamples() != reportedLatency)
-    {
-        reportedLatency = engine.getLatencySamples();
-        pendingLatency.store(reportedLatency);
-        triggerAsyncUpdate();
-    }
 
     // Host key/scale automation must work even while the editor is closed. Only
     // an explicit piano-key edit owns the custom mask. A stale keyboard projection
@@ -360,7 +350,15 @@ void HumHouseVocalTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     }
 
     // Process autotune
-    engine.process(buffer);
+    engine.process(buffer.getArrayOfWritePointers(), buffer.getNumChannels(), buffer.getNumSamples());
+
+    // Publish the actual prepared Classic/formant latency after processing.
+    if (engine.getLatencySamples() != reportedLatency)
+    {
+        reportedLatency = engine.getLatencySamples();
+        pendingLatency.store(reportedLatency);
+        triggerAsyncUpdate();
+    }
 
     // Output gain
     float outGain = juce::Decibels::decibelsToGain(outGainDb);

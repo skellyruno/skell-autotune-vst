@@ -39,6 +39,21 @@ endif()
 option(SKELLYTUNE_DSP_TESTS_ONLY "Build offline DSP regression executables without JUCE" OFF)
 option(SKELLYTUNE_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan for DSP-only tests" OFF)
 
+option(SKELLYTUNE_CLASSIC_TESTS_ONLY "Test the active Classic integration without JUCE" OFF)
+if(SKELLYTUNE_CLASSIC_TESTS_ONLY OR NOT SKELLYTUNE_DSP_TESTS_ONLY)
+    include(cmake/SkellyClassic.cmake)
+endif()
+if(SKELLYTUNE_CLASSIC_TESTS_ONLY)
+    enable_testing()
+    add_executable(classic_integration_regression tests/classic_integration_regression.cpp)
+    target_link_libraries(classic_integration_regression PRIVATE skellytune_classic)
+    add_test(NAME classic_integration_regression COMMAND classic_integration_regression)
+    add_executable(classic_formant_regression "${skellyclassicplayground_SOURCE_DIR}/tests/playground_formant_test.cpp")
+    target_link_libraries(classic_formant_regression PRIVATE skellytune_classic)
+    add_test(NAME classic_formant_regression COMMAND classic_formant_regression)
+    return()
+endif()
+
 if(SKELLYTUNE_DSP_TESTS_ONLY)
     if(SKELLYTUNE_ENABLE_SANITIZERS)
         if(MSVC OR NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -305,6 +320,7 @@ target_link_libraries(HumHouseVocalTune
         SkellCore::UI
     PUBLIC
         skellytune_dsp_configuration
+        skellytune_classic
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
